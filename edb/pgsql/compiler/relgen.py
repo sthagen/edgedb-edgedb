@@ -39,6 +39,7 @@ from . import astutils
 from . import context
 from . import dbobj
 from . import dispatch
+from . import expr as exprcomp
 from . import output
 from . import pathctx
 from . import relctx
@@ -908,15 +909,12 @@ def process_set_as_membership_expr(
         with newctx.subrel() as _, _.newscope() as subctx:
             right_rvar = get_set_rvar(right_arg, ctx=subctx)
             right_expr = pathctx.get_rvar_path_var(
-                right_rvar, right_arg.path_id,
-                aspect='value', env=subctx.env)
+                right_rvar, right_arg.path_id, aspect='value', env=subctx.env)
+            right_expr = output.output_as_value(right_expr, env=subctx.env)
 
-            if right_expr.nullable:
-                op = 'IS NOT DISTINCT FROM'
-            else:
-                op = '='
+            check_expr = exprcomp.compile_operator(
+                expr, [left_expr, right_expr], ctx=ctx)
 
-            check_expr = astutils.new_binop(left_expr, right_expr, op=op)
             check_expr = pgast.FuncCall(
                 name=('bool_or',), args=[check_expr])
 

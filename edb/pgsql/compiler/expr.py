@@ -305,6 +305,13 @@ def compile_OperatorCall(
             f'in simple expressions')
 
     args = [dispatch.compile(a.expr, ctx=ctx) for a in expr.args]
+
+    return compile_operator(expr, args, ctx=ctx)
+
+
+def compile_operator(expr: irast.OperatorCall,
+                     args: typing.List[pgast.Base], *,
+                     ctx: context.CompilerContextLevel) -> pgast.Base:
     if expr.operator_kind is ql_ft.OperatorKind.INFIX:
         lexpr, rexpr = args
     elif expr.operator_kind is ql_ft.OperatorKind.PREFIX:
@@ -335,6 +342,9 @@ def compile_OperatorCall(
                         name=(expr.sql_operator[2],)
                     )
                 )
+    elif expr.origin_name is not None:
+        sql_oper = common.get_operator_backend_name(
+            expr.origin_name, expr.origin_module_id)[1]
     else:
         sql_oper = common.get_operator_backend_name(
             expr.func_shortname, expr.func_module_id)[1]
