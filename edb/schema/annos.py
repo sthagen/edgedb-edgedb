@@ -260,3 +260,8 @@ class DeleteAnnotationValue(AnnotationValueCommand, sd.DeleteObject):
         schema = self.del_annotation(schema, self.classname, attrsubj.scls)
 
         return super().apply(schema, context)
+
+
+class RebaseAnnotationValue(AnnotationValueCommand,
+                            inheriting.RebaseInheritingObject):
+    pass

@@ -679,3 +679,8 @@ class AlterConstraint(ConstraintCommand,
 class DeleteConstraint(ConstraintCommand, s_func.DeleteCallableObject):
     astnode = [qlast.DropConcreteConstraint, qlast.DropConstraint]
     referenced_astnode = qlast.DropConcreteConstraint
+
+
+class RebaseConstraint(ConstraintCommand,
+                       inheriting.RebaseInheritingObject):
+    pass

@@ -716,13 +716,15 @@ class InheritingObject(derivable.DerivableObject):
                                   new_schema=new_schema)
 
             if old and new:
-                rebase = sd.ObjectCommandMeta.get_command_class(
+                # Every InheritingObject must have a corresponding
+                # rebase class.
+                rebase = sd.ObjectCommandMeta.get_command_class_or_die(
                     RebaseInheritingObject, type(new))
 
                 old_base_names = old.get_base_names(old_schema)
                 new_base_names = new.get_base_names(new_schema)
 
-                if old_base_names != new_base_names and rebase is not None:
+                if old_base_names != new_base_names:
                     removed, added = delta_bases(
                         old_base_names, new_base_names)
 

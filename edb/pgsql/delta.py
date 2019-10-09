@@ -957,6 +957,12 @@ class DeleteAnnotationValue(
     pass
 
 
+class RebaseAnnotationValue(
+        AnnotationValueCommand, RebaseObject,
+        adapts=s_anno.RebaseAnnotationValue):
+    pass
+
+
 class ConstraintCommand(sd.ObjectCommand,
                         metaclass=ReferencedObjectCommandMeta):
     _table = metaschema.get_metaclass_table(s_constr.Constraint)
@@ -1065,6 +1071,12 @@ class DeleteConstraint(
 
         schema, _ = super().apply(schema, context)
         return schema, constraint
+
+
+class RebaseConstraint(
+        ConstraintCommand, RebaseObject,
+        adapts=s_constr.RebaseConstraint):
+    pass
 
 
 class ViewCapableObjectMetaCommand(ObjectMetaCommand):
