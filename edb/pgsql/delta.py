@@ -1024,9 +1024,11 @@ class AlterConstraint(
 
         subcommands = list(self.get_subcommands())
         if (not subcommands or
-                isinstance(subcommands[0], s_constr.RenameConstraint)):
-            # This is a pure rename, so everything had been handled by
-            # RenameConstraint above.
+                all(isinstance(sc, (s_constr.RenameConstraint,
+                                    s_constr.RebaseConstraint))
+                    for sc in subcommands)):
+            # This is a pure fragment, so everything had been handled by
+            # RenameConstraint or RebaseConstraint.
             return schema
 
         if subject is not None:
