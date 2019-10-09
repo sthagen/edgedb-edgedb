@@ -15,7 +15,5 @@ jobs:
 
     steps:
     - name: Build (Debian Stretch)
-      uses: edgedb/edgedb-pkg/integration/containers/python/debian-stretch@gha
-      env:
-        SRC_REVISION: ${{ github.sha }}
-        PKG_REVISION: "<current-date>"
+      run: |
+        echo "Foo"
