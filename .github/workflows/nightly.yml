@@ -12,8 +12,21 @@ jobs:
       max-parallel: 4
       matrix:
         os: [ubuntu-latest]
+        include:
+          - os: ubuntu-latest
+            platform: debian
+            platform_version: stretch
 
     steps:
-    - name: Build (Debian Stretch)
-      run: |
-        echo "Foo"
+    # - name: Build (${{ matrix.platform }} ${{ matrix.platform_vesion }})
+    #   uses: edgedb/edgedb-pkg/integration/containers/python/debian-stretch@gha
+    #   if: matrix.platform == 'debian' && matrix.platform_version == 'stretch'
+    #   env:
+    #     SRC_REVISION: ${{ github.sha }}
+    #     PKG_REVISION: "<current-date>"
+
+    - name: Test
+      uses: edgedb/edgedb-pkg/integration/containers/systemd/debian-stretch@gha
+      if: matrix.platform == 'debian' && matrix.platform_version == 'stretch'
+      with:
+        args: integration/${{ matrix.platform }}/test.sh
