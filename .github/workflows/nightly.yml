@@ -18,15 +18,15 @@ jobs:
             platform_version: stretch
 
     steps:
-    - name: Build (${{ matrix.platform }} ${{ matrix.platform_version }})
-      uses: edgedb/edgedb-pkg/integration/containers/python/debian-stretch@gha
-      if: matrix.platform == 'debian' && matrix.platform_version == 'stretch'
-      env:
-        SRC_REVISION: "${{ github.sha }}"
-        PKG_REVISION: "<current-date>"
-        PKG_SUBDIST: "nightly"
-        PKG_PLATFORM: "${{ matrix.platform }}"
-        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+    # - name: Build (${{ matrix.platform }} ${{ matrix.platform_version }})
+    #   uses: edgedb/edgedb-pkg/integration/containers/python/debian-stretch@gha
+    #   if: matrix.platform == 'debian' && matrix.platform_version == 'stretch'
+    #   env:
+    #     SRC_REVISION: "${{ github.sha }}"
+    #     PKG_REVISION: "<current-date>"
+    #     PKG_SUBDIST: "nightly"
+    #     PKG_PLATFORM: "${{ matrix.platform }}"
+    #     PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
 
     - name: Test (${{ matrix.platform }} ${{ matrix.platform_version }})
       uses: edgedb/edgedb-pkg/integration/containers/test/debian-stretch@gha
