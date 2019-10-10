@@ -16,6 +16,7 @@ jobs:
           - os: ubuntu-latest
             platform: debian
             platform_version: stretch
+
     steps:
     - name: Build (${{ matrix.platform }} ${{ matrix.platform_version }})
       uses: edgedb/edgedb-pkg/integration/containers/python/debian-stretch@gha
@@ -24,7 +25,34 @@ jobs:
         SRC_REVISION: "${{ github.sha }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
 
     - name: Test (${{ matrix.platform }} ${{ matrix.platform_version }})
       uses: edgedb/edgedb-pkg/integration/containers/test/debian-stretch@gha
       if: matrix.platform == 'debian' && matrix.platform_version == 'stretch'
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+
+  publish:
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      max-parallel: 4
+      matrix:
+        os: [ubuntu-latest]
+        include:
+          - os: ubuntu-latest
+            platform: debian
+            platform_version: stretch
+
+    steps:
+    - name: Publish (${{ matrix.platform }} ${{ matrix.platform_version }})
+      uses: edgedb/edgedb-pkg/integration/containers/upload/debian@gha
+      if: matrix.platform == 'debian' || matrix.platform == 'ubuntu'
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
