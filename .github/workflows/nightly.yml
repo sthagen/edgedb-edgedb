@@ -18,7 +18,12 @@ jobs:
             platform_version: stretch
 
     steps:
-    - name: Build (${{ matrix.platform }} ${{ matrix.platform_vesion }})
+    - uses: actions/checkout@v1
+      with:
+        fetch-depth: 50
+        submodules: true
+
+    - name: Build (${{ matrix.platform }} ${{ matrix.platform_version }})
       uses: edgedb/edgedb-pkg/integration/containers/python/debian-stretch@gha
       if: matrix.platform == 'debian' && matrix.platform_version == 'stretch'
       env:
@@ -26,8 +31,8 @@ jobs:
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
 
-    - name: Test
+    - name: Test (${{ matrix.platform }} ${{ matrix.platform_version }})
       uses: docker://debian:stretch
       if: matrix.platform == 'debian' && matrix.platform_version == 'stretch'
       with:
-        entrypoint: .ci/test-package-debian.sh
+        entrypoint: /github/workspace/.ci/test-package-debian.sh

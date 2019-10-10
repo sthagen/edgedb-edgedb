@@ -5,6 +5,7 @@ set -ex
 re="edgedb-([[:digit:]]+(-(dev|alpha|beta|rc)[[:digit:]]+)?).*\.deb"
 slot="$(ls artifacts | sed -n -E "s/${re}/\1/p")"
 
+pwd
 apt-get update
 apt install -y ./artifacts/edgedb-common_*_amd64.deb \
                ./artifacts/edgedb-${slot}_*_amd64.deb
