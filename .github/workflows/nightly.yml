@@ -66,3 +66,4 @@ jobs:
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+        PACKAGE_UPLOAD_SSH_KEY: "${{ secrets.PACKAGE_UPLOAD_SSH_KEY }}"
