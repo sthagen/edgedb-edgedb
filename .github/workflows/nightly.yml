@@ -7,20 +7,33 @@ on:
 
 jobs:
   build:
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       max-parallel: 4
       matrix:
-        os: [ubuntu-latest]
+        target: [debian-stretch, centos-7]
         include:
-          - os: ubuntu-latest
+          - target: debian-stretch
             platform: debian
             platform_version: stretch
+          - target: centos-7
+            platform: centos
+            platform_version: 7
 
     steps:
     - name: Build (${{ matrix.platform }} ${{ matrix.platform_version }})
       uses: edgedb/edgedb-pkg/integration/containers/python/debian-stretch@gha
-      if: matrix.platform == 'debian' && matrix.platform_version == 'stretch'
+      if: matrix.target == 'debian-stretch'
+      env:
+        SRC_REVISION: "${{ github.sha }}"
+        PKG_REVISION: "<current-date>"
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+
+    - name: Build (${{ matrix.platform }} ${{ matrix.platform_version }})
+      uses: edgedb/edgedb-pkg/integration/containers/python/centos-7@gha
+      if: matrix.target == 'centos-7'
       env:
         SRC_REVISION: "${{ github.sha }}"
         PKG_REVISION: "<current-date>"
@@ -30,11 +43,20 @@ jobs:
 
     - name: Test (${{ matrix.platform }} ${{ matrix.platform_version }})
       uses: edgedb/edgedb-pkg/integration/containers/test/debian-stretch@gha
-      if: matrix.platform == 'debian' && matrix.platform_version == 'stretch'
+      if: matrix.target == 'debian-stretch'
       env:
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+
+    - name: Test (${{ matrix.platform }} ${{ matrix.platform_version }})
+      uses: edgedb/edgedb-pkg/integration/containers/test/debian-stretch@gha
+      if: matrix.target == 'centos-7'
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+
 
     - uses: actions/upload-artifact@v1
       with:
@@ -43,15 +65,18 @@ jobs:
 
   publish:
     needs: build
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       max-parallel: 4
       matrix:
-        os: [ubuntu-latest]
+        target: [debian-stretch, centos-7]
         include:
-          - os: ubuntu-latest
+          - target: debian-stretch
             platform: debian
             platform_version: stretch
+          - target: centos-7
+            platform: centos
+            platform_version: 7
 
     steps:
     - uses: actions/download-artifact@v1
@@ -61,7 +86,16 @@ jobs:
 
     - name: Publish (${{ matrix.platform }} ${{ matrix.platform_version }})
       uses: edgedb/edgedb-pkg/integration/containers/upload/debian@gha
-      if: matrix.platform == 'debian' || matrix.platform == 'ubuntu'
+      if: matrix.target == 'debian-stretch'
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+        PACKAGE_UPLOAD_SSH_KEY: "${{ secrets.PACKAGE_UPLOAD_SSH_KEY }}"
+
+    - name: Publish (${{ matrix.platform }} ${{ matrix.platform_version }})
+      uses: edgedb/edgedb-pkg/integration/containers/upload/debian@gha
+      if: matrix.target == 'centos-7'
       env:
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
@@ -70,7 +104,15 @@ jobs:
 
     - name: Test Published (${{ matrix.platform }} ${{ matrix.platform_version }})
       uses: edgedb/edgedb-pkg/integration/containers/testpublished/debian@gha
-      if: matrix.platform == 'debian' || matrix.platform == 'ubuntu'
+      if: matrix.target == 'debian-stretch'
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+
+    - name: Test Published (${{ matrix.platform }} ${{ matrix.platform_version }})
+      uses: edgedb/edgedb-pkg/integration/containers/testpublished/debian@gha
+      if: matrix.target == 'centos-7'
       env:
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
