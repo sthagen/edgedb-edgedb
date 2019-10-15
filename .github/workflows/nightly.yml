@@ -67,3 +67,11 @@ jobs:
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
         PACKAGE_UPLOAD_SSH_KEY: "${{ secrets.PACKAGE_UPLOAD_SSH_KEY }}"
+
+    - name: Test Published (${{ matrix.platform }} ${{ matrix.platform_version }})
+      uses: edgedb/edgedb-pkg/integration/containers/testpublished/debian@gha
+      if: matrix.platform == 'debian' || matrix.platform == 'ubuntu'
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
