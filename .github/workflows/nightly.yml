@@ -21,7 +21,7 @@ jobs:
             platform_version: 7
 
     steps:
-    - name: Build (${{ matrix.platform }} ${{ matrix.platform_version }})
+    - name: Build (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/containers/python/debian-stretch@gha
       if: matrix.target == 'debian-stretch'
       env:
@@ -31,7 +31,7 @@ jobs:
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
 
-    - name: Build (${{ matrix.platform }} ${{ matrix.platform_version }})
+    - name: Build (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/containers/python/centos-7@gha
       if: matrix.target == 'centos-7'
       env:
@@ -41,7 +41,7 @@ jobs:
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
 
-    - name: Test (${{ matrix.platform }} ${{ matrix.platform_version }})
+    - name: Test (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/containers/test/debian-stretch@gha
       if: matrix.target == 'debian-stretch'
       env:
@@ -49,7 +49,7 @@ jobs:
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
 
-    - name: Test (${{ matrix.platform }} ${{ matrix.platform_version }})
+    - name: Test (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/containers/test/centos-7@gha
       if: matrix.target == 'centos-7'
       env:
@@ -84,7 +84,7 @@ jobs:
         name: builds-${{ matrix.target }}
         path: artifacts/${{ matrix.target }}
 
-    - name: Publish (${{ matrix.platform }} ${{ matrix.platform_version }})
+    - name: Publish (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/containers/upload/debian@gha
       if: matrix.target == 'debian-stretch'
       env:
@@ -93,7 +93,7 @@ jobs:
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
         PACKAGE_UPLOAD_SSH_KEY: "${{ secrets.PACKAGE_UPLOAD_SSH_KEY }}"
 
-    - name: Publish (${{ matrix.platform }} ${{ matrix.platform_version }})
+    - name: Publish (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/containers/upload/redhat@gha
       if: matrix.target == 'centos-7'
       env:
@@ -102,7 +102,7 @@ jobs:
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
         PACKAGE_UPLOAD_SSH_KEY: "${{ secrets.PACKAGE_UPLOAD_SSH_KEY }}"
 
-    - name: Test Published (${{ matrix.platform }} ${{ matrix.platform_version }})
+    - name: Test Published (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/containers/testpublished/debian-stretch@gha
       if: matrix.target == 'debian-stretch'
       env:
@@ -110,10 +110,26 @@ jobs:
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
 
-    - name: Test Published (${{ matrix.platform }} ${{ matrix.platform_version }})
+    - name: Test Published (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/containers/testpublished/centos-7@gha
       if: matrix.target == 'centos-7'
       env:
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+
+    - uses: actions/checkout@v1
+      with:
+        repository: edgedb/edgedb-docker
+        path: dockerfile
+
+    # - name: Publish Docker Image (${{ matrix.target }})
+    #   uses: elgohr/Publish-Docker-Github-Action@2.6
+    #   with:
+    #     name: edgedb/edgedb
+    #     username: ${{ secrets.DOCKER_USERNAME }}
+    #     password: ${{ secrets.DOCKER_PASSWORD }}
+    #     snapshot: true
+    #     dockerfile: dockerfile/Dockerfile
+    #     workdir: dockerfile
+    #     buildargs: version=${{ steps.testpublished.outputs.edb-version-slot }},subdist=.nightly
