@@ -138,7 +138,7 @@ jobs:
       uses: elgohr/Publish-Docker-Github-Action@2.6
       if: matrix.target == 'debian-stretch'
       with:
-        name: edgedb/edgedb
+        name: edgedb/edgedb:nightly
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
         snapshot: true
