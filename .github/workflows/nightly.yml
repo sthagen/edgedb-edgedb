@@ -136,6 +136,7 @@ jobs:
 
     - name: Publish Docker Image (${{ matrix.target }})
       uses: elgohr/Publish-Docker-Github-Action@2.6
+      if: matrix.target == 'debian-stretch'
       with:
         name: edgedb/edgedb
         username: ${{ secrets.DOCKER_USERNAME }}
