@@ -107,6 +107,5 @@ jobs:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
         snapshot: true
-        dockerfile: dockerfile/Dockerfile
         workdir: dockerfile
         buildargs: version=${{ steps.describe.outputs.edb-version-slot }},subdist=.nightly
