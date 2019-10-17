@@ -92,6 +92,17 @@ jobs:
   build-macos:
     runs-on: macos-10.14
 
+    strategy:
+      max-parallel: 4
+      matrix:
+        target: [
+          macos-10.14,
+        ]
+        include:
+          - target: macos-10.14
+            platform: macos
+            platform_version: 10.14
+
     steps:
     - uses: actions/checkout@v1
       with:
@@ -99,21 +110,28 @@ jobs:
         ref: gha
         path: edgedb/edgedb-pkg
 
-    - name: Build (macOS)
+    - name: Build (${{ matrix.target }}})
       env:
         PKG_SUBDIST: "nightly"
-        PKG_PLATFORM: "macOS"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
       run: |
         edgedb-pkg/integration/macos/build.sh
 
-    - name: Test (macOS)
+    - name: Test (${{ matrix.target }})
       env:
         PKG_SUBDIST: "nightly"
-        PKG_PLATFORM: "macOS"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
       run: |
         edgedb-pkg/integration/macos/test.sh
 
-#   publish:
+    - uses: actions/upload-artifact@v1
+      with:
+        name: builds-${{ matrix.target }}
+        path: artifacts/${{ matrix.target }}
+
+#   publish-linux:
 #     needs: [build-linux, build-macos]
 #     runs-on: ubuntu-latest
 #     strategy:
@@ -223,3 +241,46 @@ jobs:
 #         snapshot: true
 #         workdir: dockerfile
 #         buildargs: version=${{ steps.describe.outputs.edb-version-slot }},subdist=.nightly
+
+  publish-macos:
+    needs: [build-macos]
+    runs-on: macos-10.14
+    strategy:
+      max-parallel: 4
+      matrix:
+        target: [
+          macos-10.14,
+        ]
+        include:
+          - target: macos-10.14
+            platform: macos
+            platform_version: 10.14
+
+    steps:
+    - uses: actions/download-artifact@v1
+      with:
+        name: builds-${{ matrix.target }}
+        path: artifacts/${{ matrix.target }}
+
+    - uses: actions/checkout@v1
+      with:
+        repository: edgedb/edgedb-pkg
+        ref: gha
+        path: edgedb/edgedb-pkg
+
+    - name: Describe
+      id: describe
+      uses: edgedb/edgedb-pkg/integration/containers/describe/debian@gha
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+
+    - name: Publish (${{ matrix.target }})
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+        PKG_VERSION_SLOT: "${{ steps.describe.outputs.edb-version-slot }}"
+      run: |
+        edgedb-pkg/integration/macos/publish.sh
