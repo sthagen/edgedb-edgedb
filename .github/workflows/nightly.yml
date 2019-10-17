@@ -161,11 +161,9 @@ jobs:
 
 #     - name: Describe
 #       id: describe
-#       uses: edgedb/edgedb-pkg/integration/containers/describe/debian@gha
-#       env:
-#         PKG_SUBDIST: "nightly"
-#         PKG_PLATFORM: "${{ matrix.platform }}"
-#         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+#       uses: edgedb/action-describe-edgedb-package-artifact@master
+#       with:
+#         target: "${{ matrix.target }}"
 
 #     - name: Publish (${{ matrix.target }})
 #       uses: edgedb/edgedb-pkg/integration/containers/upload/debian@gha
@@ -174,7 +172,7 @@ jobs:
 #         PKG_SUBDIST: "nightly"
 #         PKG_PLATFORM: "${{ matrix.platform }}"
 #         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.edb-version-slot }}"
+#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 #         PACKAGE_UPLOAD_SSH_KEY: "${{ secrets.PACKAGE_UPLOAD_SSH_KEY }}"
 
 #     - name: Test Published (${{ matrix.target }})
@@ -184,7 +182,7 @@ jobs:
 #         PKG_SUBDIST: "nightly"
 #         PKG_PLATFORM: "${{ matrix.platform }}"
 #         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.edb-version-slot }}"
+#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 
 #     - name: Publish (${{ matrix.target }})
 #       uses: edgedb/edgedb-pkg/integration/containers/upload/debian@gha
@@ -193,7 +191,7 @@ jobs:
 #         PKG_SUBDIST: "nightly"
 #         PKG_PLATFORM: "${{ matrix.platform }}"
 #         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.edb-version-slot }}"
+#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 #         PACKAGE_UPLOAD_SSH_KEY: "${{ secrets.PACKAGE_UPLOAD_SSH_KEY }}"
 
 #     - name: Test Published (${{ matrix.target }})
@@ -203,7 +201,7 @@ jobs:
 #         PKG_SUBDIST: "nightly"
 #         PKG_PLATFORM: "${{ matrix.platform }}"
 #         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.edb-version-slot }}"
+#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 
 #     - name: Publish (${{ matrix.target }})
 #       uses: edgedb/edgedb-pkg/integration/containers/upload/redhat@gha
@@ -212,7 +210,7 @@ jobs:
 #         PKG_SUBDIST: "nightly"
 #         PKG_PLATFORM: "${{ matrix.platform }}"
 #         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.edb-version-slot }}"
+#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 #         PACKAGE_UPLOAD_SSH_KEY: "${{ secrets.PACKAGE_UPLOAD_SSH_KEY }}"
 
 #     - name: Test Published (${{ matrix.target }})
@@ -222,7 +220,7 @@ jobs:
 #         PKG_SUBDIST: "nightly"
 #         PKG_PLATFORM: "${{ matrix.platform }}"
 #         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.edb-version-slot }}"
+#         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 
 
 #     - uses: actions/checkout@v1
@@ -240,7 +238,7 @@ jobs:
 #         password: ${{ secrets.DOCKER_PASSWORD }}
 #         snapshot: true
 #         workdir: dockerfile
-#         buildargs: version=${{ steps.describe.outputs.edb-version-slot }},subdist=.nightly
+#         buildargs: version=${{ steps.describe.outputs.version-slot }},subdist=.nightly
 
   publish-macos:
     needs: [build-macos]
@@ -270,17 +268,15 @@ jobs:
 
     - name: Describe
       id: describe
-      uses: edgedb/edgedb-pkg/integration/containers/describe/debian@gha
-      env:
-        PKG_SUBDIST: "nightly"
-        PKG_PLATFORM: "${{ matrix.platform }}"
-        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+      uses: edgedb/action-describe-edgedb-package-artifact@master
+      with:
+        target: "${{ matrix.target }}"
 
     - name: Publish (${{ matrix.target }})
       env:
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-        PKG_VERSION_SLOT: "${{ steps.describe.outputs.edb-version-slot }}"
+        PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
       run: |
         edgedb-pkg/integration/macos/publish.sh
