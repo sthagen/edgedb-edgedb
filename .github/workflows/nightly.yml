@@ -110,21 +110,27 @@ jobs:
         ref: gha
         path: edgedb/edgedb-pkg
 
-    - name: Build (${{ matrix.target }}})
-      env:
-        PKG_SUBDIST: "nightly"
-        PKG_PLATFORM: "${{ matrix.platform }}"
-        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-      run: |
-        edgedb-pkg/integration/macos/build.sh
+    # - name: Build (${{ matrix.target }}})
+    #   env:
+    #     PKG_SUBDIST: "nightly"
+    #     PKG_PLATFORM: "${{ matrix.platform }}"
+    #     PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+    #   run: |
+    #     edgedb-pkg/integration/macos/build.sh
 
-    - name: Test (${{ matrix.target }})
-      env:
-        PKG_SUBDIST: "nightly"
-        PKG_PLATFORM: "${{ matrix.platform }}"
-        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+    # - name: Test (${{ matrix.target }})
+    #   env:
+    #     PKG_SUBDIST: "nightly"
+    #     PKG_PLATFORM: "${{ matrix.platform }}"
+    #     PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+    #   run: |
+    #     edgedb-pkg/integration/macos/test.sh
+
+    - env:
+        TARGET: ${{ matrix.target }}
       run: |
-        edgedb-pkg/integration/macos/test.sh
+        mkdir -p artifacts/${TARGET}/
+        touch artifacts/${TARGET}/edgedb-1-alpha2-123.img
 
     - uses: actions/upload-artifact@v1
       with:
@@ -272,11 +278,11 @@ jobs:
       with:
         target: "${{ matrix.target }}"
 
-    - name: Publish (${{ matrix.target }})
-      env:
-        PKG_SUBDIST: "nightly"
-        PKG_PLATFORM: "${{ matrix.platform }}"
-        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-        PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
-      run: |
-        edgedb-pkg/integration/macos/publish.sh
+    # - name: Publish (${{ matrix.target }})
+    #   env:
+    #     PKG_SUBDIST: "nightly"
+    #     PKG_PLATFORM: "${{ matrix.platform }}"
+    #     PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+    #     PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
+    #   run: |
+    #     edgedb-pkg/integration/macos/publish.sh
