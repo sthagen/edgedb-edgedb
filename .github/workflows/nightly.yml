@@ -110,27 +110,21 @@ jobs:
         ref: gha
         path: edgedb/edgedb-pkg
 
-    # - name: Build (${{ matrix.target }}})
-    #   env:
-    #     PKG_SUBDIST: "nightly"
-    #     PKG_PLATFORM: "${{ matrix.platform }}"
-    #     PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-    #   run: |
-    #     edgedb-pkg/integration/macos/build.sh
-
-    # - name: Test (${{ matrix.target }})
-    #   env:
-    #     PKG_SUBDIST: "nightly"
-    #     PKG_PLATFORM: "${{ matrix.platform }}"
-    #     PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-    #   run: |
-    #     edgedb-pkg/integration/macos/test.sh
-
-    - env:
-        TARGET: ${{ matrix.target }}
+    - name: Build (${{ matrix.target }}})
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
       run: |
-        mkdir -p artifacts/${TARGET}/
-        echo 'foo' > artifacts/${TARGET}/edgedb-1-alpha2-123.img
+        edgedb-pkg/integration/macos/build.sh
+
+    - name: Test (${{ matrix.target }})
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+      run: |
+        edgedb-pkg/integration/macos/test.sh
 
     - uses: actions/upload-artifact@v1
       with:
@@ -272,30 +266,17 @@ jobs:
         ref: gha
         path: edgedb/edgedb-pkg
 
-    - name: List
-      env:
-        TARGET: "${{ matrix.target }}"
-      run:
-        ls -al artifacts/${TARGET}
-
     - name: Describe
       id: describe
       uses: edgedb/edgedb-pkg/integration/actions/describe-artifact@gha
       with:
         target: "${{ matrix.target }}"
-        path: "${{ github.workspace }}"
 
-    - name: Check slot
+    - name: Publish (${{ matrix.target }})
       env:
-        SLOT: ${{ steps.describe.outputs.version-slot }}
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "${{ matrix.platform }}"
+        PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+        PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
       run: |
-        test -n "${SLOT}"
-
-    # - name: Publish (${{ matrix.target }})
-    #   env:
-    #     PKG_SUBDIST: "nightly"
-    #     PKG_PLATFORM: "${{ matrix.platform }}"
-    #     PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
-    #     PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
-    #   run: |
-    #     edgedb-pkg/integration/macos/publish.sh
+        edgedb-pkg/integration/macos/publish.sh
