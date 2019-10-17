@@ -6,7 +6,7 @@ on:
       - nightly
 
 jobs:
-  build:
+  build-linux:
     runs-on: ubuntu-latest
     strategy:
       max-parallel: 4
@@ -45,8 +45,32 @@ jobs:
         name: builds-${{ matrix.target }}
         path: artifacts/${{ matrix.target }}
 
+  build-macos:
+    runs-on: macos-10.14
+
+    steps:
+    - uses: actions/checkout@v1
+      with:
+        repository: edgedb/edgedb-pkg
+        ref: gha
+        path: edgedb/edgedb-pkg
+
+    - name: Build (macOS)
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "macOS"
+      run: |
+        edgedb-pkg/integration/macos/build.sh
+
+    - name: Test (macOS)
+      env:
+        PKG_SUBDIST: "nightly"
+        PKG_PLATFORM: "macOS"
+      run: |
+        edgedb-pkg/integration/macos/test.sh
+
   publish:
-    needs: build
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     strategy:
       max-parallel: 4
