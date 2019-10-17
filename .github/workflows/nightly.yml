@@ -268,7 +268,7 @@ jobs:
 
     - name: Describe
       id: describe
-      uses: edgedb/action-describe-edgedb-package-artifact@master
+      uses: edgedb/edgedb-pkg/integration/actions/describe-artifact@gha
       with:
         target: "${{ matrix.target }}"
 
