@@ -1,0 +1,58 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - master
+      - ci
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-18.04
+
+    steps:
+    - uses: actions/checkout@v1
+      with:
+        fetch-depth: 50
+        submodules: true
+
+    - name: Set up Python
+      uses: actions/setup-python@v1
+      with:
+        python-version: 3.7
+
+    - uses: actions/cache@v1
+      with:
+        path: ~/.cache/pip
+        key: edbdeps-pip-${{ github.ref }}
+        restore-keys: |
+          edbdeps-pip-
+
+    - uses: actions/cache@v1
+      with:
+        path: build
+        key: edbbuild-${{ github.ref }}
+        restore-keys: |
+          edbbuild-
+
+    - name: Install system deps
+      run: |
+        sudo apt-get install -y uuid-dev libreadline-dev bison flex
+
+    - name: Install Python deps
+      run: |
+        pip install --upgrade setuptools pip wheel
+        pip download --dest=/tmp/deps .[test,docs]
+        pip install -U --no-index --find-links=/tmp/deps /tmp/deps/*
+        pip install git+https://github.com/edgedb/edgedb-python.git
+
+    - name: Build
+      run: |
+        pip install --no-deps -e .[test,docs]
+
+    - name: Test
+      run: |
+        edb test -j2 -v
