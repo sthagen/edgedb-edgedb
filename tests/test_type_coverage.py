@@ -248,13 +248,13 @@ class TypeCoverageTests(unittest.TestCase):
         self.assertFunctionCoverage(EDB_DIR / "schema", 15.45)
 
     def test_type_coverage_server(self) -> None:
-        self.assertFunctionCoverage(EDB_DIR / "server", 6.67)
+        self.assertFunctionCoverage(EDB_DIR / "server", 7.13)
 
     def test_type_coverage_server_cache(self) -> None:
         self.assertFunctionCoverage(EDB_DIR / "server" / "cache", 0)
 
     def test_type_coverage_server_compiler(self) -> None:
-        self.assertFunctionCoverage(EDB_DIR / "server" / "compiler", 12.77)
+        self.assertFunctionCoverage(EDB_DIR / "server" / "compiler", 14.58)
 
     def test_type_coverage_server_config(self) -> None:
         self.assertFunctionCoverage(EDB_DIR / "server" / "config", 18.75)
