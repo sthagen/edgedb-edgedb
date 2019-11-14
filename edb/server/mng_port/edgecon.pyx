@@ -292,9 +292,10 @@ cdef class EdgeConnection:
         return params
 
     async def _get_role_record(self, user):
-        role_query = self.port.get_server().get_sys_query('role')
-
-        json_data = await self.backend.pgcon.parse_execute_json(
+        conn = self.backend.pgcon
+        server = self.port.get_server()
+        role_query = await server.get_sys_query(conn, 'role')
+        json_data = await conn.parse_execute_json(
             role_query, b'__sys_role',
             dbver=0, use_prep_stmt=True, args=(user,),
         )
@@ -462,7 +463,9 @@ cdef class EdgeConnection:
             # generate a mock verifier using a salt derived from the
             # received user name and the cluster mock auth nonce.
             # The same approach is taken by Postgres.
-            nonce = self.port.get_server().get_instance_data('mock_auth_nonce')
+            server = self.port.get_server()
+            nonce = await server.get_instance_data(
+                self.backend.pgcon, 'mock_auth_nonce')
             salt = hashlib.sha256(nonce.encode() + user.encode()).digest()
 
             verifier = scram.SCRAMVerifier(
@@ -611,6 +614,7 @@ cdef class EdgeConnection:
                         b';'.join(query_unit.sql), ignore_data=True)
                     if query_unit.config_ops is not None:
                         await self.dbview.apply_config_ops(
+                            self.backend.pgcon,
                             query_unit.config_ops)
             except ConnectionAbortedError:
                 raise
@@ -835,10 +839,12 @@ cdef class EdgeConnection:
         data = await self.backend.pgcon.simple_query(
             b';'.join(query_unit.sql), ignore_data=False)
         if data:
+            # Prefer encoded op produced by the SQL command.
             config_ops = [config.Operation.from_json(r[0]) for r in data]
         else:
-            config_ops = []
-        await self.dbview.apply_config_ops(config_ops)
+            # Otherwise, fall back to staticly evaluated op.
+            config_ops = query_unit.config_ops
+        await self.dbview.apply_config_ops(self.backend.pgcon, config_ops)
 
         # If this is a backend configuration setting we also
         # need to make sure it has been loaded.
@@ -897,6 +903,7 @@ cdef class EdgeConnection:
                     )
                     if query_unit.config_ops is not None:
                         await self.dbview.apply_config_ops(
+                            self.backend.pgcon,
                             query_unit.config_ops)
             except ConnectionAbortedError:
                 raise

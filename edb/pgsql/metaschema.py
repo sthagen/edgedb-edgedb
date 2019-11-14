@@ -44,6 +44,8 @@ from edb.schema import objects as s_obj
 from edb.schema import pseudo as s_pseudo
 from edb.schema import types as s_types
 
+from edb.server import defines
+
 from . import common
 from . import dbops
 from . import types
@@ -104,13 +106,15 @@ class GetObjectMetadata(dbops.Function):
     """Return EdgeDB metadata associated with a backend object."""
     text = '''
         SELECT
-            CASE WHEN substr(d, 1, 5) = '$EDB:'
-            THEN substr(d, 6)::jsonb
-            ELSE '{}'::jsonb
+            CASE WHEN substr(d, 1, char_length({prefix})) = {prefix}
+            THEN substr(d, char_length({prefix}) + 1)::jsonb
+            ELSE '{{}}'::jsonb
             END
         FROM
             obj_description("objoid", "objclass") AS d
-    '''
+    '''.format(
+        prefix=f'E{ql(defines.EDGEDB_VISIBLE_METADATA_PREFIX)}',
+    )
 
     def __init__(self) -> None:
         super().__init__(
@@ -125,13 +129,15 @@ class GetSharedObjectMetadata(dbops.Function):
     """Return EdgeDB metadata associated with a backend object."""
     text = '''
         SELECT
-            CASE WHEN substr(d, 1, 5) = '$EDB:'
-            THEN substr(d, 6)::jsonb
-            ELSE '{}'::jsonb
+            CASE WHEN substr(d, 1, char_length({prefix})) = {prefix}
+            THEN substr(d, char_length({prefix}) + 1)::jsonb
+            ELSE '{{}}'::jsonb
             END
         FROM
             shobj_description("objoid", "objclass") AS d
-    '''
+    '''.format(
+        prefix=f'E{ql(defines.EDGEDB_VISIBLE_METADATA_PREFIX)}',
+    )
 
     def __init__(self) -> None:
         super().__init__(
@@ -184,6 +190,30 @@ class RaiseSpecificExceptionFunction(dbops.Function):
             args=[('exc', ('text',)), ('msg', ('text',)), ('det', ('text',)),
                   ('rtype', ('anyelement',))],
             returns=('anyelement',),
+            # See NOTE for the _raise_exception for reason why this is
+            # stable and not immutable.
+            volatility='stable',
+            language='plpgsql',
+            text=self.text)
+
+
+class RaiseSpecificExceptionFunctionArray(dbops.Function):
+    text = '''
+    BEGIN
+        RAISE EXCEPTION USING
+            ERRCODE = exc,
+            MESSAGE = msg,
+            DETAIL = COALESCE(det, '');
+        RETURN rtype;
+    END;
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', '_raise_specific_exception_array'),
+            args=[('exc', ('text',)), ('msg', ('text',)), ('det', ('text',)),
+                  ('rtype', ('anyarray',))],
+            returns=('anyarray',),
             # See NOTE for the _raise_exception for reason why this is
             # stable and not immutable.
             volatility='stable',
@@ -1317,6 +1347,14 @@ class JSONSliceFunction(dbops.Function):
             text=self.text)
 
 
+# We need custom casting functions for various datetime scalars in
+# order to enforce correctness w.r.t. local vs time-zone-aware
+# datetime. Postgres does a lot of magic and guessing for time zones
+# and generally will accept text with or without time zone for any
+# particular flavor of timestamp. In order to guarantee that we can
+# detect time-zones we restrict the inputs to ISO8601 format.
+#
+# See issue #740.
 class DatetimeInFunction(dbops.Function):
     """Cast text into timestamptz using ISO8601 spec."""
     text = r'''
@@ -1458,6 +1496,175 @@ class LocalTimeInFunction(dbops.Function):
             text=self.text)
 
 
+class ToTimestampTZCheck(dbops.Function):
+    """Checks if the original text has time zone or not."""
+    # What are we trying to mitigate?
+    # We're trying to detect that when we're casting to datetime the
+    # time zone is in fact present in the input. It is a problem if
+    # it's not since then one gets assigned implicitly based on the
+    # server settings.
+    #
+    # It is insufficient to rely on the presence of TZH in the format
+    # string, since `to_timestamp` will happily ignore the missing
+    # time-zone in the input anyway. So in order to tell whether the
+    # input string contained a time zone that was in fact parsed we
+    # employ the following trick:
+    #
+    # If the time zone is in the input then it is unambiguous and the
+    # parsed value will not depend on the current server time zone.
+    # However, if the time zone was omitted, then the parsed value
+    # will default to the server time zone. This implies that if
+    # changing the server time zone for the same input string affects
+    # the parsed value, the input string itself didn't contain a time
+    # zone.
+    text = r'''
+        DECLARE
+            result timestamptz;
+            chk timestamptz;
+            msg text;
+        BEGIN
+            result := to_timestamp(val, fmt);
+            PERFORM set_config('TimeZone', 'America/Toronto', true);
+            chk := to_timestamp(val, fmt);
+            -- We're deliberately not doing any save/restore because
+            -- the server MUST be in UTC. In fact, this check relies
+            -- on it.
+            PERFORM set_config('TimeZone', 'UTC', true);
+
+            IF hastz THEN
+                msg := 'missing required';
+            ELSE
+                msg := 'unexpected';
+            END IF;
+
+            IF (result = chk) != hastz THEN
+                RAISE EXCEPTION USING
+                    ERRCODE = 'invalid_datetime_format',
+                    MESSAGE = msg || ' time zone in input ' ||
+                        quote_literal(val),
+                    DETAIL = '';
+            END IF;
+
+            RETURN result;
+        END;
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', '_to_timestamptz_check'),
+            args=[('val', ('text',)), ('fmt', ('text',)),
+                  ('hastz', ('bool',))],
+            returns=('timestamptz',),
+            # We're relying on changing settings, so it's volatile.
+            volatility='volatile',
+            language='plpgsql',
+            text=self.text)
+
+
+class ToDatetimeFunction(dbops.Function):
+    """Convert text into timestamptz using a formatting spec."""
+    # NOTE that if only the TZM (minutes) are mentioned it is not
+    # enough for a valid time zone definition
+    text = r'''
+        SELECT
+            CASE WHEN fmt !~ (
+                    '^(' ||
+                        '("([^"\\]|\\.)*")|' ||
+                        '([^"]+)' ||
+                    ')*(TZH).*$'
+                )
+            THEN
+                edgedb._raise_specific_exception(
+                    'invalid_datetime_format',
+                    'missing required time zone in format: ' ||
+                    quote_literal(fmt),
+                    $h${"hint":"Use one or both of the following: $h$ ||
+                    $h$'TZH', 'TZM'"}$h$,
+                    NULL::timestamptz
+                )
+            ELSE
+                edgedb._to_timestamptz_check(val, fmt, true)
+            END;
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', 'to_datetime'),
+            args=[('val', ('text',)), ('fmt', ('text',))],
+            returns=('timestamptz',),
+            # Same as _to_timestamptz_check.
+            volatility='volatile',
+            text=self.text)
+
+
+class ToLocalDatetimeFunction(dbops.Function):
+    """Convert text into timestamp using a formatting spec."""
+    # NOTE time zone should not be mentioned at all.
+    text = r'''
+        SELECT
+            CASE WHEN fmt ~ (
+                    '^(' ||
+                        '("([^"\\]|\\.)*")|' ||
+                        '([^"]+)' ||
+                    ')*(TZH|TZM).*$'
+                )
+            THEN
+                edgedb._raise_specific_exception(
+                    'invalid_datetime_format',
+                    'unexpected time zone in format: ' ||
+                    quote_literal(fmt),
+                    '',
+                    NULL::timestamp
+                )
+            ELSE
+                edgedb._to_timestamptz_check(val, fmt, false)::timestamp
+            END;
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', 'to_local_datetime'),
+            args=[('val', ('text',)), ('fmt', ('text',))],
+            returns=('timestamp',),
+            # Same as _to_timestamptz_check.
+            volatility='volatile',
+            text=self.text)
+
+
+class StrToBool(dbops.Function):
+    """Parse bool from text."""
+    # We first try to match case-insensitive "true|false" at all. On
+    # null, we raise an exception. But otherwise we know that we have
+    # an array of matches. The first element matching "true" and
+    # second - "false". So the boolean value is then "true" if the
+    # second array element is NULL and false otherwise.
+    #
+    # Also, we can't re-use `_raise_specific_exception` or functions
+    # derived from it because we're passing an array as argument
+    # instead of an element.
+    text = r'''
+        SELECT (
+            coalesce(
+                regexp_match(val, '^\s*(?:(true)|(false))\s*$', 'i')::text[],
+                edgedb._raise_specific_exception_array(
+                    'invalid_text_representation',
+                    'invalid syntax for bool: ' || quote_literal(val),
+                    '',
+                    NULL::text[])
+                )
+        )[2] IS NULL;
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', 'str_to_bool'),
+            args=[('val', ('text',))],
+            returns=('bool',),
+            # Stable because it's raising exceptions.
+            volatility='stable',
+            text=self.text)
+
+
 class SysConfigValueType(dbops.CompositeType):
     """Type of values returned by _read_sys_config."""
     def __init__(self) -> None:
@@ -1475,7 +1682,7 @@ class SysConfigFunction(dbops.Function):
     # This is a function because "_edgecon_state" is a temporary table
     # and therefore cannot be used in a view.
 
-    text = R'''
+    text = f'''
         BEGIN
         RETURN QUERY EXECUTE $$
             WITH
@@ -1492,12 +1699,7 @@ class SysConfigFunction(dbops.Function):
                         (s.value->>'typeid')::uuid AS typeid,
                         (s.value->>'typemod') AS typemod
                     FROM
-                        jsonb_each(
-                            (SELECT pg_read_file(
-                                (SELECT d.dir || '/config_spec.json'
-                                 FROM data_dir d)
-                            )::jsonb)
-                        ) s
+                        jsonb_each(edgedb.__syscache_configspec()) AS s
                     ),
 
                 config_defaults AS
@@ -1518,10 +1720,13 @@ class SysConfigFunction(dbops.Function):
                         10 AS priority
                     FROM
                         jsonb_each(
-                            (SELECT pg_read_file(
-                                (SELECT d.dir || '/config_sys.json'
-                                 FROM data_dir d)
-                            )::jsonb)
+                            shobj_metadata(
+                               (SELECT oid FROM pg_database
+                                WHERE
+                                    datname = {ql(defines.EDGEDB_TEMPLATE_DB)}
+                               ),
+                               'pg_database'
+                            ) -> 'sysconfig'
                         ) s
                     ),
 
@@ -1551,7 +1756,7 @@ class SysConfigFunction(dbops.Function):
                         pg_settings,
                         LATERAL
                         (SELECT
-                            regexp_match(pg_settings.unit, '(\d+)(\w+)') AS v
+                            regexp_match(pg_settings.unit, '(\\d+)(\\w+)') AS v
                         ) AS u
                      WHERE name = any(ARRAY[
                          'shared_buffers',
@@ -1594,33 +1799,6 @@ class SysConfigFunction(dbops.Function):
             returns=('edgedb', '_sys_config_val_t'),
             set_returning=True,
             language='plpgsql',
-            volatility='volatile',
-            text=self.text,
-        )
-
-
-class SysMetadataFunction(dbops.Function):
-
-    # This is a function because "_edgecon_state" is a temporary table
-    # and therefore cannot be used in a view.
-
-    text = f'''
-        WITH
-            data_dir AS
-                (SELECT setting AS dir FROM pg_settings
-                    WHERE name = 'data_directory')
-        SELECT
-            (SELECT pg_read_file(
-                (SELECT d.dir || '/instance_data.json' FROM data_dir d)
-            )::jsonb) -> name;
-    '''
-
-    def __init__(self) -> None:
-        super().__init__(
-            name=('edgedb', '_read_sys_metadata'),
-            args=[('name', ('text',))],
-            returns=('jsonb',),
-            language='sql',
             volatility='volatile',
             text=self.text,
         )
@@ -1785,7 +1963,6 @@ async def bootstrap(conn):
         dbops.DropSchema(name='public'),
         dbops.CreateSchema(name='edgedb'),
         dbops.CreateExtension(dbops.Extension(name='uuid-ossp')),
-        dbops.CreateExtension(dbops.Extension(name='edbsys')),
         dbops.CreateCompositeType(TypeDescNodeType()),
         dbops.CreateCompositeType(TypeDescType()),
         dbops.CreateCompositeType(ExpressionType()),
@@ -1804,6 +1981,7 @@ async def bootstrap(conn):
         dbops.CreateFunction(GetSharedObjectMetadata()),
         dbops.CreateFunction(RaiseExceptionFunction()),
         dbops.CreateFunction(RaiseSpecificExceptionFunction()),
+        dbops.CreateFunction(RaiseSpecificExceptionFunctionArray()),
         dbops.CreateFunction(RaiseExceptionOnNullFunction()),
         dbops.CreateFunction(RaiseExceptionOnEmptyStringFunction()),
         dbops.CreateFunction(AssertJSONTypeFunction()),
@@ -1845,10 +2023,13 @@ async def bootstrap(conn):
         dbops.CreateFunction(LocalDatetimeInFunction()),
         dbops.CreateFunction(LocalDateInFunction()),
         dbops.CreateFunction(LocalTimeInFunction()),
+        dbops.CreateFunction(ToTimestampTZCheck()),
+        dbops.CreateFunction(ToDatetimeFunction()),
+        dbops.CreateFunction(ToLocalDatetimeFunction()),
+        dbops.CreateFunction(StrToBool()),
         dbops.CreateFunction(BytesIndexWithBoundsFunction()),
         dbops.CreateCompositeType(SysConfigValueType()),
         dbops.CreateFunction(SysConfigFunction()),
-        dbops.CreateFunction(SysMetadataFunction()),
     ])
 
     # Register "any" pseudo-type.

@@ -508,10 +508,11 @@ class TestEdgeQLCasts(tb.QueryTestCase):
             [True, True, True, True, True],
         )
 
-        for variant in {'😈', 'yes', '1', 'no', 'on', 'OFF'}:
+        for variant in {'😈', 'yes', '1', 'no', 'on', 'OFF',
+                        't', 'f', 'tr', 'fa'}:
             with self.assertRaisesRegex(
                     edgedb.InvalidValueError,
-                    fr'invalid syntax for std::bool: "{variant}"'):
+                    fr"invalid syntax for std::bool: '{variant}'"):
                 await self.con.fetchone(f'SELECT <bool>"{variant}"')
 
         self.assertTrue(
@@ -1280,48 +1281,6 @@ class TestEdgeQLCasts(tb.QueryTestCase):
                 ''',
                 [{}],
             )
-
-    async def test_edgeql_casts_numeric_08(self):
-        # Casting a float into a decimal (also true for json and str)
-        # is not lossless for arbitrary floats.
-        await self.assert_query_result(
-            r'''SELECT <float64><decimal>(20/29) = (20/29);''',
-            [False],
-        )
-
-        await self.assert_query_result(
-            r'''
-                SELECT <float32><decimal>(<float32>20/<float32>29) =
-                    (<float32>20/<float32>29);
-            ''',
-            [False],
-        )
-
-        await self.assert_query_result(
-            r'''SELECT <float64><json>(20/29) = (20/29);''',
-            [False],
-        )
-
-        await self.assert_query_result(
-            r'''
-                SELECT <float32><json>(<float32>20/<float32>29) =
-                    (<float32>20/<float32>29);
-            ''',
-            [False],
-        )
-
-        await self.assert_query_result(
-            r'''SELECT <float64><str>(20/29) = (20/29);''',
-            [False],
-        )
-
-        await self.assert_query_result(
-            r'''
-                SELECT <float32><str>(<float32>20/<float32>29) =
-                    (<float32>20/<float32>29);
-            ''',
-            [False],
-        )
 
     async def test_edgeql_casts_collections_01(self):
         await self.assert_query_result(

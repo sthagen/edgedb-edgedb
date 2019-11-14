@@ -29,6 +29,7 @@ from edb import errors
 from edb.common import lru
 from edb.server import defines, config
 from edb.server.compiler import dbstate
+from edb.pgsql import dbops
 
 
 __all__ = ('DatabaseIndex', 'DatabaseConnectionView')
@@ -245,10 +246,10 @@ cdef class DatabaseConnectionView:
             # is executed outside of a tx.
             self._reset_tx_state()
 
-    async def apply_config_ops(self, ops):
+    async def apply_config_ops(self, conn, ops):
         for op in ops:
             if op.level is config.OpLevel.SYSTEM:
-                await self._db._index.apply_system_config_op(op)
+                await self._db._index.apply_system_config_op(conn, op)
             else:
                 self.set_session_config(
                     op.apply(
@@ -277,29 +278,36 @@ cdef class DatabaseIndex:
 
         datadir = self._server.get_datadir()
 
-        self._sys_overrides_fn = os.path.join(datadir, 'config_sys.json')
-
-        sys_queries_fn = os.path.join(datadir, 'queries.pickle')
-        with open(sys_queries_fn, 'rb') as f:
-            self._sys_queries = pickle.load(f)
-
-        instance_data_fn = os.path.join(datadir, 'instance_data.pickle')
-        with open(instance_data_fn, 'rb') as f:
-            self._instance_data = pickle.load(f)
-
+        self._sys_queries = None
+        self._instance_data = None
         self._sys_config = None
         self._sys_config_ver = time.monotonic_ns()
 
-    def get_sys_query(self, key: str) -> bytes:
+    async def get_sys_query(self, conn, key: str) -> bytes:
+        if self._sys_queries is None:
+            result = await conn.simple_query(
+                b'SELECT edgedb.__syscache_sysqueries()',
+                ignore_data=False,
+            )
+            queries = json.loads(result[0][0].decode('utf-8'))
+            self._sys_queries = {k: q.encode() for k, q in queries.items()}
+
         return self._sys_queries[key]
 
-    def get_instance_data(self, key: str) -> object:
+    async def get_instance_data(self, conn, key: str) -> object:
+        if self._instance_data is None:
+            result = await conn.simple_query(
+                b'SELECT edgedb.__syscache_instancedata()',
+                ignore_data=False,
+            )
+            self._instance_data = json.loads(result[0][0].decode('utf-8'))
+
         return self._instance_data[key]
 
     async def reload_config(self):
         conn = await self._server.new_pgcon(defines.EDGEDB_SUPERUSER_DB)
 
-        query = self.get_sys_query('config')
+        query = await self.get_sys_query(conn, 'config')
         try:
             result = await conn.simple_query(query, ignore_data=False)
         finally:
@@ -323,12 +331,16 @@ cdef class DatabaseIndex:
             self._dbs[dbname] = db
         return db
 
-    cdef _save_system_overrides(self):
+    async def _save_system_overrides(self, conn):
         data = config.to_json(config.get_settings(), self._sys_config)
-        with open(self._sys_overrides_fn, 'wt') as f:
-            f.write(data)
+        block = dbops.PLTopBlock()
+        dbops.UpdateMetadata(
+            dbops.Database(name=defines.EDGEDB_TEMPLATE_DB),
+            {'sysconfig': json.loads(data)},
+        ).generate(block)
+        await conn.simple_query(block.to_string().encode(), True)
 
-    async def apply_system_config_op(self, op):
+    async def apply_system_config_op(self, conn, op):
         op_value = op.get_setting(config.get_settings())
         if op.opcode is not None:
             allow_missing = (
@@ -350,7 +362,7 @@ cdef class DatabaseIndex:
                 f'unsupported config operation: {op.opcode}')
 
         self._sys_config = op.apply(config.get_settings(), self._sys_config)
-        self._save_system_overrides()
+        await self._save_system_overrides(conn)
 
         self._sys_config_ver = time.monotonic_ns()
 
