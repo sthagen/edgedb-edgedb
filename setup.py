@@ -52,7 +52,7 @@ RUNTIME_DEPS = [
     'edgedb>=0.7.0a1',
 ]
 
-CYTHON_DEPENDENCY = 'Cython==0.29.13'
+CYTHON_DEPENDENCY = 'Cython==0.29.14'
 
 DOCS_DEPS = [
     'Sphinx~=2.0.0',
@@ -74,7 +74,6 @@ EXTRA_DEPS = {
         'coverage~=4.5.2',
         'requests-xml~=0.2.3',
         'lxml',
-        'requests-xml',
     ] + DOCS_DEPS,
 
     'docs': DOCS_DEPS,

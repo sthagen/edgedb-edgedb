@@ -759,6 +759,8 @@ aa';
         SELECT foo::`bar`;
         SELECT `foo`::bar;
         SELECT `foo`::`bar`;
+        SELECT `foo``bar`;
+        SELECT `foo`::`bar```;
 
 % OK %
 
@@ -768,6 +770,8 @@ aa';
         SELECT foo::bar;
         SELECT foo::bar;
         SELECT foo::bar;
+        SELECT `foo``bar`;
+        SELECT foo::`bar```;
         """
 
     def test_edgeql_syntax_name_02(self):
@@ -941,6 +945,13 @@ aa';
     def test_edgeql_syntax_name_22(self):
         """
         SELECT mod::Foo.bar.baz.boo;
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  r'Identifiers cannot contain "::"', line=2, col=16)
+    def test_edgeql_syntax_name_23(self):
+        """
+        SELECT `foo::bar`;
         """
 
     def test_edgeql_syntax_shape_01(self):
