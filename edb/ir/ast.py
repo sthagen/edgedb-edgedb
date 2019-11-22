@@ -431,7 +431,7 @@ class Call(ImmutableExpr):
     # The id of the module in which the callable is defined.
     func_module_id: uuid.UUID
 
-    # If the bound callable is a "FROM SQL" callable, this
+    # If the bound callable is a "USING SQL" callable, this
     # attribute will be set to the name of the SQL function.
     func_sql_function: typing.Optional[str]
 
@@ -493,6 +493,12 @@ class OperatorCall(Call):
     # will contain the operator name, and, optionally, backend
     # operand types.
     sql_operator: typing.Optional[typing.Tuple[str, ...]] = None
+
+    # The name of the origin operator if this is a derivative operator.
+    origin_name: sn.Name
+
+    # The module id of the origin operator if this is a derivative operator.
+    origin_module_id: uuid.UUID
 
 
 class TupleIndirection(ImmutableExpr):
