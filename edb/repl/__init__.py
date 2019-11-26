@@ -20,9 +20,7 @@
 from __future__ import annotations
 
 import functools
-import io
 import os
-import select
 import subprocess
 import sys
 
@@ -50,8 +48,9 @@ from edb.edgeql import quote as eql_quote
 from edb.server import buildmeta
 
 from . import context
-from . import utils
 from . import render
+from . import table
+from . import utils
 
 
 STATUSES_WITH_OUTPUT = frozenset({
@@ -362,6 +361,80 @@ class Cli:
                 print(f'No {item_name} found matching '
                       f'{eql_quote.quote_literal(pattern)}')
 
+    @_command('lT', R'\lT [PATTERN]', 'list scalar types')
+    def command_list_scalar_types(self, args: str, *,
+                                  case_sensitive: bool = False) -> None:
+        self._list_scalar_types(args.strip(), case_sensitive=case_sensitive)
+
+    @_command('lTI', R'\lTI [PATTERN]',
+              'list scalar types (case sensitive pattern match)')
+    def command_list_scalar_types_i(self, args: str) -> None:
+        self.command_list_scalar_types(args, case_sensitive=True)
+
+    def _list_scalar_types(
+        self,
+        pattern: str,
+        case_sensitive: bool = False
+    ) -> None:
+        if case_sensitive:
+            flag = ''
+        else:
+            flag = 'i'
+
+        filter_clause, qkw = utils.get_filter_based_on_pattern(
+            pattern, flag=flag)
+
+        base_query = r'''
+            WITH MODULE schema
+            SELECT ScalarType {
+                name,
+                is_abstract,
+                `extending` := to_str(array_agg(.bases.name), ', '),
+                kind := (
+                    'enum' IF 'std::anyenum' IN .ancestors.name ELSE
+                    'sequence' IF 'std::sequence' IN .ancestors.name ELSE
+                    'normal'
+                ),
+            }
+        '''
+
+        try:
+            result, _ = self.fetch(
+                f'''
+                    {base_query}
+                    {filter_clause}
+                    ORDER BY .is_abstract THEN .name;
+                ''',
+                json=False,
+                **qkw
+            )
+        except edgedb.EdgeDBError as exc:
+            render.render_exception(self.context, exc)
+        else:
+            if result:
+                print(f'List of scalar types:')
+                max_width = self.prompt.output.get_size().columns
+                render.render_table(
+                    self.context,
+                    title='Scalar Types',
+                    columns=[
+                        table.ColumnSpec(field='name', title='Name',
+                                         width=2, align='left'),
+                        table.ColumnSpec(field='extending', title='Extending',
+                                         width=2, align='left'),
+                        table.ColumnSpec(field='is_abstract', title='Abstract',
+                                         width=1, align='left'),
+                        table.ColumnSpec(field='kind', title='Kind',
+                                         width=1, align='left'),
+                    ],
+                    data=result,
+                    max_width=min(max_width, 120),
+                )
+
+            else:
+                print(f'No scalar types found matching '
+                      f'{eql_quote.quote_literal(pattern)}')
+
     @_command('d', R'\d NAME', 'describe schema object')
     def command_describe_object(self, args: str, *, verbose=False) -> None:
         name = utils.normalize_name(args.strip())
@@ -381,16 +454,19 @@ class Cli:
         except edgedb.EdgeDBError as exc:
             render.render_exception(self.context, exc)
         else:
-            desc_doc = pt_document.Document(result[0])
-            lexer = pt_lexers.PygmentsLexer(eql_pygments.EdgeQLLexer)
-            formatter = lexer.lex_document(desc_doc)
+            self._render_sdl(result[0])
 
-            for line in range(desc_doc.line_count):
-                pt_shortcuts.print_formatted_text(
-                    pt_formatted_text.FormattedText(formatter(line)),
-                    style=self.style
-                )
-            print()
+    def _render_sdl(self, sdl):
+        desc_doc = pt_document.Document(sdl)
+        lexer = pt_lexers.PygmentsLexer(eql_pygments.EdgeQLLexer)
+        formatter = lexer.lex_document(desc_doc)
+
+        for line in range(desc_doc.line_count):
+            pt_shortcuts.print_formatted_text(
+                pt_formatted_text.FormattedText(formatter(line)),
+                style=self.style
+            )
+        print()
 
     @_command('d+', R'\d+ NAME', 'describe schema object in a verbose mode')
     def command_describe_object_verbose(self, args: str) -> None:
@@ -640,19 +716,6 @@ def execute_script(conn_args, data):
         con.close()
 
 
-def _data_in_stdin() -> str:
-    try:
-        if select.select([sys.stdin], [], [], 0.0)[0]:
-            data = sys.stdin.read()
-        else:
-            data = ''
-    except io.UnsupportedOperation:
-        # Mock stdin cannot be selected, just read it
-        data = sys.stdin.read()
-
-    return data
-
-
 def main(*, host, port, user, database, password, password_prompt, admin):
     connect_kwargs = {
         'user': user,
@@ -665,8 +728,13 @@ def main(*, host, port, user, database, password, password_prompt, admin):
         'timeout': 60,
     }
 
-    stdin_data = _data_in_stdin()
-    if stdin_data:
-        return execute_script(connect_kwargs, stdin_data)
-    else:
+    try:
+        interactive = sys.stdin.isatty()
+    except AttributeError:
+        # mock streams are always non-interactive
+        interactive = False
+
+    if interactive:
         return Cli(connect_kwargs).run()
+    else:
+        return execute_script(connect_kwargs, sys.stdin.read())

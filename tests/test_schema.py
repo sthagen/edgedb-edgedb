@@ -26,6 +26,7 @@ from edb.testbase import lang as tb
 
 from edb import edgeql
 from edb.edgeql import compiler as qlcompiler
+from edb.edgeql import parser as qlparser
 from edb.edgeql import qltypes
 
 from edb.schema import delta as s_delta
@@ -2766,8 +2767,9 @@ class TestDescribe(tb.BaseSchemaLoadTest):
         tests = [iter(tests)] * 2
 
         for stmt_text, expected_output in zip(*tests):
-            stmt = qlcompiler.compile_to_ir(
-                stmt_text,
+            qltree = qlparser.parse(stmt_text, {None: 'test'})
+            stmt = qlcompiler.compile_ast_to_ir(
+                qltree,
                 schema,
                 modaliases={None: 'test'},
             )
@@ -2972,7 +2974,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
         self._assert_describe(
             """
             abstract constraint my_one_of(one_of: array<anytype>) {
-                using contains(one_of, __subject__);
+                using (contains(one_of, __subject__));
             }
             """,
 
@@ -3085,7 +3087,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             """
             CREATE MODULE test;
             CREATE VIEW test::array_view :=
-                [1, 2, 3];
+                ([1, 2, 3]);
             CREATE VIEW test::tuple_view :=
                 (WITH
                     MODULE test
@@ -3102,7 +3104,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 property compprop := 'foo';
                 link complink := (SELECT Foo LIMIT 1);
                 property annotated_compprop -> str {
-                    using 'foo';
+                    using ('foo');
                     annotation title := 'compprop';
                 };
                 link annotated_link -> Foo {
@@ -3118,7 +3120,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             CREATE MODULE test;
             CREATE TYPE test::Foo {
                 CREATE SINGLE PROPERTY annotated_compprop {
-                    USING 'foo';
+                    USING ('foo');
                     SET ANNOTATION std::title := 'compprop';
                 };
                 CREATE SINGLE LINK annotated_link {
@@ -3131,13 +3133,13 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                     );
                     SET ANNOTATION std::title := 'complink';
                 };
-                CREATE SINGLE LINK complink := ((WITH
+                CREATE SINGLE LINK complink := (WITH
                     MODULE test
                 SELECT
                     Foo
                 LIMIT
                     1
-                ));
+                );
                 CREATE SINGLE PROPERTY compprop := ('foo');
             };
             """
