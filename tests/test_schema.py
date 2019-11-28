@@ -3146,3 +3146,92 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             };
             """
         )
+
+    def test_describe_computable_02(self):
+        self._assert_describe(
+            """
+            type Foo {
+                property compprop := 'foo';
+                link complink := (SELECT Foo LIMIT 1);
+                property annotated_compprop -> str {
+                    using ('foo');
+                    annotation title := 'compprop';
+                };
+                link annotated_link -> Foo {
+                    using (SELECT Foo LIMIT 1);
+                    annotation title := 'complink';
+                };
+            };
+            """,
+
+            'DESCRIBE TYPE test::Foo',
+
+            """
+            CREATE TYPE test::Foo {
+                CREATE SINGLE PROPERTY annotated_compprop {
+                    USING ('foo');
+                    SET ANNOTATION std::title := 'compprop';
+                };
+                CREATE SINGLE LINK annotated_link {
+                    USING (WITH
+                        MODULE test
+                    SELECT
+                        Foo
+                    LIMIT
+                        1
+                    );
+                    SET ANNOTATION std::title := 'complink';
+                };
+                CREATE SINGLE LINK complink := (WITH
+                    MODULE test
+                SELECT
+                    Foo
+                LIMIT
+                    1
+                );
+                CREATE SINGLE PROPERTY compprop := ('foo');
+            };
+            """
+        )
+
+    def test_describe_builtins_01(self):
+        self._assert_describe(
+            """
+            """,
+
+            'DESCRIBE TYPE schema::ObjectType',
+
+            # the links order is non-deterministic
+            """
+            CREATE TYPE schema::ObjectType
+            EXTENDING schema::BaseObjectType {
+                CREATE MULTI LINK links :=
+                    (.pointers[IS schema::Link]);
+                CREATE MULTI LINK properties :=
+                    (.pointers[IS schema::Property]);
+            };
+            """,
+
+            'DESCRIBE TYPE schema::ObjectType AS SDL',
+
+            """
+            type schema::ObjectType extending schema::BaseObjectType {
+                multi link links := (.pointers[IS schema::Link]);
+                multi link properties := (.pointers[IS schema::Property]);
+            };
+            """,
+        )
+
+    def test_describe_bad_01(self):
+        with self.assertRaisesRegex(
+            errors.InvalidReferenceError,
+            "schema item 'std::Tuple' does not exist",
+        ):
+            self._assert_describe(
+                """
+                """,
+
+                'DESCRIBE OBJECT std::Tuple',
+
+                '',
+            )
