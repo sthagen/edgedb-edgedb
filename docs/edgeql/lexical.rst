@@ -46,6 +46,8 @@ contain a dot (``.``) or to distinguish *names* from *reserved keywords*
 (for instance to allow referring to a link named "order" as ```order```).
 
 
+.. _ref_eql_lexical_names:
+
 Names and keywords
 ------------------
 
@@ -123,9 +125,9 @@ Production rules for :eql:type:`str` literal:
            : 'r"' `raw_content`* '"' |
            : `dollar_quote` `raw_content`* `dollar_quote`
     raw_content: <any character different from delimiting quote>
-    dollar_quote: "$" `q_char`* "$"
-    q_char: "A"..."Z" | "a"..."z" | "_" | "0"..."9" |
-          : <high ASCII characters>
+    dollar_quote: "$" `q_char0` ? `q_char`* "$"
+    q_char0: "A"..."Z" | "a"..."z" | "_"
+    q_char: "A"..."Z" | "a"..."z" | "_" | "0"..."9"
     str_content: <newline> | `unicode` | `str_escapes`
     unicode: <any printable unicode character not preceded by "\">
     str_escapes: <see below for details>
@@ -243,6 +245,10 @@ content with *dollar-quotes* in an unambiguous manner:
     db> SELECT $a$hello$$world$$$a$;
     {'hello$$world$$'}
 
+More specifically delimiter:
+
+* Must start with an ASCII letter or underscore
+* Following characters can be digits 0-9, underscore or ASCII letters
 
 .. _ref_eql_lexical_bytes:
 
@@ -317,7 +323,7 @@ EdgeQL operators listed in order of precedence from lowest to highest:
     * - :eql:op:`OR`
     * - :eql:op:`AND`
     * - :eql:op:`NOT`
-    * - :eql:op:`=<EQ>`, :eql:op:`\!=<NEQ>`, :eql:op:`?=<COALEQ>`,
+    * - :eql:op:`=<EQ>`, |neq|_, :eql:op:`?=<COALEQ>`,
         :eql:op:`?\!=<COALNEQ>`
     * - :eql:op:`\<<LT>`, :eql:op:`><GT>`, :eql:op:`\<=<LTEQ>`,
         :eql:op:`>=<GTEQ>`
@@ -336,3 +342,6 @@ EdgeQL operators listed in order of precedence from lowest to highest:
         :eql:op:`json[] <JSONIDX>`,
         :eql:op:`bytes[] <BYTESIDX>`
     * - :ref:`DETACHED <ref_eql_with_detached>`
+
+.. |neq| replace:: !=
+.. _neq: ./funcops/generic#operator::NEQ
