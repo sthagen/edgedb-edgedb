@@ -41,11 +41,6 @@
 # decimal casts as both directions can lose precision. Discussion
 # about precision loss of float to numeric casts can be found here:
 # https://www.postgresql.org/message-id/5A937D7E.60305%40anastigmatix.net
-# The practical consequence is that whenever the cast is needed, such
-# as for comparison operators, it is preferable to cast decimal into
-# float and not vice-versa. So we can go with Postgres behavior in
-# regards to the comparison operators (but not arithmetic) with
-# decimal as one of the operands.
 
 # EQUALITY
 
@@ -246,7 +241,7 @@ std::`=` (l: std::decimal, r: std::decimal) -> std::bool {
 
 
 CREATE INFIX OPERATOR
-std::`=` (l: std::decimal, r: std::anyreal) -> std::bool {
+std::`=` (l: std::decimal, r: std::anyint) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'=';
 };
@@ -267,21 +262,21 @@ std::`?=` (l: OPTIONAL std::decimal, r: OPTIONAL std::decimal) -> std::bool {
 
 
 CREATE INFIX OPERATOR
-std::`?=` (l: OPTIONAL std::decimal, r: OPTIONAL std::anyreal) -> std::bool {
+std::`?=` (l: OPTIONAL std::decimal, r: OPTIONAL std::anyint) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL EXPRESSION;
 };
 
 
 CREATE INFIX OPERATOR
-std::`=` (l: std::anyreal, r: std::decimal) -> std::bool {
+std::`=` (l: std::anyint, r: std::decimal) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'=';
 };
 
 
 CREATE INFIX OPERATOR
-std::`?=` (l: OPTIONAL std::anyreal, r: OPTIONAL std::decimal) -> std::bool {
+std::`?=` (l: OPTIONAL std::anyint, r: OPTIONAL std::decimal) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL EXPRESSION;
 };
@@ -486,7 +481,7 @@ std::`!=` (l: std::decimal, r: std::decimal) -> std::bool {
 
 
 CREATE INFIX OPERATOR
-std::`!=` (l: std::decimal, r: std::anyreal) -> std::bool {
+std::`!=` (l: std::decimal, r: std::anyint) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'<>';
 };
@@ -507,21 +502,21 @@ std::`?!=` (l: OPTIONAL std::decimal, r: OPTIONAL std::decimal) -> std::bool {
 
 
 CREATE INFIX OPERATOR
-std::`?!=` (l: OPTIONAL std::decimal, r: OPTIONAL std::anyreal) -> std::bool {
+std::`?!=` (l: OPTIONAL std::decimal, r: OPTIONAL std::anyint) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL EXPRESSION;
 };
 
 
 CREATE INFIX OPERATOR
-std::`!=` (l: std::anyreal, r: std::decimal) -> std::bool {
+std::`!=` (l: std::anyint, r: std::decimal) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'<>';
 };
 
 
 CREATE INFIX OPERATOR
-std::`?!=` (l: OPTIONAL std::anyreal, r: OPTIONAL std::decimal) -> std::bool {
+std::`?!=` (l: OPTIONAL std::anyint, r: OPTIONAL std::decimal) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL EXPRESSION;
 };
@@ -664,14 +659,14 @@ std::`>` (l: std::decimal, r: std::decimal) -> std::bool {
 
 
 CREATE INFIX OPERATOR
-std::`>` (l: std::anyreal, r: std::decimal) -> std::bool {
+std::`>` (l: std::anyint, r: std::decimal) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'>';
 };
 
 
 CREATE INFIX OPERATOR
-std::`>` (l: std::decimal, r: std::anyreal) -> std::bool {
+std::`>` (l: std::decimal, r: std::anyint) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'>';
 };
@@ -813,14 +808,14 @@ std::`>=` (l: std::decimal, r: std::decimal) -> std::bool {
 
 
 CREATE INFIX OPERATOR
-std::`>=` (l: std::anyreal, r: std::decimal) -> std::bool {
+std::`>=` (l: std::anyint, r: std::decimal) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'>=';
 };
 
 
 CREATE INFIX OPERATOR
-std::`>=` (l: std::decimal, r: std::anyreal) -> std::bool {
+std::`>=` (l: std::decimal, r: std::anyint) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'>=';
 };
@@ -962,14 +957,14 @@ std::`<` (l: std::decimal, r: std::decimal) -> std::bool {
 
 
 CREATE INFIX OPERATOR
-std::`<` (l: std::anyreal, r: std::decimal) -> std::bool {
+std::`<` (l: std::anyint, r: std::decimal) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'<';
 };
 
 
 CREATE INFIX OPERATOR
-std::`<` (l: std::decimal, r: std::anyreal) -> std::bool {
+std::`<` (l: std::decimal, r: std::anyint) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'<';
 };
@@ -1111,14 +1106,14 @@ std::`<=` (l: std::decimal, r: std::decimal) -> std::bool {
 
 
 CREATE INFIX OPERATOR
-std::`<=` (l: std::anyreal, r: std::decimal) -> std::bool {
+std::`<=` (l: std::anyint, r: std::decimal) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'<=';
 };
 
 
 CREATE INFIX OPERATOR
-std::`<=` (l: std::decimal, r: std::anyreal) -> std::bool {
+std::`<=` (l: std::decimal, r: std::anyint) -> std::bool {
     SET volatility := 'IMMUTABLE';
     USING SQL OPERATOR r'<=';
 };
@@ -1781,8 +1776,24 @@ CREATE CAST FROM std::float32 TO std::bigint {
 
 
 CREATE CAST FROM std::float32 TO std::decimal {
-    SET volatility := 'IMMUTABLE';
-    USING SQL CAST;
+    SET volatility := 'STABLE';
+    USING SQL $$
+        SELECT
+            (CASE WHEN val != 'NaN'
+                       AND val != 'Infinity'
+                       AND val != '-Infinity'
+            THEN
+                val::numeric
+            ELSE
+                edgedb._raise_specific_exception(
+                    'invalid_text_representation',
+                    'invalid value for numeric: ' || quote_literal(val),
+                    '',
+                    NULL::numeric
+                )
+            END)
+        ;
+    $$;
 };
 
 
@@ -1811,8 +1822,24 @@ CREATE CAST FROM std::float64 TO std::bigint {
 
 
 CREATE CAST FROM std::float64 TO std::decimal {
-    SET volatility := 'IMMUTABLE';
-    USING SQL CAST;
+    SET volatility := 'STABLE';
+    USING SQL $$
+        SELECT
+            (CASE WHEN val != 'NaN'
+                       AND val != 'Infinity'
+                       AND val != '-Infinity'
+            THEN
+                val::numeric
+            ELSE
+                edgedb._raise_specific_exception(
+                    'invalid_text_representation',
+                    'invalid value for numeric: ' || quote_literal(val),
+                    '',
+                    NULL::numeric
+                )
+            END)
+        ;
+    $$;
 };
 
 
@@ -1849,14 +1876,14 @@ CREATE CAST FROM std::str TO std::float64 {
 
 
 CREATE CAST FROM std::str TO std::bigint {
-    SET volatility := 'IMMUTABLE';
+    SET volatility := 'STABLE';
     USING SQL FUNCTION 'edgedb.str_to_bigint';
 };
 
 
 CREATE CAST FROM std::str TO std::decimal {
-    SET volatility := 'IMMUTABLE';
-    USING SQL CAST;
+    SET volatility := 'STABLE';
+    USING SQL FUNCTION 'edgedb.str_to_decimal';
 };
 
 
