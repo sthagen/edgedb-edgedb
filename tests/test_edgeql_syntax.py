@@ -1763,6 +1763,19 @@ aa';
         SELECT TUP.0.1n.2;
         """
 
+    def test_edgeql_syntax_path_28(self):
+        """
+        SELECT TUP.1.1;
+        SELECT TUP.>1.1;
+        SELECT TUP.>1.>1;
+
+% OK %
+
+        SELECT TUP.1.1;
+        SELECT TUP.1.1;
+        SELECT TUP.1.1;
+        """
+
     def test_edgeql_syntax_type_interpretation_01(self):
         """
         SELECT Foo[IS Bar].spam;
@@ -1956,6 +1969,32 @@ aa';
     def test_edgeql_syntax_with_08(self):
         """
         WITH MODULE `~all.abstract.bar` SELECT Foo;
+        """
+
+    def test_edgeql_syntax_with_09(self):
+        # trailing commas in WITH block
+        """
+        WITH MODULE foo, SELECT Bar;
+        WITH
+            MODULE foo,
+            x := {1, 2, 3},
+        SELECT Bar;
+        WITH
+            x := {1, 2, 3},
+            MODULE foo,
+        SELECT Bar;
+
+% OK %
+
+        WITH MODULE foo SELECT Bar;
+        WITH
+            MODULE foo,
+            x := {1, 2, 3}
+        SELECT Bar;
+        WITH
+            x := {1, 2, 3},
+            MODULE foo
+        SELECT Bar;
         """
 
     def test_edgeql_syntax_detached_01(self):
