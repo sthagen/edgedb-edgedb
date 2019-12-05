@@ -45,10 +45,11 @@ from . import astutils
 from . import clauses
 from . import context
 from . import dispatch
+from . import output
 from . import pathctx
 from . import relctx
+from . import relgen
 from . import shapecomp
-from . import output
 
 
 def init_dml_stmt(
@@ -145,16 +146,28 @@ def init_dml_stmt(
     pathctx.put_path_source_rvar(
         dml_stmt, ir_stmt.subject.path_id, dml_stmt.relation, env=ctx.env)
 
-    dml_rvar = pgast.RelRangeVar(
-        relation=dml_cte,
-        alias=pgast.Alias(aliasname=parent_ctx.env.aliases.get('d'))
-    )
-
-    relctx.include_rvar(wrapper, dml_rvar, ir_stmt.subject.path_id, ctx=ctx)
-
-    pathctx.put_path_bond(wrapper, ir_stmt.subject.path_id)
+    dml_rvar = wrap_dml_cte(ir_stmt, dml_cte, ctx=ctx)
+    ctx.dml_stmts[ir_stmt] = dml_cte
 
     return wrapper, dml_cte, dml_rvar, range_cte
+
+
+def wrap_dml_cte(
+    ir_stmt: irast.MutatingStmt,
+    dml_cte: pgast.CommonTableExpr,
+    *,
+    ctx: context.CompilerContextLevel,
+) -> pgast.RelRangeVar:
+
+    wrapper = ctx.rel
+    dml_rvar = pgast.RelRangeVar(
+        relation=dml_cte,
+        alias=pgast.Alias(aliasname=ctx.env.aliases.get('d'))
+    )
+    relctx.include_rvar(wrapper, dml_rvar, ir_stmt.subject.path_id, ctx=ctx)
+    pathctx.put_path_bond(wrapper, ir_stmt.subject.path_id)
+
+    return dml_rvar
 
 
 def fini_dml_stmt(
@@ -330,7 +343,6 @@ def process_insert_body(
     )
 
     external_inserts = []
-    parent_link_props = []
 
     with ctx.newrel() as subctx:
         subctx.rel = select
@@ -353,7 +365,6 @@ def process_insert_body(
 
             if (ptrref.parent_ptr is not None and
                     rptr.source.path_id != ir_stmt.subject.path_id):
-                parent_link_props.append(shape_el)
                 continue
 
             ptr_info = pg_types.get_ptrref_storage_info(
@@ -367,9 +378,21 @@ def process_insert_body(
                 field = pgast.ColumnRef(name=[ptr_info.column_name])
                 cols.append(field)
 
-                insvalue = insert_value_for_shape_element(
+                rel = compile_insert_shape_element(
                     insert_stmt, wrapper, ir_stmt, shape_el, iterator_id,
-                    ptr_info=ptr_info, ctx=subctx)
+                    ctx=ctx)
+
+                insvalue = pathctx.get_path_value_var(
+                    rel, shape_el.path_id, env=ctx.env)
+
+                if irtyputils.is_tuple(shape_el.typeref):
+                    # Tuples require an explicit cast.
+                    insvalue = pgast.TypeCast(
+                        arg=output.output_as_value(insvalue, env=ctx.env),
+                        type_name=pgast.TypeName(
+                            name=ptr_info.column_type,
+                        ),
+                    )
 
                 values.append(pgast.ResTarget(val=insvalue))
 
@@ -401,28 +424,6 @@ def process_insert_body(
             wrapper=wrapper, dml_cte=insert_cte, iterator_cte=iterator_cte,
             is_insert=True, ctx=ctx)
 
-    if parent_link_props:
-        prop_elements = []
-
-        with ctx.newscope() as scopectx:
-            scopectx.rel = wrapper
-
-            for shape_el in parent_link_props:
-                rptr = shape_el.rptr
-                scopectx.path_scope[rptr.source.path_id] = wrapper
-                pathctx.put_path_rvar_if_not_exists(
-                    wrapper, rptr.source.path_id, insert_rvar,
-                    aspect='value', env=scopectx.env)
-                dispatch.visit(shape_el, ctx=scopectx)
-                tuple_el = astutils.tuple_element_for_shape_el(
-                    shape_el, None, ctx=scopectx)
-                prop_elements.append(tuple_el)
-
-        valtuple = pgast.TupleVarBase(elements=prop_elements, named=True)
-        pathctx.put_path_value_var(
-            wrapper, ir_stmt.subject.path_id,
-            valtuple, force=True, env=ctx.env)
-
 
 def compile_insert_shape_element(
         insert_stmt: pgast.InsertStmt,
@@ -448,39 +449,6 @@ def compile_insert_shape_element(
     return insvalctx.rel
 
 
-def insert_value_for_shape_element(
-        insert_stmt: pgast.InsertStmt,
-        wrapper: pgast.Query,
-        ir_stmt: irast.MutatingStmt,
-        shape_el: irast.Set,
-        iterator_id: Optional[pgast.BaseExpr], *,
-        ptr_info: pg_types.PointerStorageInfo,
-        ctx: context.CompilerContextLevel) -> pgast.BaseExpr:
-
-    rel = compile_insert_shape_element(
-        insert_stmt, wrapper, ir_stmt, shape_el, iterator_id, ctx=ctx)
-
-    insvalue = pathctx.get_path_value_var(
-        rel, shape_el.path_id, env=ctx.env)
-
-    if isinstance(insvalue, pgast.TupleVarBase):
-        if shape_el.path_id.is_objtype_path():
-            for element in insvalue.elements:
-                name = element.path_id.rptr_name()
-                if name == 'std::target':
-                    insvalue = pathctx.get_path_value_var(
-                        rel, element.path_id,
-                        env=ctx.env)
-                    break
-            else:
-                raise RuntimeError('could not find std::target in '
-                                   'insert computable')
-        else:
-            insvalue = output.output_as_value(insvalue, env=ctx.env)
-
-    return insvalue
-
-
 def process_update_body(
         ir_stmt: irast.MutatingStmt,
         wrapper: pgast.Query, update_cte: pgast.CommonTableExpr,
@@ -502,10 +470,6 @@ def process_update_body(
 
     external_updates = []
 
-    toplevel = ctx.toplevel_stmt
-    toplevel.ctes.append(range_cte)
-    toplevel.ctes.append(update_cte)
-
     with ctx.newscope() as subctx:
         # It is necessary to process the expressions in
         # the UpdateStmt shape body in the context of the
@@ -522,13 +486,28 @@ def process_update_body(
 
             if ptr_info.table_type == 'ObjectType' and updvalue is not None:
                 with subctx.newscope() as scopectx:
-                    # First, process all internal link updates
-                    updtarget = pgast.UpdateTarget(
-                        name=ptr_info.column_name,
-                        val=pgast.TypeCast(
+                    val: pgast.BaseExpr
+
+                    if irtyputils.is_tuple(shape_el.typeref):
+                        # When target is a tuple type, make sure
+                        # the expression is compiled into a subquery
+                        # returning a single column that is explicitly
+                        # cast into the appropriate composite type.
+                        val = relgen.set_as_subquery(
+                            shape_el,
+                            as_value=True,
+                            explicit_cast=ptr_info.column_type,
+                            ctx=scopectx,
+                        )
+                    else:
+                        val = pgast.TypeCast(
                             arg=dispatch.compile(updvalue, ctx=scopectx),
                             type_name=pgast.TypeName(name=ptr_info.column_type)
                         )
+
+                    updtarget = pgast.UpdateTarget(
+                        name=ptr_info.column_name,
+                        val=val,
                     )
 
                     update_stmt.targets.append(updtarget)
@@ -558,6 +537,10 @@ def process_update_body(
             view_path_id_map=update_stmt.view_path_id_map.copy(),
             ptr_join_map=update_stmt.ptr_join_map.copy(),
         )
+
+    toplevel = ctx.toplevel_stmt
+    toplevel.ctes.append(range_cte)
+    toplevel.ctes.append(update_cte)
 
     # Process necessary updates to the link tables.
     for expr, _props_only in external_updates:

@@ -24,7 +24,6 @@ import uuid
 import edgedb
 
 from edb.testbase import server as tb
-from edb.tools import test
 
 
 class TestUpdate(tb.QueryTestCase):
@@ -1729,9 +1728,6 @@ class TestUpdate(tb.QueryTestCase):
             ]
         )
 
-    @test.xfail('''
-        edgedb.errors.InternalServerError: relation "m~2" does not exist
-    ''')
     async def test_edgeql_update_new_02(self):
         # test and UPDATE with a new object
         await self.assert_query_result(
@@ -1764,16 +1760,12 @@ class TestUpdate(tb.QueryTestCase):
                 {
                     'name': 'update-test1',
                     'status': {
-                        'name': 'new tag',
+                        'name': 'new status',
                     },
                 },
             ]
         )
 
-    @test.xfail('''
-        edgedb.errors.InternalServerError:
-        subquery must return only one column
-    ''')
     async def test_edgeql_update_collection_01(self):
         # test and UPDATE with a collection
         await self.con.execute(

@@ -42,6 +42,7 @@ from edb.pgsql import types as pg_types
 from . import astutils
 from . import context
 from . import dispatch
+from . import dml
 from . import expr as exprcomp
 from . import output
 from . import pathctx
@@ -305,14 +306,13 @@ def _get_set_rvar(
 def set_as_subquery(
         ir_set: irast.Set, *,
         as_value: bool=False,
+        explicit_cast: Optional[Tuple[str, ...]] = None,
         ctx: context.CompilerContextLevel) -> pgast.Query:
     # Compile *ir_set* into a subquery as follows:
     #     (
     #         SELECT <set_rel>.v
     #         FROM <set_rel>
     #     )
-    # If *aggregate* is True, then the return value will
-    # be aggregated into an array.
     with ctx.subrel() as subctx:
         wrapper = subctx.rel
         dispatch.visit(ir_set, ctx=subctx)
@@ -329,6 +329,12 @@ def set_as_subquery(
                 var = pathctx.get_path_value_var(
                     rel=wrapper, path_id=ir_set.path_id, env=ctx.env)
                 value = output.output_as_value(var, env=ctx.env)
+
+                if explicit_cast is not None:
+                    value = pgast.TypeCast(
+                        arg=value,
+                        type_name=pgast.TypeName(name=explicit_cast),
+                    )
 
                 wrapper.target_list = [
                     pgast.ResTarget(val=value)
@@ -935,7 +941,17 @@ def process_set_as_subquery(
                     pathctx.get_path_identity_output(
                         subrel, path_id=ir_source.path_id, env=ctx.env)
 
-        dispatch.visit(ir_set.expr, ctx=newctx)
+        if (isinstance(ir_set.expr, irast.MutatingStmt)
+                and ir_set.expr in ctx.dml_stmts):
+            # The DML table-routing logic may result in the same
+            # DML subquery to be visited twice, such as in the case
+            # of a nested INSERT declaring link properties, so guard
+            # against generating a duplicate DML CTE.
+            with newctx.substmt() as subrelctx:
+                dml_cte = ctx.dml_stmts[ir_set.expr]
+                dml.wrap_dml_cte(ir_set.expr, dml_cte, ctx=subrelctx)
+        else:
+            dispatch.visit(ir_set.expr, ctx=newctx)
 
         if semi_join:
             src_ref = pathctx.maybe_get_path_identity_var(

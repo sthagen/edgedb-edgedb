@@ -18,7 +18,6 @@
 
 
 import os.path
-import unittest
 import uuid
 
 import edgedb
@@ -421,12 +420,6 @@ class TestInsert(tb.QueryTestCase):
             'subordinates': [{'name': 'nested sub 8.1'}]
         }])
 
-    @test.xfail('''
-        edgedb.errors.InternalServerError: could not find std::target
-        in insert computable
-
-        Probably related to `test_edgeql_insert_derived_02`.
-    ''')
     async def test_edgeql_insert_nested_09(self):
         # test a single link with a link property
         await self.con.execute(r'''
@@ -1055,7 +1048,6 @@ class TestInsert(tb.QueryTestCase):
             {1, 2, 3}
         )
 
-    @unittest.expectedFailure
     async def test_edgeql_insert_as_expr_01(self):
         await self.con.execute(r'''
             # insert several objects, then annotate one of the inserted batch
@@ -1084,7 +1076,7 @@ class TestInsert(tb.QueryTestCase):
                         name,
                         l2,
                         l3,
-                        <subject: {
+                        subject := .<subject {
                             name,
                             note,
                         }
@@ -1098,19 +1090,19 @@ class TestInsert(tb.QueryTestCase):
                     'name': 'insert expr 1',
                     'l2': 2,
                     'l3': 'test',
-                    'subject': None,
+                    'subject': [],
                 },
                 {
                     'name': 'insert expr 1',
                     'l2': 3,
                     'l3': 'test',
-                    'subject': None,
+                    'subject': [],
                 },
                 {
                     'name': 'insert expr 1',
                     'l2': 5,
                     'l3': 'test',
-                    'subject': None,
+                    'subject': [],
                 },
                 {
                     'name': 'insert expr 1',
@@ -1124,14 +1116,13 @@ class TestInsert(tb.QueryTestCase):
             ]
         )
 
-    @unittest.expectedFailure
     async def test_edgeql_insert_polymorphic_01(self):
         await self.con.execute(r'''
             WITH MODULE test
             INSERT Directive {
-                args: {
+                args := (INSERT InputValue {
                     val := "something"
-                },
+                }),
             };
         ''')
 
@@ -1145,7 +1136,7 @@ class TestInsert(tb.QueryTestCase):
                 };
             ''',
             [{
-                'args': {'val': 'something'},
+                'args': [{'val': 'something'}],
             }]
         )
 
@@ -1171,7 +1162,7 @@ class TestInsert(tb.QueryTestCase):
                 };
             ''',
             [{
-                'args': {'val': 'something'},
+                'args': [{'val': 'something'}],
             }],
         )
 
@@ -1512,13 +1503,6 @@ class TestInsert(tb.QueryTestCase):
             ]
         )
 
-    @test.xfail('''
-        edgedb.errors.InternalServerError: relation
-        "edgedb_cf30b32c-dbf7-11e9-a772-0fb6315b40c8.cf535282-dbf7-11e9-9870-dda602d7da1c"
-        does not exist
-
-        Probably related to `test_edgeql_insert_nested_09`.
-    ''')
     async def test_edgeql_insert_derived_02(self):
         await self.con.execute(r"""
             WITH MODULE test
@@ -1560,10 +1544,6 @@ class TestInsert(tb.QueryTestCase):
             ]
         )
 
-    @test.xfail('''
-        edgedb.errors.InternalServerError: cannot cast type record to
-        "338fc9bb-51be-555d-b2f7-abe53ff0567f_t"
-    ''')
     async def test_edgeql_insert_collection_01(self):
         await self.con.execute(r"""
             INSERT test::CollectionTest {
