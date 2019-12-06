@@ -20,7 +20,6 @@
 import functools
 import os.path
 import typing
-import unittest
 
 import edgedb
 
@@ -2083,24 +2082,6 @@ class TestExpressions(tb.QueryTestCase):
                 };
             """)
 
-    @unittest.expectedFailure
-    async def test_edgeql_expr_paths_07(self):
-        # `Issue.number` in FILTER is illegal because it shares a
-        # prefix `Issue` with `Issue.owner` which is defined in an
-        # outer scope.
-        with self.assertRaisesRegex(
-                edgedb.QueryError,
-                r"'Issue.number' changes the interpretation of 'Issue'"):
-            await self.con.execute(r"""
-                WITH MODULE test
-                FOR x IN {'Elvis', 'Yury'}
-                UNION (
-                    SELECT Issue.owner
-                    FILTER Issue.owner.name = x
-                )
-                FILTER Issue.number > '2';
-            """)
-
     async def test_edgeql_expr_paths_08(self):
         # `Issue.number` in FILTER is illegal because it shares a
         # prefix `Issue` with `Issue.owner` which is defined in an
@@ -3053,11 +3034,39 @@ class TestExpressions(tb.QueryTestCase):
         )
 
         await self.assert_query_result(
+            r'''SELECT 'bb\
+            aa \
+
+
+            bb';
+            ''',
+            ['bbaa bb'],
+        )
+
+        await self.assert_query_result(
             r'''SELECT r'aa\
             bb \
             aa';''',
             ['aa\\\n            bb \\\n            aa'],
         )
+
+    async def test_edgeql_expr_string_10(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r'invalid string literal: invalid line continuation',
+                _hint="newline has to immediately follow '\\'"):
+            await self.con.execute(
+                r"SELECT 'bb\   "
+                "\naa';"
+            )
+
+    async def test_edgeql_expr_string_11(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r"invalid string literal: invalid escape sequence '\\ '"):
+            await self.con.execute(
+                r"SELECT 'bb\   aa';"
+            )
 
     async def test_edgeql_expr_tuple_01(self):
         await self.assert_query_result(
@@ -4253,7 +4262,7 @@ class TestExpressions(tb.QueryTestCase):
             {2, 3, 4, 5},
         )
 
-    @unittest.expectedFailure
+    @test.not_implemented('GROUP statement is not yet implemented')
     async def test_edgeql_expr_group_01(self):
         await self.assert_query_result(
             r"""
@@ -4272,7 +4281,7 @@ class TestExpressions(tb.QueryTestCase):
             ]
         )
 
-    @unittest.expectedFailure
+    @test.not_implemented('GROUP statement is not yet implemented')
     async def test_edgeql_expr_group_02(self):
         await self.assert_query_result(
             r'''
@@ -4288,7 +4297,7 @@ class TestExpressions(tb.QueryTestCase):
             sort=True
         )
 
-    @unittest.expectedFailure
+    @test.not_implemented('GROUP statement is not yet implemented')
     async def test_edgeql_expr_group_03(self):
         await self.assert_query_result(
             r'''
@@ -4303,7 +4312,7 @@ class TestExpressions(tb.QueryTestCase):
             sort=True
         )
 
-    @unittest.expectedFailure
+    @test.not_implemented('GROUP statement is not yet implemented')
     async def test_edgeql_expr_group_04(self):
         await self.assert_query_result(
             r'''
@@ -4319,7 +4328,7 @@ class TestExpressions(tb.QueryTestCase):
             [[2, [1, 4]], [4, [3]]],
         )
 
-    @unittest.expectedFailure
+    @test.not_implemented('GROUP statement is not yet implemented')
     async def test_edgeql_expr_group_05(self):
         await self.assert_query_result(
             r'''
@@ -4343,7 +4352,7 @@ class TestExpressions(tb.QueryTestCase):
             [[1, 3, 6, 6], [2, 1, 6, 6], [3, 2, 6, 6]]
         )
 
-    @unittest.expectedFailure
+    @test.not_implemented('GROUP statement is not yet implemented')
     async def test_edgeql_expr_group_06(self):
         await self.assert_query_result(
             r'''
