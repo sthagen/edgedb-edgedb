@@ -28,6 +28,7 @@ from edb import errors
 
 from edb.edgeql import qltypes
 from edb.ir import ast as irast
+from edb.ir import typeutils as irtyputils
 
 from edb.schema import name as s_name
 from edb.schema import pointers as s_pointers
@@ -38,7 +39,7 @@ from . import stmtctx
 
 
 def get_path_id(stype: s_types.Type, *,
-                typename: Optional[str]=None,
+                typename: Optional[s_name.Name]=None,
                 ctx: context.ContextLevel) -> irast.PathId:
     return irast.PathId.from_type(
         ctx.env.schema, stype,
@@ -51,9 +52,12 @@ def get_tuple_indirection_path_id(
         element_type: s_types.Type, *,
         ctx: context.ContextLevel) -> irast.PathId:
     return tuple_path_id.extend(
-        ptrcls=irast.TupleIndirectionLink(element_name),
-        direction=s_pointers.PointerDirection.Outbound,
-        target=element_type,
+        ptrcls=irast.TupleIndirectionLink(
+            irtyputils.ir_typeref_to_type(
+                ctx.env.schema, tuple_path_id.target),
+            element_type,
+            element_name=element_name,
+        ),
         schema=ctx.env.schema
     )
 
@@ -64,12 +68,12 @@ def get_type_indirection_path_id(
         ctx: context.ContextLevel) -> irast.PathId:
     return path_id.extend(
         ptrcls=irast.TypeIndirectionLink(
-            path_id.target, target_type,
+            irtyputils.ir_typeref_to_type(
+                ctx.env.schema, path_id.target),
+            target_type,
             optional=optional,
             ancestral=ancestral,
             cardinality=cardinality),
-        direction=s_pointers.PointerDirection.Outbound,
-        target=target_type,
         schema=ctx.env.schema
     )
 
@@ -133,15 +137,18 @@ def extend_path_id(
     ptrcls: s_pointers.PointerLike,
     direction: s_pointers.PointerDirection = (
         s_pointers.PointerDirection.Outbound),
-    target: Union[None, s_types.Type, irast.TypeRef] = None,
     ns: AbstractSet[str] = frozenset(),
     ctx: context.ContextLevel,
 ) -> irast.PathId:
+    """A wrapper over :meth:`ir.pathid.PathId.extend` that also ensures
+       the cardinality of *ptrcls* is known at the end of compilation.
+    """
 
-    result = path_id.extend(ptrcls=ptrcls, direction=direction, target=target,
+    result = path_id.extend(ptrcls=ptrcls, direction=direction,
                             ns=ns, schema=ctx.env.schema)
 
     ptrref = result.rptr()
+    assert ptrref is not None
     stmtctx.ensure_ptrref_cardinality(ptrcls, ptrref, ctx=ctx)
 
     return result

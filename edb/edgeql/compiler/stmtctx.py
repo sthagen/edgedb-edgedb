@@ -75,7 +75,6 @@ def init_context(
         schema_view_mode: bool=False,
         disable_constant_folding: bool=False,
         allow_generic_type_output: bool=False,
-        allow_abstract_operators: bool=False,
         implicit_id_in_shapes: bool=False,
         implicit_tid_in_shapes: bool=False,
         json_parameters: bool=False,
@@ -92,7 +91,6 @@ def init_context(
         schema_view_mode=schema_view_mode,
         json_parameters=json_parameters,
         session_mode=session_mode,
-        allow_abstract_operators=allow_abstract_operators,
         allow_generic_type_output=allow_generic_type_output)
     ctx = context.ContextLevel(None, context.ContextSwitchMode.NEW, env=env)
     _ = context.CompilerContext(initial=ctx)
@@ -145,7 +143,7 @@ def fini_expression(
 
     if ctx.path_scope is not None:
         # Simple expressions have no scope.
-        for node in ctx.path_scope.get_all_path_nodes(include_subpaths=True):
+        for node in ctx.path_scope.path_descendants:
             if node.path_id.namespace:
                 node.path_id = node.path_id.strip_weak_namespaces()
 
@@ -262,7 +260,6 @@ def compile_anchor(
                 setgen.class_set(src, ctx=ctx),
                 anchor,
                 s_pointers.PointerDirection.Outbound,
-                anchor.get_target(ctx.env.schema),
                 ctx=ctx,
             )
         else:
@@ -273,7 +270,6 @@ def compile_anchor(
                 setgen.class_set(src, ctx=ctx),
                 ptrcls,
                 s_pointers.PointerDirection.Outbound,
-                ptrcls.get_target(ctx.env.schema),
                 ctx=ctx)
 
         step = path
@@ -291,7 +287,6 @@ def compile_anchor(
                 setgen.class_set(anchor_source_source, ctx=ctx),
                 anchor_source,
                 s_pointers.PointerDirection.Outbound,
-                anchor_source.get_target(ctx.env.schema),
                 ctx=ctx,
             )
         else:
@@ -302,14 +297,12 @@ def compile_anchor(
                 setgen.class_set(src, ctx=ctx),
                 ptrcls,
                 s_pointers.PointerDirection.Outbound,
-                ptrcls.get_target(ctx.env.schema),
                 ctx=ctx)
 
         step = setgen.extend_path(
             path,
             anchor,
             s_pointers.PointerDirection.Outbound,
-            anchor.get_target(ctx.env.schema),
             ctx=ctx)
 
     elif isinstance(anchor, qlast.SubExpr):
@@ -367,7 +360,7 @@ def declare_view(
             # in the parent statement's fence node.
             view_path_id_ns = irast.WeakNamespace(ctx.aliases.get('ns'))
             subctx.path_id_namespace |= {view_path_id_ns}
-            ctx.path_scope.add_namespaces((view_path_id_ns,))
+            ctx.path_scope.add_namespaces({view_path_id_ns})
         else:
             cached_view_set = None
 

@@ -175,9 +175,6 @@ class Environment:
     session_mode: bool
     """Whether there is a specific session."""
 
-    allow_abstract_operators: bool
-    """Whether to allow the use of abstract operators."""
-
     schema_refs: Set[s_obj.Object]
     """A set of all schema objects referenced by an expression."""
 
@@ -197,7 +194,6 @@ class Environment:
         constant_folding: bool=True,
         json_parameters: bool=False,
         session_mode: bool=False,
-        allow_abstract_operators: bool=True,
         allow_generic_type_output: bool=False,
         func_params: Optional[s_func.ParameterLikeList]=None,
     ) -> None:
@@ -216,7 +212,6 @@ class Environment:
             irast.ViewShapeMetadata)
         self.json_parameters = json_parameters
         self.session_mode = session_mode
-        self.allow_abstract_operators = allow_abstract_operators
         self.allow_generic_type_output = allow_generic_type_output
         self.schema_refs = set()
         self.created_schema_objects = set()
@@ -327,9 +322,6 @@ class ContextLevel(compiler.ContextLevel):
     clause: Optional[str]
     """Statement clause the compiler is currently in."""
 
-    toplevel_clause: Optional[str]
-    """Top-level statement clause the compiler is currently in."""
-
     toplevel_stmt: Optional[irast.Stmt]
     """Top-level statement."""
 
@@ -432,8 +424,6 @@ class ContextLevel(compiler.ContextLevel):
             self.shape_type_cache = {}
             self.class_view_overrides = {}
 
-            self.clause = None
-            self.toplevel_clause = None
             self.toplevel_stmt = None
             self.stmt = None
             self.path_id_namespace = frozenset()
@@ -486,7 +476,6 @@ class ContextLevel(compiler.ContextLevel):
             self.view_scls = prevlevel.view_scls
             self.expr_exposed = prevlevel.expr_exposed
             self.partial_path_prefix = prevlevel.partial_path_prefix
-            self.toplevel_clause = prevlevel.toplevel_clause
             self.toplevel_stmt = prevlevel.toplevel_stmt
             self.implicit_id_in_shapes = prevlevel.implicit_id_in_shapes
             self.implicit_tid_in_shapes = prevlevel.implicit_tid_in_shapes
@@ -508,7 +497,6 @@ class ContextLevel(compiler.ContextLevel):
 
                 self.view_rptr = None
                 self.view_scls = None
-                self.clause = None
                 self.stmt = None
 
                 self.view_rptr = None
@@ -530,7 +518,6 @@ class ContextLevel(compiler.ContextLevel):
 
                 self.view_rptr = None
                 self.view_scls = None
-                self.clause = None
                 self.stmt = prevlevel.stmt
 
                 self.partial_path_prefix = None
@@ -543,7 +530,6 @@ class ContextLevel(compiler.ContextLevel):
                 self.aliased_views = prevlevel.aliased_views
                 self.class_view_overrides = prevlevel.class_view_overrides
 
-                self.clause = prevlevel.clause
                 self.stmt = prevlevel.stmt
 
                 self.view_rptr = prevlevel.view_rptr
