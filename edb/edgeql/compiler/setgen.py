@@ -53,6 +53,7 @@ from . import inference
 from . import pathctx
 from . import schemactx
 from . import stmtctx
+from . import typegen
 
 if TYPE_CHECKING:
     from edb.schema import objects as s_obj
@@ -255,8 +256,7 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
             if ptr_expr.type == 'property':
                 # Link property reference; the source is the
                 # link immediately preceding this step in the path.
-                ptr = irtyputils.ptrcls_from_ptrref(
-                    path_tip.rptr.ptrref, schema=ctx.env.schema)
+                ptr = typegen.ptrcls_from_ptrref(path_tip.rptr.ptrref, ctx=ctx)
                 assert isinstance(ptr, s_links.Link)
                 source = ptr
             else:
@@ -275,8 +275,8 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
                         ignore_computable=True,
                         source_context=step.context, ctx=subctx)
 
-                    ptrcls = irtyputils.ptrcls_from_ptrref(
-                        path_tip.rptr.ptrref, schema=ctx.env.schema)
+                    ptrcls = typegen.ptrcls_from_ptrref(
+                        path_tip.rptr.ptrref, ctx=ctx)
                     if _is_computable_ptr(ptrcls, ctx=ctx):
                         computables.append(path_tip)
 
@@ -793,7 +793,7 @@ def computable_ptr_set(
         from_default_expr: bool=False,
         ctx: context.ContextLevel) -> irast.Set:
     """Return ir.Set for a pointer defined as a computable."""
-    ptrcls = irtyputils.ptrcls_from_ptrref(rptr.ptrref, schema=ctx.env.schema)
+    ptrcls = typegen.ptrcls_from_ptrref(rptr.ptrref, ctx=ctx)
     source_set = rptr.source
     source_scls = get_set_type(source_set, ctx=ctx)
     # process_view() may generate computable pointer expressions
@@ -807,35 +807,13 @@ def computable_ptr_set(
             source_set, stype=source_set_stype,
             preserve_scope_ns=True, ctx=ctx)
         source_set.shape = []
-
         if source_set.rptr is not None:
-            schema = ctx.env.schema
-            source_rptrref = source_set.rptr.ptrref
-            source_rptrcls = irtyputils.ptrcls_from_ptrref(
-                source_rptrref, schema=schema)
-            bases = source_rptrcls.get_bases(schema)
-            if bases:
-                base = bases.first(schema)
-                if (not base.generic(schema)
-                        and ptrcls.is_link_property(schema)):
-                    source_rptrref = irtyputils.ptrref_from_ptrcls(
-                        source_ref=source_rptrref.dir_source,
-                        target_ref=source_rptrref.dir_target,
-                        direction=source_rptrref.direction,
-                        parent_ptr=source_rptrref.parent_ptr,
-                        ptrcls=base,
-                        schema=schema,
-                    )
-
-                    source_set.rptr = irast.Pointer(
-                        source=source_set.rptr.source,
-                        target=source_set,
-                        ptrref=source_rptrref,
-                        direction=source_set.rptr.direction,
-                    )
-
-                    stmtctx.ensure_ptrref_cardinality(
-                        base, source_set.rptr.ptrref, ctx=ctx)
+            source_set.rptr = irast.Pointer(
+                source=source_set.rptr.source,
+                target=source_set,
+                ptrref=source_set.rptr.ptrref.base_ptr,
+                direction=source_set.rptr.direction,
+            )
 
     qlctx: Optional[context.ContextLevel]
     inner_source_path_id: Optional[irast.PathId]
