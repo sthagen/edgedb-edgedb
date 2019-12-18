@@ -116,23 +116,50 @@ def compile_ForQuery(
         init_stmt(stmt, qlstmt, ctx=sctx, parent_ctx=ctx)
 
         with sctx.newscope(fenced=True) as scopectx:
+            iterator_ctx = None
+            if (ctx.expr_exposed and ctx.iterator_ctx is not None
+                    and ctx.iterator_ctx is not sctx):
+                iterator_ctx = ctx.iterator_ctx
+
+            if iterator_ctx is not None:
+                iterator_scope_parent = iterator_ctx.path_scope
+                path_id_ns = iterator_ctx.path_id_namespace
+            else:
+                iterator_scope_parent = sctx.path_scope
+                path_id_ns = sctx.path_id_namespace
+
             iterator = qlstmt.iterator
             if isinstance(iterator, qlast.Set) and len(iterator.elements) == 1:
                 iterator = iterator.elements[0]
 
             iterator_view = stmtctx.declare_view(
-                iterator, qlstmt.iterator_alias, ctx=scopectx)
+                iterator, qlstmt.iterator_alias,
+                path_id_namespace=path_id_ns, ctx=scopectx)
 
-            stmt.iterator_stmt = setgen.new_set_from_set(
-                iterator_view, ctx=scopectx)
+            iterator_stmt = setgen.new_set_from_set(
+                iterator_view, preserve_scope_ns=True, ctx=scopectx)
 
-            iterator_scope = scopectx.path_scope_map.get(iterator_view)
+            if iterator_ctx is not None and iterator_ctx.stmt is not None:
+                iterator_ctx.stmt.hoisted_iterators.append(iterator_stmt)
 
-        pathctx.register_set_in_scope(stmt.iterator_stmt, ctx=sctx)
-        node = sctx.path_scope.find_descendant(stmt.iterator_stmt.path_id)
-        assert node is not None
-        assert iterator_scope is not None
-        node.attach_subtree(iterator_scope)
+            stmt.iterator_stmt = iterator_stmt
+
+            iterator_scope, _ = scopectx.path_scope_map[iterator_view]
+
+        pathctx.register_set_in_scope(
+            iterator_stmt,
+            path_scope=iterator_scope_parent,
+            ctx=sctx,
+        )
+        # Iterator symbol is, by construction, outside of the scope
+        # of the UNION argument, but is perfectly legal to be referenced
+        # inside a factoring fence that is an immediate child of this
+        # scope.
+        iterator_scope_parent.factoring_whitelist.add(
+            stmt.iterator_stmt.path_id)
+        node = iterator_scope_parent.find_descendant(iterator_stmt.path_id)
+        if node is not None:
+            node.attach_subtree(iterator_scope)
 
         stmt.result = compile_result_clause(
             qlstmt.result,
@@ -213,6 +240,13 @@ def compile_GroupQuery(
 @dispatch.compile.register(qlast.InsertQuery)
 def compile_InsertQuery(
         expr: qlast.InsertQuery, *, ctx: context.ContextLevel) -> irast.Set:
+
+    if ctx.in_conditional is not None:
+        raise errors.QueryError(
+            'INSERT statements cannot be used inside conditional expressions',
+            context=expr.context,
+        )
+
     with ctx.subquery() as ictx:
         stmt = irast.InsertStmt()
         init_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
@@ -271,6 +305,13 @@ def compile_InsertQuery(
 @dispatch.compile.register(qlast.UpdateQuery)
 def compile_UpdateQuery(
         expr: qlast.UpdateQuery, *, ctx: context.ContextLevel) -> irast.Set:
+
+    if ctx.in_conditional is not None:
+        raise errors.QueryError(
+            'UPDATE statements cannot be used inside conditional expressions',
+            context=expr.context,
+        )
+
     with ctx.subquery() as ictx:
         stmt = irast.UpdateStmt()
         init_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
@@ -324,6 +365,13 @@ def compile_UpdateQuery(
 @dispatch.compile.register(qlast.DeleteQuery)
 def compile_DeleteQuery(
         expr: qlast.DeleteQuery, *, ctx: context.ContextLevel) -> irast.Set:
+
+    if ctx.in_conditional is not None:
+        raise errors.QueryError(
+            'DELETE statements cannot be used inside conditional expressions',
+            context=expr.context,
+        )
+
     with ctx.subquery() as ictx:
         stmt = irast.DeleteStmt()
         # Expand the DELETE from sugar into full DELETE (SELECT ...)
@@ -549,8 +597,14 @@ def init_stmt(
         ctx.path_id_namespace |= pending_full_ns
 
     metadata = ctx.stmt_metadata.get(qlstmt)
-    if metadata is not None and metadata.is_unnest_fence:
-        ctx.path_scope.unnest_fence = True
+    if metadata is not None:
+        if metadata.is_unnest_fence:
+            ctx.path_scope.unnest_fence = True
+        if metadata.iterator_target:
+            ctx.iterator_ctx = ctx
+
+    if isinstance(irstmt, irast.MutatingStmt):
+        ctx.path_scope.factoring_fence = True
 
     irstmt.parent_stmt = parent_ctx.stmt
 
