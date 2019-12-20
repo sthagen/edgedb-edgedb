@@ -22,20 +22,17 @@
 
 CREATE MODULE schema;
 
-CREATE SCALAR TYPE schema::cardinality_t EXTENDING std::str {
-    CREATE CONSTRAINT std::one_of ('ONE', 'MANY');
-};
+CREATE SCALAR TYPE schema::Cardinality
+    EXTENDING enum<'ONE', 'MANY'>;
 
-CREATE SCALAR TYPE schema::target_delete_action_t EXTENDING std::str {
-    CREATE CONSTRAINT std::one_of ('RESTRICT', 'DELETE SOURCE', 'SET EMPTY',
-                                   'SET DEFAULT', 'DEFERRED RESTRICT');
-};
+CREATE SCALAR TYPE schema::TargetDeleteAction
+    EXTENDING enum<'RESTRICT', 'DELETE SOURCE', 'SET EMPTY',
+                   'SET DEFAULT', 'DEFERRED RESTRICT'>;
 
-CREATE SCALAR TYPE schema::operator_kind_t EXTENDING std::str {
-    CREATE CONSTRAINT std::one_of ('INFIX', 'POSTFIX', 'PREFIX', 'TERNARY');
-};
+CREATE SCALAR TYPE schema::OperatorKind
+    EXTENDING enum<'INFIX', 'POSTFIX', 'PREFIX', 'TERNARY'>;
 
-CREATE SCALAR TYPE schema::volatility_t
+CREATE SCALAR TYPE schema::Volatility
     EXTENDING enum<'IMMUTABLE', 'STABLE', 'VOLATILE'>;
 
 # Base type for all schema entities.
@@ -150,7 +147,7 @@ CREATE ABSTRACT TYPE schema::CallableObject
 
 
 CREATE ABSTRACT TYPE schema::VolatilitySubject {
-    CREATE REQUIRED PROPERTY volatility -> schema::volatility_t {
+    CREATE REQUIRED PROPERTY volatility -> schema::Volatility {
         # NOTE: this default indicates the default value in the python
         # implementation, but is not itself a source of truth
         SET default := 'VOLATILE';
@@ -203,7 +200,7 @@ CREATE ABSTRACT TYPE schema::Pointer
         schema::InheritingObject, schema::ConsistencySubject,
         schema::AnnotationSubject
 {
-    CREATE REQUIRED PROPERTY cardinality -> schema::cardinality_t;
+    CREATE REQUIRED PROPERTY cardinality -> schema::Cardinality;
     CREATE REQUIRED PROPERTY required -> std::bool;
     CREATE PROPERTY default -> std::str;
     CREATE PROPERTY expr -> std::str;
@@ -260,7 +257,7 @@ ALTER TYPE schema::Pointer {
 
 ALTER TYPE schema::Link {
     CREATE LINK properties := .pointers;
-    CREATE PROPERTY on_target_delete -> schema::target_delete_action_t;
+    CREATE PROPERTY on_target_delete -> schema::TargetDeleteAction;
 };
 
 
@@ -282,7 +279,7 @@ CREATE TYPE schema::Function
 CREATE TYPE schema::Operator
     EXTENDING schema::CallableObject, schema::VolatilitySubject
 {
-    CREATE PROPERTY operator_kind -> schema::operator_kind_t;
+    CREATE PROPERTY operator_kind -> schema::OperatorKind;
     CREATE LINK commutator -> schema::Operator;
     CREATE PROPERTY is_abstract -> std::bool {
         SET default := false;
