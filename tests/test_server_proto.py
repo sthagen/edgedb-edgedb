@@ -40,6 +40,9 @@ class TestServerProto(tb.QueryTestCase):
             CREATE PROPERTY name -> std::str;
         };
 
+        CREATE SCALAR TYPE test::RGB
+            EXTENDING enum<'RED', 'BLUE', 'GREEN'>;
+
         # Used by is_testmode_on() to ensure that config modifications
         # persist correctly when set inside and outside of (potentially
         # failing) transaction blocks.
@@ -339,7 +342,7 @@ class TestServerProto(tb.QueryTestCase):
 
         with self.assertRaisesRegex(
                 edgedb.InvalidReferenceError,
-                "object type or view 'Tmp' does not exist"):
+                "object type or alias 'Tmp' does not exist"):
             await self.con.fetchall('''
                 SELECT count(
                     Tmp FILTER Tmp.tmp = "test_server_set_reset_alias_01");
@@ -365,7 +368,7 @@ class TestServerProto(tb.QueryTestCase):
 
         with self.assertRaisesRegex(
                 edgedb.InvalidReferenceError,
-                "object type or view 'Tmp' does not exist"):
+                "object type or alias 'Tmp' does not exist"):
             await self.con.fetchall('''
                 SELECT count(
                     Tmp FILTER Tmp.tmp = "test_server_set_reset_alias_01");
@@ -516,6 +519,112 @@ class TestServerProto(tb.QueryTestCase):
                 await self.con.fetchone_json('SELECT <int64>{}')
 
         self.assertEqual(self.con._get_last_status(), 'SELECT')
+
+    async def test_server_proto_basic_datatypes_04(self):
+        # A regression test for enum typedescs being improperly
+        # serialized and screwing up client's decoder.
+        d = await self.con.fetchone('''
+            WITH MODULE test
+            SELECT (<RGB>"RED", <RGB>"GREEN", [1], [<RGB>"GREEN"], [2])
+        ''')
+        self.assertEqual(d[2], [1])
+
+    async def test_server_proto_basic_datatypes_05(self):
+        # A regression test to ensure that typedesc IDs are different
+        # for shapes with equal fields names bit of different kinds
+        # (e.g. in this test it's "@foo" vs "foo"; before fixing the
+        # bug the results of second query were with "@foo" key, not "foo")
+
+        for _ in range(5):
+            await self.assert_query_result(
+                r"""
+                    WITH MODULE schema
+                    SELECT ObjectType {
+                        name,
+                        properties: {
+                            name,
+                            @foo := 1
+                        } ORDER BY .name LIMIT 1,
+                    }
+                    FILTER .name = 'test::Tmp';
+                """,
+                [{
+                    'name': 'test::Tmp',
+                    'properties': [{
+                        'name': 'id',
+                        '@foo': 1
+                    }],
+                }]
+            )
+
+        for _ in range(5):
+            await self.assert_query_result(
+                r"""
+                    WITH MODULE schema
+                    SELECT ObjectType {
+                        name,
+                        properties: {
+                            name,
+                            foo := 1
+                        } ORDER BY .name LIMIT 1,
+                    }
+                    FILTER .name = 'test::Tmp';
+                """,
+                [{
+                    'name': 'test::Tmp',
+                    'properties': [{
+                        'name': 'id',
+                        'foo': 1
+                    }],
+                }]
+            )
+
+    async def test_server_proto_basic_datatypes_06(self):
+        # Test that field names are taken into account when
+        # typedesc id is computed.
+        for _ in range(5):
+            await self.assert_query_result(
+                r"""
+                    WITH MODULE schema
+                    SELECT ObjectType {
+                        name,
+                        properties: {
+                            name,
+                            foo1 := 1
+                        } ORDER BY .name LIMIT 1,
+                    }
+                    FILTER .name = 'test::Tmp';
+                """,
+                [{
+                    'name': 'test::Tmp',
+                    'properties': [{
+                        'name': 'id',
+                        'foo1': 1
+                    }],
+                }]
+            )
+
+        for _ in range(5):
+            await self.assert_query_result(
+                r"""
+                    WITH MODULE schema
+                    SELECT ObjectType {
+                        name,
+                        properties: {
+                            name,
+                            foo2 := 1
+                        } ORDER BY .name LIMIT 1,
+                    }
+                    FILTER .name = 'test::Tmp';
+                """,
+                [{
+                    'name': 'test::Tmp',
+                    'properties': [{
+                        'name': 'id',
+                        'foo2': 1
+                    }],
+                }]
+            )
 
     async def test_server_proto_args_01(self):
         self.assertEqual(
