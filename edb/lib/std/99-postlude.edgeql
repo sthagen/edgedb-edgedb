@@ -17,34 +17,6 @@
 #
 
 
-from __future__ import annotations
-
-import sys
-
-import click
-
-from edb.common import devmode as dm
-
-from edb import repl
-from . import utils
-
-
-@click.group(
-    invoke_without_command=True,
-    context_settings=dict(help_option_names=['-?', '--help']))
-@utils.connect_command
-def cli(ctx):
-    if ctx.invoked_subcommand is None:
-        status = repl.main(ctx.obj['connargs'])
-        sys.exit(status)
-
-
-def cli_dev():
-    dm.enable_dev_mode()
-    cli()
-
-
-# Import subcommands to register them
-
-from . import dump  # noqa
-from . import mng  # noqa
+ALTER MODULE std {
+    SET builtin := true;
+};
