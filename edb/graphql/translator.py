@@ -448,7 +448,7 @@ class GraphQLTranslator:
         steps = []
         if include_base:
             base = spath[0].type
-            steps.append(qlast.TypeIndirection(
+            steps.append(qlast.TypeIntersection(
                 type=qlast.TypeName(
                     maintype=base.edb_base_name_ast
                 )
@@ -1444,7 +1444,9 @@ class GraphQLTranslator:
 
 
 def value_node_from_pyvalue(val: Any):
-    if isinstance(val, str):
+    if val is None:
+        return None
+    elif isinstance(val, str):
         val = val.replace('\\', '\\\\')
         value = eql_quote.quote_literal(val)
         return gql_ast.StringValue(value=value[1:-1])
