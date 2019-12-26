@@ -683,6 +683,7 @@ def range_for_material_objtype(
         typeref: irast.TypeRef,
         path_id: irast.PathId, *,
         include_overlays: bool=True,
+        include_descendants: bool=True,
         dml_source: Optional[irast.MutatingStmt]=None,
         ctx: context.CompilerContextLevel) -> pgast.PathRangeVar:
 
@@ -706,6 +707,7 @@ def range_for_material_objtype(
 
     rvar: pgast.PathRangeVar = pgast.RelRangeVar(
         relation=relation,
+        include_inherited=include_descendants,
         alias=pgast.Alias(
             aliasname=env.aliases.get(typeref.name_hint.name)
         )
@@ -772,6 +774,7 @@ def range_for_typeref(
         typeref: irast.TypeRef,
         path_id: irast.PathId, *,
         include_overlays: bool=True,
+        include_descendants: bool=True,
         dml_source: Optional[irast.MutatingStmt]=None,
         common_parent: bool=False,
         ctx: context.CompilerContextLevel) -> pgast.PathRangeVar:
@@ -781,21 +784,23 @@ def range_for_typeref(
             typeref.common_parent,
             path_id,
             include_overlays=include_overlays,
+            include_descendants=include_descendants,
             dml_source=dml_source,
             ctx=ctx,
         )
 
-    elif typeref.children:
+    elif typeref.union:
         # Union object types are represented as a UNION of selects
         # from their children, which is, for most purposes, equivalent
         # to SELECTing from a parent table.
         set_ops = []
 
-        for child in typeref.children:
+        for child in typeref.union:
             c_rvar = range_for_typeref(
                 child,
                 path_id=path_id,
                 include_overlays=include_overlays,
+                include_descendants=not typeref.union_is_concrete,
                 dml_source=dml_source,
                 ctx=ctx,
             )
@@ -819,6 +824,7 @@ def range_for_typeref(
             typeref,
             path_id,
             include_overlays=include_overlays,
+            include_descendants=include_descendants,
             dml_source=dml_source,
             ctx=ctx,
         )
@@ -867,6 +873,7 @@ def range_from_queryset(
 
 def table_from_ptrref(
         ptrref: irast.PointerRef, *,
+        include_descendants: bool = True,
         ctx: context.CompilerContextLevel) -> pgast.RelRangeVar:
     """Return a Table corresponding to a given Link."""
     table_schema_name, table_name = common.get_pointer_backend_name(
@@ -884,6 +891,7 @@ def table_from_ptrref(
     rvar = pgast.RelRangeVar(
         schema_object_id=sobj_id,
         relation=relation,
+        include_inherited=include_descendants,
         alias=pgast.Alias(
             aliasname=ctx.env.aliases.get(ptrref.shortname.name)
         )
@@ -920,15 +928,17 @@ def range_for_ptrref(
             raise errors.InternalServerError(
                 'unexpected union link'
             )
-    elif only_self:
-        refs = {ptrref}
     else:
-        refs = {ptrref} | ptrref.descendants
+        refs = {ptrref}
 
     for src_ptrref in refs:
         assert isinstance(src_ptrref, irast.PointerRef), \
             "expected regular PointerRef"
-        table = table_from_ptrref(src_ptrref, ctx=ctx)
+        table = table_from_ptrref(
+            src_ptrref,
+            include_descendants=not ptrref.union_is_concrete,
+            ctx=ctx,
+        )
 
         qry = pgast.SelectStmt()
         qry.from_clause.append(table)
