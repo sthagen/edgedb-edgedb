@@ -19,7 +19,9 @@
 
 import asyncio
 import codecs
+import hashlib
 import json
+import os.path
 
 cimport cython
 cimport cpython
@@ -86,13 +88,29 @@ cdef bytes INIT_CON_SCRIPT = (b'''
 )
 
 
-async def connect(addr, dbname):
+async def connect(connargs, dbname):
     loop = asyncio.get_running_loop()
 
-    _, protocol = await loop.create_unix_connection(
-        lambda: PGProto(dbname, loop, addr), addr)
+    host = connargs.get("host")
+    port = connargs.get("port")
+
+    if host.startswith('/'):
+        addr = os.path.join(host, f'.s.PGSQL.{port}')
+        _, protocol = await loop.create_unix_connection(
+            lambda: PGProto(dbname, loop, connargs), addr)
+
+    else:
+        _, protocol = await loop.create_connection(
+            lambda: PGProto(dbname, loop, connargs), host=host, port=port)
 
     await protocol.connect()
+
+    if connargs['user'] != defines.EDGEDB_SUPERUSER:
+        await protocol.simple_query(
+            f'SET SESSION AUTHORIZATION {defines.EDGEDB_SUPERUSER}'.encode(),
+            ignore_data=True,
+        )
+
     await protocol.simple_query(INIT_CON_SCRIPT, ignore_data=True)
 
     return protocol
@@ -804,8 +822,14 @@ cdef class PGProto:
         buf.write_bytestring(b'search_path')
         buf.write_bytestring(b'edgedb')
 
+        buf.write_bytestring(b'timezone')
+        buf.write_bytestring(b'UTC')
+
+        buf.write_bytestring(b'default_transaction_isolation')
+        buf.write_bytestring(b'repeatable read')
+
         buf.write_bytestring(b'user')
-        buf.write_bytestring(defines.EDGEDB_SUPERUSER.encode('utf-8'))
+        buf.write_bytestring(self.pgaddr['user'].encode('utf-8'))
 
         buf.write_bytestring(b'database')
         buf.write_bytestring(self.dbname.encode('utf-8'))
@@ -830,8 +854,16 @@ cdef class PGProto:
                 if mtype == b'R':
                     # Authentication...
                     status = self.buffer.read_int32()
-                    if status != 0:
-                        raise RuntimeError('unsupported auth method')
+                    if status == PGAUTH_SUCCESSFUL:
+                        pass
+                    elif status == PGAUTH_REQUIRED_PASSWORDMD5:
+                        # Note: MD5 salt is passed as a four-byte sequence
+                        md5_salt = self.buffer.read_bytes(4)
+                        self.write(
+                            self.make_auth_password_md5_message(md5_salt))
+
+                    else:
+                        raise RuntimeError(f'unsupported auth method: {status}')
 
                 elif mtype == b'K':
                     # BackendKeyData
@@ -948,6 +980,22 @@ cdef class PGProto:
         buf.write_byte(b'S')
         buf.write_bytestring(stmt_name)
         return buf.end_message()
+
+    cdef make_auth_password_md5_message(self, bytes salt):
+        cdef WriteBuffer msg
+
+        msg = WriteBuffer.new_message(b'p')
+
+        user = self.pgaddr.get('user') or ''
+        password = self.pgaddr.get('password') or ''
+
+        # 'md5' + md5(md5(password + username) + salt))
+        userpass = (password + user).encode('ascii')
+        hash = hashlib.md5(hashlib.md5(userpass).hexdigest().\
+                encode('ascii') + salt).hexdigest().encode('ascii')
+
+        msg.write_bytestring(b'md5' + hash)
+        return msg.end_message()
 
     async def wait_for_message(self):
         if self.buffer.take_message():

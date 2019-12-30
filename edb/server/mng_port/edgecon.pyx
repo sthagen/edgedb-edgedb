@@ -79,6 +79,9 @@ cdef object logger = logging.getLogger('edb.server')
 
 DEF BACKUP_NWORKERS = 10
 
+DEF PROTO_VER_MAJOR = 0
+DEF PROTO_VER_MINOR = 7
+
 
 @cython.final
 cdef class EdgeConnection:
@@ -256,10 +259,12 @@ cdef class EdgeConnection:
         buf.write_buffer(msg_buf)
 
         if self.port.in_dev_mode():
+            pgaddr = dict(self.get_backend().pgcon.get_pgaddr())
+            if pgaddr.get('password'):
+                pgaddr['password'] = '********'
             msg_buf = WriteBuffer.new_message(b'S')
             msg_buf.write_len_prefixed_bytes(b'pgaddr')
-            msg_buf.write_len_prefixed_utf8(
-                str(self.get_backend().pgcon.get_pgaddr()))
+            msg_buf.write_len_prefixed_utf8(str(pgaddr))
             msg_buf.end_message()
             buf.write_buffer(msg_buf)
 
@@ -274,15 +279,15 @@ cdef class EdgeConnection:
 
     async def do_handshake(self):
         cdef:
-            uint16_t hi
-            uint16_t lo
+            uint16_t major
+            uint16_t minor
             int i
             uint16_t nexts
             dict exts = {}
             dict params = {}
 
-        hi = <uint16_t>self.buffer.read_int16()
-        lo = <uint16_t>self.buffer.read_int16()
+        major = <uint16_t>self.buffer.read_int16()
+        minor = <uint16_t>self.buffer.read_int16()
 
         nparams = <uint16_t>self.buffer.read_int16()
         for i in range(nparams):
@@ -298,13 +303,13 @@ cdef class EdgeConnection:
 
         self.buffer.finish_message()
 
-        if hi != 1 or lo != 0 or nexts > 0:
+        if major != PROTO_VER_MAJOR or minor != PROTO_VER_MINOR or nexts > 0:
             # NegotiateProtocolVersion
             buf = WriteBuffer.new_message(b'v')
             # Highest supported major version of the protocol.
-            buf.write_int16(1)
+            buf.write_int16(PROTO_VER_MAJOR)
             # Highest supported minor version of the protocol.
-            buf.write_int16(0)
+            buf.write_int16(PROTO_VER_MINOR)
             # No extensions are currently supported.
             buf.write_int16(0)
             buf.end_message()
@@ -357,11 +362,11 @@ cdef class EdgeConnection:
             if not self.buffer.take_message():
                 await self.wait_for_message()
             mtype = self.buffer.get_message_type()
-            if mtype != b'p':
-                raise errors.BinaryProtocolError(
-                    f'expected SASL response, got message type {mtype}')
 
             if selected_mech is None:
+                if mtype != b'p':
+                    raise errors.BinaryProtocolError(
+                        f'expected SASL response, got message type {mtype}')
                 # Initial response.
                 selected_mech = self.buffer.read_len_prefixed_bytes()
                 if selected_mech != b'SCRAM-SHA-256':
@@ -414,6 +419,9 @@ cdef class EdgeConnection:
                 self.flush()
 
             else:
+                if mtype != b'r':
+                    raise errors.BinaryProtocolError(
+                        f'expected SASL response, got message type {mtype}')
                 # client final message
                 client_final = self.buffer.read_len_prefixed_bytes()
                 self.buffer.finish_message()

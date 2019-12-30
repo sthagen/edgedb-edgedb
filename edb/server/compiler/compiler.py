@@ -22,6 +22,7 @@ from typing import *  # NoQA
 
 import collections
 import dataclasses
+import gc
 import hashlib
 import pickle
 import uuid
@@ -148,11 +149,16 @@ def compile_edgeql_script(
         )
     )
 
-    compiler = Compiler(None, None)
+    compiler = Compiler(None)
     compiler._std_schema = std_schema
     compiler._bootstrap_mode = True
 
+    # Note: there is a lot of GC activity due to contexts and other
+    # Schema-related reference cycles.  Postponing collection until after
+    # the compilation is complete speeds it up between 7% - 25%.
+    gc.disable()
     units = compiler._compile(ctx=ctx, eql=eql.encode())
+    gc.enable()
 
     sql_stmts = []
     for u in units:
@@ -184,7 +190,7 @@ class BaseCompiler:
     _dbname: Optional[str]
     _cached_db: Optional[CompilerDatabaseState]
 
-    def __init__(self, connect_args: dict, data_dir: str):
+    def __init__(self, connect_args: dict):
         self._connect_args = connect_args
         self._dbname = None
         self._cached_db = None
@@ -205,7 +211,6 @@ class BaseCompiler:
 
     async def new_connection(self):
         con_args = self._connect_args.copy()
-        con_args['user'] = defines.EDGEDB_SUPERUSER
         con_args['database'] = self._dbname
         try:
             return await asyncpg.connect(**con_args)
@@ -257,8 +262,8 @@ class BaseCompiler:
 
 class Compiler(BaseCompiler):
 
-    def __init__(self, connect_args: dict, data_dir: str):
-        super().__init__(connect_args, data_dir)
+    def __init__(self, connect_args: dict):
+        super().__init__(connect_args)
 
         self._current_db_state = None
         self._bootstrap_mode = False

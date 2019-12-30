@@ -2399,16 +2399,16 @@ def _generate_role_views(schema):
             a.rolname                                   AS name,
             a.rolsuper                                  AS is_superuser,
             a.rolcanlogin                               AS allow_login,
-            a.rolpassword                               AS password
+            (d.description)->>'password_hash'           AS password
         FROM
-            pg_authid AS a
+            pg_catalog.pg_roles AS a
             CROSS JOIN LATERAL (
                 SELECT
                     edgedb.shobj_metadata(a.oid, 'pg_authid')
                         AS description
             ) AS d
         WHERE
-            (d.description)->>'__edgedb__' = '1';
+            (d.description)->>'id' IS NOT NULL
     '''
 
     link_query = f'''
@@ -2416,7 +2416,7 @@ def _generate_role_views(schema):
             ((d.description)->>'id')::uuid              AS source,
             ((md.description)->>'id')::uuid             AS target
         FROM
-            pg_authid AS a
+            pg_catalog.pg_roles AS a
             CROSS JOIN LATERAL (
                 SELECT
                     edgedb.shobj_metadata(a.oid, 'pg_authid')
