@@ -32,6 +32,7 @@ from edb.common.markup.renderers import terminal
 from edb.common.markup.renderers import styles
 
 from . import context
+from . import utils
 
 
 style = styles.Dark256
@@ -196,14 +197,26 @@ def _set(
     else:
         begin, end = '{', '}'
 
+    last_idx = len(o) - 1
     with buf.foldable_lines():
         buf.write(begin, style.bracket)
         with buf.indent():
             for idx, el in enumerate(o):
                 walk(el, repl_ctx, buf)
-                if idx < (len(o) - 1):
+                if idx < last_idx:
                     buf.write(',')
                     buf.mark_line_break()
+                if (repl_ctx.implicit_limit
+                        and (idx + 1) == repl_ctx.implicit_limit):
+                    if idx == last_idx:
+                        buf.write(',')
+                        buf.mark_line_break()
+
+                    buf.write('...')
+                    if repl_ctx.implicit_limit > 10:
+                        buf.write(f'(further results hidden '
+                                  f'\\limit {repl_ctx.implicit_limit})')
+                    break
         buf.write(end, style.bracket)
 
 
@@ -224,6 +237,15 @@ def _numeric(
     buf: terminal.Buffer
 ) -> None:
     buf.write(str(o), style.code_number)
+
+
+@walk.register
+def _bigint(
+    o: utils.BigInt,
+    repl_ctx: context.ReplContext,
+    buf: terminal.Buffer
+) -> None:
+    buf.write(f'{o}n', style.code_number)
 
 
 @walk.register

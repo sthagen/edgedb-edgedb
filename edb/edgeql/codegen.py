@@ -742,7 +742,9 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 )
             ]
 
-        if len(commands) == 1 and allow_short:
+        if len(commands) == 1 and allow_short and not (
+            isinstance(commands[0], qlast.CompositeDDL)
+        ):
             self.write(' ')
             self.visit(commands[0])
         elif len(commands) > 0:
@@ -1058,7 +1060,16 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         if self.sdlmode:
             self.write('annotation ')
         else:
-            self.write('SET ANNOTATION ')
+            self.write('CREATE ANNOTATION ')
+        self.visit(node.name)
+        self.write(' := ')
+        self.visit(node.value)
+
+    def visit_AlterAnnotationValue(
+        self,
+        node: qlast.AlterAnnotationValue
+    ) -> None:
+        self.write('ALTER ANNOTATION ')
         self.visit(node.name)
         self.write(' := ')
         self.visit(node.value)

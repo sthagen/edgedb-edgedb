@@ -301,11 +301,19 @@ class SetFieldStmt(Nonterm):
         )
 
 
-class SetAnnotationValueStmt(Nonterm):
-    def reduce_SETANNOTATION_NodeName_ASSIGN_Expr(self, *kids):
+class CreateAnnotationValueStmt(Nonterm):
+    def reduce_CREATE_ANNOTATION_NodeName_ASSIGN_Expr(self, *kids):
         self.val = qlast.CreateAnnotationValue(
-            name=kids[1].val,
-            value=kids[3].val,
+            name=kids[2].val,
+            value=kids[4].val,
+        )
+
+
+class AlterAnnotationValueStmt(Nonterm):
+    def reduce_ALTER_ANNOTATION_NodeName_ASSIGN_Expr(self, *kids):
+        self.val = qlast.AlterAnnotationValue(
+            name=kids[2].val,
+            value=kids[4].val,
         )
 
 
@@ -325,7 +333,9 @@ commands_block(
     'Create',
     UsingStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt)
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
+)
 
 
 commands_block(
@@ -333,7 +343,8 @@ commands_block(
     UsingStmt,
     RenameStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     opt=False)
 
@@ -680,7 +691,8 @@ commands_block(
     RenameStmt,
     SetFieldStmt,
     SetDelegatedStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     AlterAbstract,
     opt=False
@@ -718,7 +730,8 @@ class DropConcreteConstraintStmt(Nonterm):
 commands_block(
     'CreateScalarType',
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     CreateConcreteConstraintStmt)
 
 
@@ -767,7 +780,8 @@ commands_block(
     'AlterScalarType',
     RenameStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     AlterExtending,
     CreateConcreteConstraintStmt,
@@ -835,7 +849,8 @@ class DropAnnotationStmt(Nonterm):
 commands_block(
     'AlterIndex',
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     opt=False)
 
@@ -908,7 +923,8 @@ commands_block(
     'AlterProperty',
     RenameStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     opt=False
 )
@@ -945,7 +961,8 @@ commands_block(
     'CreateConcreteProperty',
     UsingStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     CreateConcreteConstraintStmt
 )
 
@@ -1049,7 +1066,8 @@ commands_block(
     UsingStmt,
     RenameStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     SetPropertyTypeStmt,
     SetCardinalityStmt,
@@ -1095,7 +1113,8 @@ class DropConcretePropertyStmt(Nonterm):
 commands_block(
     'CreateLink',
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     CreateConcreteConstraintStmt,
     CreateConcretePropertyStmt,
     CreateIndexStmt,
@@ -1123,7 +1142,8 @@ commands_block(
     'AlterLink',
     RenameStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     AlterSimpleExtending,
     CreateConcreteConstraintStmt,
@@ -1184,7 +1204,8 @@ commands_block(
     'CreateConcreteLink',
     UsingStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     CreateConcreteConstraintStmt,
     CreateConcretePropertyStmt,
     commondl.OnTargetDeleteStmt,
@@ -1217,13 +1238,46 @@ class CreateConcreteLinkStmt(Nonterm):
             target=kids[5].val,
         )
 
+    def reduce_CreateComputableLinkWithUsing(self, *kids):
+        """%reduce
+            CREATE OptPtrQuals LINK UnqualifiedPointerName
+            OptCreateConcreteLinkCommandsBlock
+        """
+        cmds = kids[4].val
+        new_cmds = []
+        target = None
+
+        for cmd in cmds:
+            if isinstance(cmd, qlast.SetSpecialField) and cmd.name == 'expr':
+                if target is not None:
+                    raise EdgeQLSyntaxError(
+                        f'computable link with more than one expression',
+                        context=kids[3].context)
+                target = cmd.value
+            else:
+                new_cmds.append(cmd)
+
+        if target is None:
+            raise EdgeQLSyntaxError(
+                f'computable link without expression',
+                context=kids[3].context)
+
+        self.val = qlast.CreateConcreteLink(
+            name=kids[3].val,
+            is_required=kids[1].val.required,
+            cardinality=kids[1].val.cardinality,
+            target=target,
+            commands=new_cmds,
+        )
+
 
 commands_block(
     'AlterConcreteLink',
     UsingStmt,
     RenameStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     SetCardinalityStmt,
     SetRequiredStmt,
@@ -1276,7 +1330,8 @@ class DropConcreteLinkStmt(Nonterm):
 commands_block(
     'CreateObjectType',
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     CreateConcretePropertyStmt,
     AlterConcretePropertyStmt,
     CreateConcreteLinkStmt,
@@ -1320,7 +1375,8 @@ commands_block(
     'AlterObjectType',
     RenameStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     AlterSimpleExtending,
     CreateConcretePropertyStmt,
@@ -1381,7 +1437,8 @@ commands_block(
     'CreateAlias',
     UsingStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     opt=False
 )
 
@@ -1421,7 +1478,8 @@ commands_block(
     UsingStmt,
     RenameStmt,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     opt=False
 )
@@ -1504,7 +1562,8 @@ commands_block(
     'CreateFunction',
     commondl.FromFunction,
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     opt=False
 )
 
@@ -1608,7 +1667,8 @@ class OperatorCode(Nonterm):
 commands_block(
     'CreateOperator',
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     OperatorCode,
     opt=False
 )
@@ -1737,7 +1797,8 @@ class CreateOperatorStmt(Nonterm):
 commands_block(
     'AlterOperator',
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     opt=False
 )
@@ -1836,7 +1897,8 @@ class CastCode(Nonterm):
 commands_block(
     'CreateCast',
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     CastCode,
     CastAllowedUse,
     opt=False
@@ -1960,7 +2022,8 @@ class CreateCastStmt(Nonterm):
 commands_block(
     'AlterCast',
     SetFieldStmt,
-    SetAnnotationValueStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
     opt=False
 )

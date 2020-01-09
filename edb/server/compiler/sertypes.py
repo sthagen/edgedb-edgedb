@@ -35,6 +35,7 @@ from edb.schema import types as s_types
 
 
 _int32_packer = struct.Struct('!l').pack
+_uint32_packer = struct.Struct('!L').pack
 _uint16_packer = struct.Struct('!H').pack
 _uint8_packer = struct.Struct('!B').pack
 
@@ -147,7 +148,7 @@ class TypeSerializer:
                 buf.append(_uint16_packer(len(subtypes)))
                 for el_name, el_type in zip(element_names, subtypes):
                     el_name_bytes = el_name.encode('utf-8')
-                    buf.append(_uint16_packer(len(el_name_bytes)))
+                    buf.append(_uint32_packer(len(el_name_bytes)))
                     buf.append(el_name_bytes)
                     buf.append(_uint16_packer(self.uuid_to_pos[el_type]))
 
@@ -279,7 +280,7 @@ class TypeSerializer:
                 buf.append(_uint8_packer(flags))
 
                 el_name_bytes = el_name.encode('utf-8')
-                buf.append(_uint16_packer(len(el_name_bytes)))
+                buf.append(_uint32_packer(len(el_name_bytes)))
                 buf.append(el_name_bytes)
                 buf.append(_uint16_packer(self.uuid_to_pos[el_type]))
 
@@ -304,7 +305,7 @@ class TypeSerializer:
                 buf.append(_uint16_packer(len(enum_values)))
                 for enum_val in enum_values:
                     enum_val_bytes = enum_val.encode('utf-8')
-                    buf.append(_uint16_packer(len(enum_val_bytes)))
+                    buf.append(_uint32_packer(len(enum_val_bytes)))
                     buf.append(enum_val_bytes)
 
             elif mt is base_type:
@@ -372,7 +373,7 @@ class TypeSerializer:
             flags = {}
             for _ in range(els):
                 flag = desc.read_bytes(1)[0]
-                name = desc.read_len16_prefixed_bytes().decode()
+                name = desc.read_len32_prefixed_bytes().decode()
                 pos = desc.read_ui16()
                 fields[name] = codecs_list[pos]
                 flags[name] = flag
@@ -397,7 +398,7 @@ class TypeSerializer:
             els = desc.read_ui16()
             fields = {}
             for _ in range(els):
-                name = desc.read_len16_prefixed_bytes().decode()
+                name = desc.read_len32_prefixed_bytes().decode()
                 pos = desc.read_ui16()
                 fields[name] = codecs_list[pos]
             return NamedTupleDesc(tid=tid, fields=fields)
@@ -406,7 +407,7 @@ class TypeSerializer:
             els = desc.read_ui16()
             names = []
             for _ in range(els):
-                name = desc.read_len16_prefixed_bytes().decode()
+                name = desc.read_len32_prefixed_bytes().decode()
                 names.append(name)
             return EnumDesc(tid=tid, names=names)
 
@@ -422,7 +423,7 @@ class TypeSerializer:
 
         elif (t >= 0xf0 and t <= 0xff):
             # Ignore all type annotations.
-            desc.read_len16_prefixed_bytes()
+            desc.read_len32_prefixed_bytes()
 
         else:
             raise NotImplementedError(

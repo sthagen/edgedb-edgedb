@@ -3030,7 +3030,7 @@ aa';
                         baz := __source__.a + __source__.b
                     }.baz
                 ) {
-                    SET ANNOTATION title := 'special';
+                    CREATE ANNOTATION title := 'special';
                 };
             };
         };
@@ -3044,7 +3044,7 @@ aa';
                         baz := (__source__.a + __source__.b)
                     }).baz
                 ) {
-                    SET ANNOTATION title := 'special';
+                    CREATE ANNOTATION title := 'special';
                 };
             };
         };
@@ -3055,7 +3055,7 @@ aa';
         ALTER TYPE Foo {
             ALTER LINK bar {
                 ALTER CONSTRAINT my_constraint ON (foo) {
-                    SET ANNOTATION title := 'special';
+                    CREATE ANNOTATION title := 'special';
                 };
             };
             ALTER LINK baz {
@@ -3196,7 +3196,7 @@ aa';
     def test_edgeql_syntax_ddl_function_25(self):
         """
         CREATE FUNCTION foo() -> std::str {
-            SET ANNOTATION description := 'aaaa';
+            CREATE ANNOTATION description := 'aaaa';
             USING SQL $a$SELECT $$foo$$$a$;
         };
         """
@@ -3205,7 +3205,7 @@ aa';
         """
         CREATE FUNCTION foo() -> std::str {
             SET volatility := 'VOLATILE';
-            SET ANNOTATION description := 'aaaa';
+            CREATE ANNOTATION description := 'aaaa';
             USING SQL $a$SELECT $$foo$$$a$;
         };
         """
@@ -3215,7 +3215,7 @@ aa';
     def test_edgeql_syntax_ddl_function_27(self):
         """
         CREATE FUNCTION foo() -> std::str {
-            SET ANNOTATION description := 'aaaa';
+            CREATE ANNOTATION description := 'aaaa';
         };
         """
 
@@ -3225,7 +3225,7 @@ aa';
         """
         CREATE FUNCTION foo() -> std::str {
             USING SQL 'SELECT 1';
-            SET ANNOTATION description := 'aaaa';
+            CREATE ANNOTATION description := 'aaaa';
             USING SQL 'SELECT 2';
         };
         """
@@ -3497,8 +3497,9 @@ aa';
 
 % OK %
 
-        ALTER TYPE schema::Object
+        ALTER TYPE schema::Object {
             CREATE MULTI LINK attributes -> schema::Attribute;
+        };
         """
 
     def test_edgeql_syntax_ddl_type_04(self):
@@ -3541,9 +3542,11 @@ aa';
 
     def test_edgeql_syntax_ddl_type_07(self):
         """
-        ALTER TYPE mymod::Foo ALTER PROPERTY foo {
-            SET SINGLE;
-            SET REQUIRED;
+        ALTER TYPE mymod::Foo {
+            ALTER PROPERTY foo {
+                SET SINGLE;
+                SET REQUIRED;
+            };
         };
         """
 
@@ -3552,6 +3555,13 @@ aa';
         ALTER TYPE mymod::Foo ALTER LINK foo {
             SET MULTI;
             DROP REQUIRED;
+        };
+% OK %
+        ALTER TYPE mymod::Foo {
+            ALTER LINK foo {
+                SET MULTI;
+                DROP REQUIRED;
+            };
         };
         """
 
@@ -3565,9 +3575,11 @@ aa';
 
 % OK %
 
-        ALTER TYPE mymod::Foo ALTER LINK foo {
-            SET MULTI;
-            DROP REQUIRED;
+        ALTER TYPE mymod::Foo {
+            ALTER LINK foo {
+                SET MULTI;
+                DROP REQUIRED;
+            };
         };
         """
 
@@ -3670,14 +3682,16 @@ aa';
             DROP INDEX ON (.title);
 
             CREATE INDEX ON (.title) {
-                SET ANNOTATION system := 'Foo';
+                CREATE ANNOTATION system := 'Foo';
             };
 
-            ALTER INDEX ON (.title)
-                SET ANNOTATION system := 'Foo';
+            ALTER INDEX ON (.title) {
+                ALTER ANNOTATION system := 'Foo';
+            };
 
-            ALTER INDEX ON (.title)
+            ALTER INDEX ON (.title) {
                 DROP ANNOTATION system;
+            };
         };
         """
 
@@ -3685,7 +3699,7 @@ aa';
         """
         ALTER TYPE Foo {
             ALTER INDEX ON (.title) {
-                SET ANNOTATION system := 'Foo'
+                CREATE ANNOTATION system := 'Foo'
             };
 
             ALTER INDEX ON (.title) {
@@ -3696,11 +3710,13 @@ aa';
 % OK %
 
         ALTER TYPE Foo {
-            ALTER INDEX ON (.title)
-                SET ANNOTATION system := 'Foo';
+            ALTER INDEX ON (.title) {
+                CREATE ANNOTATION system := 'Foo';
+            };
 
-            ALTER INDEX ON (.title)
+            ALTER INDEX ON (.title) {
                 DROP ANNOTATION system;
+            };
         };
         """
 

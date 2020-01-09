@@ -700,7 +700,7 @@ class TestServerProto(tb.QueryTestCase):
                 g.create_task(exec_to_fail())
 
                 await asyncio.sleep(0.1)
-                await con2.close()
+                await con2.aclose()
 
         finally:
             self.assertEqual(
@@ -1232,7 +1232,7 @@ class TestServerProto(tb.QueryTestCase):
                     DECLARE SAVEPOINT t1;
                 ''')
         finally:
-            await con2.close()
+            await con2.aclose()
 
     async def test_server_proto_tx_03(self):
         # Test Opportunistic Execute with ROLLBACK; use new connection
@@ -1270,7 +1270,7 @@ class TestServerProto(tb.QueryTestCase):
                     DECLARE SAVEPOINT t1;
                 ''')
         finally:
-            await con2.close()
+            await con2.aclose()
 
     async def test_server_proto_tx_04(self):
         await self.con.execute('''
@@ -1330,7 +1330,7 @@ class TestServerProto(tb.QueryTestCase):
                     await self.con.fetchall(query),
                     [1])
         finally:
-            await con2.close()
+            await con2.aclose()
 
         await self.con.execute('''
             START TRANSACTION;
@@ -1831,7 +1831,7 @@ class TestServerProto(tb.QueryTestCase):
                 await tx1.rollback()
             if tx2.is_active():
                 await tx2.rollback()
-            await con2.close()
+            await con2.aclose()
 
     async def test_server_proto_tx_18(self):
         # The schema altered within the transaction should be visible
@@ -1844,7 +1844,7 @@ class TestServerProto(tb.QueryTestCase):
                     SET MODULE test;
 
                     CREATE ABSTRACT CONSTRAINT uppercase {
-                        SET ANNOTATION title := "Upper case constraint";
+                        CREATE ANNOTATION title := "Upper case constraint";
                         USING (str_upper(__subject__) = __subject__);
                         SET errmessage := "{__subject__} is not in upper case";
                     };
@@ -1935,7 +1935,7 @@ class TestServerProtoDDL(tb.NonIsolatedDDLTestCase):
                     edgedb.Set([123]))
 
         finally:
-            await con2.close()
+            await con2.aclose()
 
     async def test_server_proto_query_cache_invalidate_02(self):
         typename = 'CacheInv_02'
@@ -1990,7 +1990,7 @@ class TestServerProtoDDL(tb.NonIsolatedDDLTestCase):
                     edgedb.Set([123]))
 
         finally:
-            await con2.close()
+            await con2.aclose()
 
     async def test_server_proto_query_cache_invalidate_03(self):
         typename = 'CacheInv_03'
@@ -2037,7 +2037,7 @@ class TestServerProtoDDL(tb.NonIsolatedDDLTestCase):
                     edgedb.Set([[1, 23]]))
 
         finally:
-            await con2.close()
+            await con2.aclose()
 
     async def test_server_proto_query_cache_invalidate_04(self):
         typename = 'CacheInv_04'
@@ -2084,7 +2084,7 @@ class TestServerProtoDDL(tb.NonIsolatedDDLTestCase):
                     edgedb.Set(['bbb', 'ccc']))
 
         finally:
-            await con2.close()
+            await con2.aclose()
 
     async def test_server_proto_query_cache_invalidate_05(self):
         typename = 'CacheInv_05'
@@ -2141,7 +2141,7 @@ class TestServerProtoDDL(tb.NonIsolatedDDLTestCase):
                     other)
 
         finally:
-            await con2.close()
+            await con2.aclose()
 
     async def test_server_proto_query_cache_invalidate_06(self):
         typename = 'CacheInv_06'
@@ -2198,7 +2198,7 @@ class TestServerProtoDDL(tb.NonIsolatedDDLTestCase):
                     bar)
 
         finally:
-            await con2.close()
+            await con2.aclose()
 
     @test.xfail('''
         The error is:
@@ -2263,7 +2263,7 @@ class TestServerProtoDDL(tb.NonIsolatedDDLTestCase):
                     edgedb.Set([123]))
 
         finally:
-            await con2.close()
+            await con2.aclose()
 
     @test.xfail("concurrent DDL isn't yet supported")
     async def test_server_proto_query_cache_invalidate_08(self):
@@ -2299,7 +2299,7 @@ class TestServerProtoDDL(tb.NonIsolatedDDLTestCase):
         finally:
             async with tg.TaskGroup() as g:
                 for con in cons:
-                    g.create_task(con.close())
+                    g.create_task(con.aclose())
 
     async def test_server_proto_query_cache_invalidate_09(self):
         typename = 'CacheInv_09'
@@ -2374,3 +2374,120 @@ class TestServerProtoDDL(tb.NonIsolatedDDLTestCase):
             await self.con.execute('''
                 DROP SCALAR TYPE tid_prop_02;
             ''')
+
+    async def test_server_proto_fetch_limit_01(self):
+        try:
+            await self.con.execute('''
+                CREATE TYPE test::FL_A {
+                    CREATE PROPERTY n -> int64;
+                };
+                CREATE TYPE test::FL_B {
+                    CREATE PROPERTY n -> int64;
+                    CREATE MULTI LINK a -> test::FL_A;
+                };
+
+                WITH MODULE test
+                FOR i IN {1, 2, 3, 4, 5}
+                UNION (
+                    INSERT FL_A {
+                        n := i
+                    }
+                );
+
+                WITH MODULE test
+                FOR i IN {1, 2, 3, 4, 5}
+                UNION (
+                    INSERT FL_B {
+                        n := i,
+                        a := FL_A,
+                    }
+                );
+            ''')
+
+            result = await self.con._fetchall(
+                r"""
+                    WITH MODULE test
+                    SELECT FL_B {
+                        a ORDER BY .n,
+                        a_arr := array_agg(.a)
+                    } ORDER BY .n
+                """,
+                __limit__=2
+            )
+
+            self.assertEqual(len(result), 2)
+            self.assertEqual(len(result[0].a), 2)
+            self.assertEqual(len(result[0].a_arr), 2)
+
+            # Check that things are not cached improperly.
+            result = await self.con._fetchall(
+                r"""
+                    WITH MODULE test
+                    SELECT FL_B {
+                        a ORDER BY .n,
+                        a_arr := array_agg(.a)
+                    } ORDER BY .n
+                """,
+                __limit__=3
+            )
+
+            self.assertEqual(len(result), 3)
+            self.assertEqual(len(result[0].a), 3)
+            self.assertEqual(len(result[0].a_arr), 3)
+
+            # Check that explicit LIMIT is not overridden
+            result = await self.con._fetchall(
+                r"""
+                    WITH MODULE test
+                    SELECT FL_B {
+                        a ORDER BY .n LIMIT 3,
+                        a_arr := array_agg((SELECT .a LIMIT 3)),
+                        a_count := count(.a),
+                    }
+                    ORDER BY .n
+                    LIMIT 3
+                """,
+                __limit__=2
+            )
+
+            self.assertEqual(len(result), 3)
+            self.assertEqual(len(result[0].a), 3)
+            self.assertEqual(len(result[0].a_arr), 3)
+            self.assertEqual(result[0].a_count, 5)
+
+            # Check that implicit limit does not break inline aliases.
+            result = await self.con._fetchall(
+                r"""
+                    WITH a := {11, 12, 13}
+                    SELECT _ := {9, 1, 13}
+                    FILTER _ IN a;
+                """,
+                __limit__=1
+            )
+
+            self.assertEqual(result, edgedb.Set([13]))
+
+        finally:
+            await self.con.execute('''
+                DROP TYPE test::FL_B;
+                DROP TYPE test::FL_A;
+            ''')
+
+    async def test_server_proto_fetch_limit_02(self):
+        with self.assertRaises(edgedb.ProtocolError):
+            await self.con._fetchall(
+                'SELECT {1, 2, 3}',
+                __limit__=-2,
+            )
+
+    async def test_server_proto_fetch_limit_03(self):
+        await self.con._fetchall(
+            'SELECT {1, 2, 3}',
+            __limit__=1,
+        )
+
+        with self.assertRaises(edgedb.ProtocolError):
+            await self.con._fetchall(
+                'SELECT {1, 2, 3}',
+                __limit__=-2,
+            )

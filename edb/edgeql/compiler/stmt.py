@@ -57,23 +57,6 @@ from . import typegen
 @dispatch.compile.register(qlast.SelectQuery)
 def compile_SelectQuery(
         expr: qlast.SelectQuery, *, ctx: context.ContextLevel) -> irast.Set:
-    if astutils.is_degenerate_select(expr) and ctx.toplevel_stmt is not None:
-        # Compile implicit "SELECT Path" as "Path"
-        with ctx.new() as sctx:
-            process_with_block(expr, ctx=sctx, parent_ctx=ctx)
-            sctx.aliased_views = ctx.aliased_views.new_child()
-            sctx.modaliases = ctx.modaliases.copy()
-            sctx.anchors = ctx.anchors.copy()
-            result = compile_result_clause(
-                expr.result,
-                view_scls=ctx.view_scls,
-                view_rptr=ctx.view_rptr,
-                view_name=ctx.toplevel_result_view_name,
-                ctx=sctx)
-            result = fini_stmt(result, expr, ctx=sctx, parent_ctx=ctx)
-
-        return result
-
     with ctx.subquery() as sctx:
         stmt = irast.SelectStmt()
         init_stmt(stmt, expr, ctx=sctx, parent_ctx=ctx)
@@ -81,6 +64,14 @@ def compile_SelectQuery(
             # Make sure path prefix does not get blown away by
             # implicit subqueries.
             sctx.partial_path_prefix = ctx.partial_path_prefix
+            stmt.implicit_wrapper = True
+
+        if expr.limit is not None:
+            sctx.inhibit_implicit_limit = True
+        elif ((ctx.expr_exposed or sctx.stmt is ctx.toplevel_stmt)
+                and ctx.implicit_limit and not sctx.inhibit_implicit_limit):
+            expr.limit = qlast.IntegerConstant(value=str(ctx.implicit_limit))
+            sctx.inhibit_implicit_limit = True
 
         stmt.result = compile_result_clause(
             expr.result,
@@ -168,6 +159,16 @@ def compile_ForQuery(
             view_name=ctx.toplevel_result_view_name,
             forward_rptr=True,
             ctx=sctx)
+
+        if ((ctx.expr_exposed or sctx.stmt is ctx.toplevel_stmt)
+                and ctx.implicit_limit):
+            stmt.limit = setgen.ensure_set(
+                dispatch.compile(
+                    qlast.IntegerConstant(value=str(ctx.implicit_limit)),
+                    ctx=sctx,
+                ),
+                ctx=sctx,
+            )
 
         result = fini_stmt(stmt, qlstmt, ctx=sctx, parent_ctx=ctx)
 
@@ -273,6 +274,7 @@ def compile_InsertQuery(
 
             bodyctx.implicit_id_in_shapes = False
             bodyctx.implicit_tid_in_shapes = False
+            bodyctx.implicit_limit = 0
 
             stmt.subject = compile_query_subject(
                 subject,
@@ -333,6 +335,7 @@ def compile_UpdateQuery(
         with ictx.new() as bodyctx:
             bodyctx.implicit_id_in_shapes = False
             bodyctx.implicit_tid_in_shapes = False
+            bodyctx.implicit_limit = 0
 
             stmt.subject = compile_query_subject(
                 subject,
@@ -411,6 +414,7 @@ def compile_DeleteQuery(
 
         # DELETE Expr is a delete(SET OF X), so we need a scope fence.
         with ictx.newscope(fenced=True) as scopectx:
+            scopectx.implicit_limit = 0
             subject = setgen.scoped_set(
                 dispatch.compile(expr.subject, ctx=scopectx), ctx=scopectx)
 
