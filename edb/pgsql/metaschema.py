@@ -3106,7 +3106,9 @@ async def generate_views(conn, schema):
                             f'ELSE {shortname_expr} END)'
                         )
                     else:
-                        col_expr = shortname_expr
+                        col_expr = (
+                            f"replace({shortname_expr}, '__::', '')"
+                        )
 
                 elif pn == 'inherited_fields':
                     col_expr = f'''
@@ -3153,7 +3155,11 @@ async def generate_views(conn, schema):
                     views[view.name] = view
 
         coltext = textwrap.indent(
-            ',\n'.join(('{} AS {}'.format(*c) for c in cols)), ' ' * 16)
+            ',\n'.join(
+                '{} AS {}'.format(*c) for c in sorted(cols, key=lambda c: c[1])
+            ),
+            ' ' * 16,
+        )
 
         if issubclass(mcls, s_inheriting.InheritingObject):
             objtab = 'edgedb.InheritingObject'
