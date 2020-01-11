@@ -468,7 +468,6 @@ class IntrospectionMech:
                 is_final=r['is_final'],
                 is_local=r['is_local'],
                 delegated=r['delegated'],
-                orig_subjectexpr=r['orig_subjectexpr'],
                 errmessage=r['errmessage'],
                 args=([self.unpack_expr(arg, schema) for arg in r['args']]
                       if r['args'] is not None else None),
@@ -629,7 +628,6 @@ class IntrospectionMech:
                 name=index_name,
                 subject=subj,
                 is_local=index_data['is_local'],
-                origexpr=index_data['origexpr'],
                 inherited_fields=self._unpack_inherited_fields(
                     index_data['inherited_fields']),
                 expr=self.unpack_expr(index_data['expr'], schema))
@@ -682,6 +680,12 @@ class IntrospectionMech:
             else:
                 cardinality = None
 
+            if r['on_target_delete']:
+                on_target_delete = qltypes.LinkTargetDeleteAction(
+                    r['on_target_delete'])
+            else:
+                on_target_delete = None
+
             schema, link = s_links.Link.create_in_schema(
                 schema,
                 id=r['id'],
@@ -696,6 +700,7 @@ class IntrospectionMech:
                 is_abstract=r['is_abstract'],
                 is_final=r['is_final'],
                 is_local=r['is_local'],
+                on_target_delete=on_target_delete,
                 readonly=r['readonly'],
             )
 

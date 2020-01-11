@@ -50,13 +50,6 @@ NonesFirst = NonesOrder.First
 NonesLast = NonesOrder.Last
 
 
-class LinkTargetDeleteAction(s_enum.StrEnum):
-    RESTRICT = 'RESTRICT'
-    DELETE_SOURCE = 'DELETE SOURCE'
-    ALLOW = 'ALLOW'
-    DEFERRED_RESTRICT = 'DEFERRED RESTRICT'
-
-
 class Base(ast.AST):
     __abstract_node__ = True
     __ast_hidden__ = {'context'}
@@ -610,7 +603,7 @@ class AlterDropInherit(DDLCommand, BasesMixin):
 
 
 class OnTargetDelete(DDLCommand):
-    cascade: LinkTargetDeleteAction
+    cascade: qltypes.LinkTargetDeleteAction
 
 
 class BaseSetField(DDLCommand):
@@ -1044,3 +1037,11 @@ def get_targets(target: TypeExpr):
         return get_targets(target.left) + get_targets(target.right)
     else:
         return [target]
+
+
+def get_ddl_field_value(ddlcmd: ObjectDDL, name: str) -> typing.Optional[Expr]:
+    for cmd in ddlcmd.commands:
+        if isinstance(cmd, (SetField, SetSpecialField)) and cmd.name == name:
+            return cmd.value
+
+    return None
