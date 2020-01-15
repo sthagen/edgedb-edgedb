@@ -46,11 +46,11 @@ jobs:
       uses: edgedb/edgedb-pkg/integration/linux/build/debian-stretch@master
       if: matrix.target == 'debian-stretch'
       env:
-        SRC_REVISION: "${{ github.sha }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+        EXTRA_OPTIMIZATIONS: "true"
 
     - name: Test (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/linux/test/debian-stretch@master
@@ -64,11 +64,11 @@ jobs:
       uses: edgedb/edgedb-pkg/integration/linux/build/debian-buster@master
       if: matrix.target == 'debian-buster'
       env:
-        SRC_REVISION: "${{ github.sha }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+        EXTRA_OPTIMIZATIONS: "true"
 
     - name: Test (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/linux/test/debian-buster@master
@@ -82,11 +82,11 @@ jobs:
       uses: edgedb/edgedb-pkg/integration/linux/build/ubuntu-xenial@master
       if: matrix.target == 'ubuntu-xenial'
       env:
-        SRC_REVISION: "${{ github.sha }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+        EXTRA_OPTIMIZATIONS: "true"
 
     - name: Test (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/linux/test/ubuntu-xenial@master
@@ -100,11 +100,11 @@ jobs:
       uses: edgedb/edgedb-pkg/integration/linux/build/ubuntu-bionic@master
       if: matrix.target == 'ubuntu-bionic'
       env:
-        SRC_REVISION: "${{ github.sha }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+        EXTRA_OPTIMIZATIONS: "true"
 
     - name: Test (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/linux/test/ubuntu-bionic@master
@@ -118,11 +118,11 @@ jobs:
       uses: edgedb/edgedb-pkg/integration/linux/build/centos-7@master
       if: matrix.target == 'centos-7'
       env:
-        SRC_REVISION: "${{ github.sha }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+        EXTRA_OPTIMIZATIONS: "true"
 
     - name: Test (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/linux/test/centos-7@master
@@ -136,11 +136,11 @@ jobs:
       uses: edgedb/edgedb-pkg/integration/linux/build/centos-8@master
       if: matrix.target == 'centos-8'
       env:
-        SRC_REVISION: "${{ github.sha }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
         PKG_PLATFORM_VERSION: "${{ matrix.platform_version }}"
+        EXTRA_OPTIMIZATIONS: "true"
 
     - name: Test (${{ matrix.target }})
       uses: edgedb/edgedb-pkg/integration/linux/test/centos-8@master
@@ -179,7 +179,6 @@ jobs:
 
     - name: Build (${{ matrix.target }})
       env:
-        SRC_REVISION: "${{ github.sha }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "${{ matrix.platform }}"
