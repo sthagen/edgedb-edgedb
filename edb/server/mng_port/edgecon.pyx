@@ -76,7 +76,7 @@ cdef bytes EMPTY_TUPLE_UUID = s_obj.get_known_type_id('empty-tuple').bytes
 
 cdef object CAP_ALL = compiler.Capability.ALL
 
-cdef object CARD_NA = compiler.ResultCardinality.NOT_APPLICABLE
+cdef object CARD_NO_RESULT = compiler.ResultCardinality.NO_RESULT
 cdef object CARD_ONE = compiler.ResultCardinality.ONE
 cdef object CARD_MANY = compiler.ResultCardinality.MANY
 
@@ -238,7 +238,7 @@ cdef class EdgeConnection:
             authmethod_name = 'Trust'
         else:
             authmethod = await self.port.get_server().get_auth_method(
-                user, database, self._transport)
+                user, self._transport)
             authmethod_name = type(authmethod).__name__
 
         if authmethod_name == 'SCRAM':
@@ -342,7 +342,7 @@ cdef class EdgeConnection:
 
     async def _auth_trust(self, user):
         rolerec = await self._get_role_record(user)
-        if rolerec is None or not rolerec['allow_login']:
+        if rolerec is None:
             raise errors.AuthenticationError('authentication failed')
 
     async def _auth_scram(self, user):
@@ -483,7 +483,7 @@ cdef class EdgeConnection:
 
     async def _get_scram_verifier(self, user):
         rolerec = await self._get_role_record(user)
-        if rolerec is not None and rolerec['allow_login']:
+        if rolerec is not None:
             verifier_string = rolerec['password']
             if verifier_string is None:
                 raise errors.AuthenticationError(
@@ -753,13 +753,13 @@ cdef class EdgeConnection:
             return CARD_ONE
         elif card == b'n':
             raise errors.BinaryProtocolError(
-                'cardinality N/A cannot be requested')
+                'cardinality NO_RESULT cannot be requested')
         else:
             raise errors.BinaryProtocolError(
                 f'unknown expected cardinality "{repr(card)[2:-1]}"')
 
     cdef char render_cardinality(self, query_unit) except -1:
-        if query_unit.cardinality is CARD_NA:
+        if query_unit.cardinality is CARD_NO_RESULT:
             return <char>(b'n')
         elif query_unit.cardinality is CARD_ONE:
             return <char>(b'o')
