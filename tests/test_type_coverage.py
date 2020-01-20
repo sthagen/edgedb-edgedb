@@ -230,16 +230,16 @@ class TypeCoverageTests(unittest.TestCase):
         self.assertFunctionCoverage(EDB_DIR / "ir", 100.00)
 
     def test_cqa_type_coverage_pgsql(self) -> None:
-        self.assertFunctionCoverage(EDB_DIR / "pgsql", 41.48)
+        self.assertFunctionCoverage(EDB_DIR / "pgsql", 41.70)
 
     def test_cqa_type_coverage_pgsql_compiler(self) -> None:
         self.assertFunctionCoverage(EDB_DIR / "pgsql" / "compiler", 100.00)
 
     def test_cqa_type_coverage_pgsql_datasources(self) -> None:
-        self.assertFunctionCoverage(EDB_DIR / "pgsql" / "datasources", 50.00)
+        self.assertFunctionCoverage(EDB_DIR / "pgsql" / "datasources", 51.61)
 
     def test_cqa_type_coverage_pgsql_dbops(self) -> None:
-        self.assertFunctionCoverage(EDB_DIR / "pgsql" / "dbops", 35.12)
+        self.assertFunctionCoverage(EDB_DIR / "pgsql" / "dbops", 35.75)
 
     def test_cqa_type_coverage_repl(self) -> None:
         self.assertFunctionCoverage(EDB_DIR / "repl", 100.0)
@@ -248,7 +248,7 @@ class TypeCoverageTests(unittest.TestCase):
         self.assertFunctionCoverage(EDB_DIR / "schema", 46.67)
 
     def test_cqa_type_coverage_server(self) -> None:
-        self.assertFunctionCoverage(EDB_DIR / "server", 13.73)
+        self.assertFunctionCoverage(EDB_DIR / "server", 13.91)
 
     def test_cqa_type_coverage_server_cache(self) -> None:
         self.assertFunctionCoverage(EDB_DIR / "server" / "cache", 0)
@@ -292,7 +292,7 @@ class TypeCoverageTests(unittest.TestCase):
         self.assertFunctionCoverage(EDB_DIR / "testbase", 1.04)
 
     def test_cqa_type_coverage_tools(self) -> None:
-        self.assertFunctionCoverage(EDB_DIR / "tools", 21.36)
+        self.assertFunctionCoverage(EDB_DIR / "tools", 21.43)
 
     def test_cqa_type_coverage_tools_docs(self) -> None:
         self.assertFunctionCoverage(EDB_DIR / "tools" / "docs", 0)
