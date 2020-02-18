@@ -29,8 +29,6 @@ import sys
 import types
 import uuid
 
-import immutables as immu
-
 from edb import errors
 from edb.edgeql import qltypes
 
@@ -60,7 +58,7 @@ if TYPE_CHECKING:
     class MergeFunction(Protocol):
         def __call__(
             self,  # not actually part of the signature
-            target: InheritingObjectBase,
+            target: InheritingObject,
             sources: List[Object],
             field_name: str,
             *,
@@ -84,6 +82,15 @@ class NoDefaultT(enum.Enum):
 
 
 NoDefault: Final = NoDefaultT.NoDefault
+
+
+class DefaultConstructorT(enum.Enum):
+    DefaultConstructor = 0
+
+
+DEFAULT_CONSTRUCTOR: Final = DefaultConstructorT.DefaultConstructor
+
+
 T = TypeVar("T")
 Type_T = TypeVar("Type_T", bound=type)
 Object_T = TypeVar("Object_T", bound="Object")
@@ -94,7 +101,7 @@ HashCriterion = Union[Type[Object_T], Tuple[str, Any]]
 
 
 def default_field_merge(
-    target: InheritingObjectBase,
+    target: InheritingObject,
     sources: List[Object],
     field_name: str,
     *,
@@ -764,21 +771,17 @@ class Object(s_abc.Object, s_abc.ObjectContainer, metaclass=ObjectMeta):
         self,
         field_name: str,
         field: SchemaField[Type[T]],
-        relaxrequired: bool = False,
     ) -> Optional[T]:
-        if field.default == field.type:
-            if issubclass(field.default, ObjectCollection):
-                value = field.default.create_empty()
+        if field.default is NoDefault:
+            raise TypeError(f'{type(self).__name__}.{field_name} is required')
+        elif field.default is DEFAULT_CONSTRUCTOR:
+            if issubclass(field.type, ObjectCollection):
+                value = field.type.create_empty()
             else:
-                value = field.default()
-        elif field.default is NoDefault:
-            if relaxrequired:
-                value = None
-            else:
-                raise TypeError(
-                    '%s.%s.%s is required' % (
-                        self.__class__.__module__, self.__class__.__name__,
-                        field_name))
+                # The dance below is required to workaround a bug in mypy:
+                # Unsupported type Type["Type[T]"]
+                t = cast(type, field.type)
+                value = t()
         else:
             value = field.default
         return value
@@ -1218,8 +1221,6 @@ class Object(s_abc.Object, s_abc.ObjectContainer, metaclass=ObjectMeta):
         old_schema: Optional[s_schema.Schema],
         new_schema: s_schema.Schema,
     ) -> None:
-        from edb.schema import delta as sd
-
         ff = type(new).get_fields(sorted=True).items()
         fields = {fn: f for fn, f in ff
                   if f.simpledelta and not f.ephemeral and f.introspectable}
@@ -1248,14 +1249,13 @@ class Object(s_abc.Object, s_abc.ObjectContainer, metaclass=ObjectMeta):
                     context=context)
 
                 if fcoef != 1.0:
-                    delta.add(sd.AlterObjectProperty(
-                        property=fn, old_value=oldattr_v, new_value=newattr_v))
+                    delta.set_attribute_value(
+                        fn, newattr_v, orig_value=oldattr_v)
         elif new:
             # IDs are assigned once when the object is created and
             # never changed.
             id_value = new.get_explicit_field_value(new_schema, 'id')
-            delta.add(sd.AlterObjectProperty(
-                property='id', old_value=None, new_value=id_value))
+            delta.set_attribute_value('id', id_value)
 
             for fn in fields:
                 value = new.get_explicit_field_value(new_schema, fn, None)
@@ -1272,10 +1272,7 @@ class Object(s_abc.Object, s_abc.ObjectContainer, metaclass=ObjectMeta):
         fname: str,
         value: Any,
     ) -> None:
-        from edb.schema import delta as sd
-
-        delta.add(sd.AlterObjectProperty(
-            property=fname, old_value=None, new_value=value))
+        delta.set_attribute_value(fname, value)
 
     @classmethod
     def delta_rename(
@@ -1306,7 +1303,6 @@ class Object(s_abc.Object, s_abc.ObjectContainer, metaclass=ObjectMeta):
         new_schema: s_schema.Schema,
     ) -> sd.DeltaRoot:
         from edb.schema import delta as sd
-        from edb.schema import inheriting as s_inh
 
         adds_mods = sd.DeltaRoot()
         dels = sd.DeltaRoot()
@@ -1395,7 +1391,7 @@ class Object(s_abc.Object, s_abc.ObjectContainer, metaclass=ObjectMeta):
                 probe = None
 
             if probe is not None:
-                has_bases = isinstance(probe, s_inh.InheritingObject)
+                has_bases = isinstance(probe, InheritingObject)
             else:
                 has_bases = False
 
@@ -1420,8 +1416,8 @@ class Object(s_abc.Object, s_abc.ObjectContainer, metaclass=ObjectMeta):
 
                     new_class: Object = new_schema.get(new_name)
 
-                    assert isinstance(old_class, s_inh.InheritingObject)
-                    assert isinstance(new_class, s_inh.InheritingObject)
+                    assert isinstance(old_class, InheritingObject)
+                    assert isinstance(new_class, InheritingObject)
 
                     old_bases = \
                         old_class.get_bases(old_schema).objects(old_schema)
@@ -1480,9 +1476,56 @@ class UnqualifiedObject(Object):
     def get_displayname(self, schema: s_schema.Schema) -> str:
         return self.get_name(schema)
 
+    def get_shortname(self, schema: s_schema.Schema) -> str:  # type: ignore
+        return self.get_name(schema)
+
 
 class GlobalObject(UnqualifiedObject):
     pass
+
+
+class DerivableObject(Object):
+
+    def derive_name(
+        self,
+        schema: s_schema.Schema,
+        source: Object,
+        *qualifiers: str,
+        derived_name_base: Optional[str] = None,
+        module: Optional[str] = None,
+    ) -> sn.SchemaName:
+        if module is None:
+            module = source.get_name(schema).module
+        source_name = source.get_name(schema)
+        qualifiers = (source_name,) + qualifiers
+
+        return derive_name(
+            schema,
+            *qualifiers,
+            module=module,
+            parent=self,
+            derived_name_base=derived_name_base,
+        )
+
+    def generic(self, schema: s_schema.Schema) -> bool:
+        return self.get_shortname(schema) == self.get_name(schema)
+
+    def get_derived_name_base(self, schema: s_schema.Schema) -> str:
+        return self.get_shortname(schema)
+
+    def get_derived_name(
+        self,
+        schema: s_schema.Schema,
+        source: Object,
+        *qualifiers: str,
+        mark_derived: bool = False,
+        derived_name_base: Optional[str] = None,
+        module: Optional[str] = None,
+    ) -> sn.Name:
+        return self.derive_name(
+            schema, source, *qualifiers,
+            derived_name_base=derived_name_base,
+            module=module)
 
 
 class BaseObjectRef:
@@ -1985,39 +2028,7 @@ class ObjectList(ObjectCollection, container=tuple):
             return default
 
 
-InheritingObjectBaseT = TypeVar('InheritingObjectBaseT',
-                                bound='InheritingObjectBase')
-
-
-class InheritingObjectBase(Object):
-
-    bases = SchemaField(
-        ObjectList,
-        default=ObjectList,
-        coerce=True,
-        inheritable=False,
-        compcoef=0.714,
-    )
-
-    ancestors = SchemaField(
-        ObjectList,
-        default=ObjectList,
-        coerce=True,
-        inheritable=False,
-        compcoef=0.999,
-    )
-
-    # Attributes that have been set locally as opposed to inherited.
-    inherited_fields = SchemaField(
-        immu.Map,
-        default=immu.Map(),
-        inheritable=False,
-        hashable=False,
-    )
-
-    is_derived = SchemaField(
-        bool,
-        default=False, compcoef=0.909)
+class SubclassableObject(Object):
 
     is_abstract = SchemaField(
         bool,
@@ -2028,26 +2039,15 @@ class InheritingObjectBase(Object):
         bool,
         default=False, compcoef=0.909)
 
-    def inheritable_fields(self) -> Iterable[Any]:
-        raise NotImplementedError
-
-    @classmethod
-    def get_default_base_name(self) -> Optional[str]:
-        raise NotImplementedError
-
     def _issubclass(
-        self, schema: s_schema.Schema, parent: InheritingObjectBase
+        self, schema: s_schema.Schema, parent: SubclassableObject
     ) -> bool:
-        if parent == self:
-            return True
-
-        lineage = self.get_ancestors(schema).objects(schema)
-        return parent in lineage
+        return parent == self
 
     def issubclass(
         self,
         schema: s_schema.Schema,
-        parent: Union[InheritingObjectBase, Tuple[InheritingObjectBase, ...]],
+        parent: Union[SubclassableObject, Tuple[SubclassableObject, ...]],
     ) -> bool:
         from . import types as s_types
         if isinstance(parent, tuple):
@@ -2058,9 +2058,90 @@ class InheritingObjectBase(Object):
             else:
                 return self._issubclass(schema, parent)
 
+
+InheritingObjectT = TypeVar('InheritingObjectT', bound='InheritingObject')
+
+
+class InheritingObject(SubclassableObject, DerivableObject):
+
+    bases = SchemaField(
+        ObjectList,
+        default=DEFAULT_CONSTRUCTOR,
+        coerce=True,
+        inheritable=False,
+        compcoef=0.714,
+    )
+
+    ancestors = SchemaField(
+        ObjectList,
+        default=DEFAULT_CONSTRUCTOR,
+        coerce=True,
+        inheritable=False,
+        compcoef=0.999,
+    )
+
+    # Attributes that have been set locally as opposed to inherited.
+    inherited_fields = SchemaField(
+        checked.FrozenCheckedSet[str],
+        default=DEFAULT_CONSTRUCTOR,
+        coerce=True,
+        inheritable=False,
+        hashable=False,
+    )
+
+    is_derived = SchemaField(
+        bool,
+        default=False, compcoef=0.909)
+
+    def inheritable_fields(self) -> Iterable[str]:
+        for fn, f in self.__class__.get_fields().items():
+            if f.inheritable:
+                yield fn
+
+    @classmethod
+    def get_default_base_name(self) -> Optional[str]:
+        return None
+
+    def get_base_names(self, schema: s_schema.Schema) -> Collection[str]:
+        return self.get_bases(schema).names(schema)
+
+    def get_topmost_concrete_base(
+        self, schema: s_schema.Schema
+    ) -> InheritingObject:
+        """Get the topmost non-abstract base."""
+        lineage = [self]
+        lineage.extend(self.get_ancestors(schema).objects(schema))
+        for ancestor in reversed(lineage):
+            if not ancestor.get_is_abstract(schema):
+                return ancestor
+
+        if not self.get_is_abstract(schema):
+            return self
+
+        raise errors.SchemaError(
+            f'{self.get_verbosename(schema)} has no non-abstract ancestors')
+
+    def get_base_for_cast(self, schema: s_schema.Schema) -> Object:
+        return self.get_topmost_concrete_base(schema)
+
+    @classmethod
+    def get_root_classes(cls) -> Tuple[sn.Name, ...]:
+        return tuple()
+
+    def _issubclass(
+        self,
+        schema: s_schema.Schema,
+        parent: SubclassableObject,
+    ) -> bool:
+        if parent == self:
+            return True
+
+        lineage = self.get_ancestors(schema).objects(schema)
+        return parent in lineage
+
     def descendants(
-        self: InheritingObjectBaseT, schema: s_schema.Schema
-    ) -> FrozenSet[InheritingObjectBaseT]:
+        self: InheritingObjectT, schema: s_schema.Schema
+    ) -> FrozenSet[InheritingObjectT]:
         return schema.get_descendants(self)
 
     def ordered_descendants(
@@ -2085,7 +2166,7 @@ class InheritingObjectBase(Object):
         obj = self
         while obj.get_is_derived(schema):
             obj = cast(
-                InheritingObjectBase, obj.get_bases(schema).first(schema)
+                InheritingObject, obj.get_bases(schema).first(schema)
             )
         return obj
 
@@ -2096,7 +2177,7 @@ class InheritingObjectBase(Object):
         default: Any = NoDefault,
     ) -> Any:
         inherited_fields = self.get_inherited_fields(schema)
-        if not inherited_fields.get(field_name):
+        if field_name not in inherited_fields:
             return self.get_explicit_field_value(schema, field_name, default)
         elif default is not NoDefault:
             return default
@@ -2113,6 +2194,83 @@ class InheritingObjectBase(Object):
         refdict: RefDict,
     ) -> bool:
         return True
+
+    @classmethod
+    def delta(
+        cls,
+        old: Optional[Object],
+        new: Optional[Object],
+        *,
+        context: Optional[ComparisonContext] = None,
+        old_schema: Optional[s_schema.Schema],
+        new_schema: s_schema.Schema,
+    ) -> sd.ObjectCommand[InheritingObject]:
+        from . import delta as sd
+        from . import inheriting as s_inh
+
+        if context is None:
+            context = ComparisonContext()
+
+        with context(old, new):
+            delta = super().delta(old, new, context=context,
+                                  old_schema=old_schema,
+                                  new_schema=new_schema)
+
+            if old and new:
+                assert isinstance(old, InheritingObject)
+                assert isinstance(new, InheritingObject)
+
+                rebase = sd.ObjectCommandMeta.get_command_class(
+                    s_inh.RebaseInheritingObject, type(new))
+
+                assert old_schema is not None
+
+                old_base_names = old.get_base_names(old_schema)
+                new_base_names = new.get_base_names(new_schema)
+
+                if old_base_names != new_base_names and rebase is not None:
+                    removed, added = s_inh.delta_bases(
+                        old_base_names, new_base_names)
+
+                    rebase_cmd = rebase(
+                        classname=new.get_name(new_schema),
+                        metaclass=type(new),
+                        removed_bases=removed,
+                        added_bases=added,
+                    )
+
+                    rebase_cmd.set_attribute_value(
+                        'bases',
+                        new._reduce_refs(
+                            new_schema, new.get_bases(new_schema))[0],
+                    )
+
+                    rebase_cmd.set_attribute_value(
+                        'ancestors',
+                        new._reduce_refs(
+                            new_schema, new.get_ancestors(new_schema))[0],
+                    )
+
+                    delta.add(rebase_cmd)
+
+        return delta
+
+    @classmethod
+    def delta_property(
+        cls,
+        schema: s_schema.Schema,
+        scls: Object,
+        delta: sd.Command,
+        fname: str,
+        value: Any,
+    ) -> None:
+        assert isinstance(scls, InheritingObject)
+        inherited_fields = scls.get_inherited_fields(schema)
+        delta.set_attribute_value(
+            fname,
+            value,
+            inherited=fname in inherited_fields,
+        )
 
 
 @markup.serializer.serializer.register(Object)
@@ -2161,7 +2319,7 @@ def _merge_lineage(
 
 
 def compute_lineage(
-    schema: s_schema.Schema, obj: InheritingObjectBase
+    schema: s_schema.Schema, obj: InheritingObject
 ) -> List[Any]:
     bases = tuple(obj.get_bases(schema).objects(schema))
     lineage = [[obj]]
@@ -2175,6 +2333,22 @@ def compute_lineage(
 
 
 def compute_ancestors(
-    schema: s_schema.Schema, obj: InheritingObjectBase
+    schema: s_schema.Schema, obj: InheritingObject
 ) -> List[Any]:
     return compute_lineage(schema, obj)[1:]
+
+
+def derive_name(
+    schema: s_schema.Schema,
+    *qualifiers: str,
+    module: str,
+    parent: Optional[DerivableObject] = None,
+    derived_name_base: Optional[str] = None,
+) -> sn.Name:
+    if derived_name_base is None:
+        assert parent is not None
+        derived_name_base = parent.get_derived_name_base(schema)
+
+    name = sn.get_specialized_name(derived_name_base, *qualifiers)
+
+    return sn.Name(name=name, module=module)

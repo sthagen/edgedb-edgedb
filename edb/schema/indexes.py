@@ -59,7 +59,7 @@ class Index(referencing.ReferencedInheritingObject, s_anno.AnnotationSubject):
         return expr.origtext
 
 
-class IndexableSubject(inheriting.InheritingObject):
+class IndexableSubject(so.InheritingObject):
     indexes_refs = so.RefDict(
         attr='indexes',
         ref_cls=Index)
@@ -67,7 +67,7 @@ class IndexableSubject(inheriting.InheritingObject):
     indexes = so.SchemaField(
         so.ObjectIndexByUnqualifiedName,
         inheritable=False, ephemeral=True, coerce=True, compcoef=0.909,
-        default=so.ObjectIndexByUnqualifiedName)
+        default=so.DEFAULT_CONSTRUCTOR)
 
     def add_index(self, schema, index):
         return self.add_classref(schema, 'indexes', index)
