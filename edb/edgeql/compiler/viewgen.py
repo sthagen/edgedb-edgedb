@@ -239,6 +239,7 @@ def _normalize_view_ptr_expr(
     qlexpr = None
     target_typexpr = None
     source: qlast.Base
+    base_ptrcls_is_alias = False
 
     if plen >= 2 and isinstance(steps[-1], qlast.TypeIntersection):
         # Target type intersection: foo: Type
@@ -507,6 +508,7 @@ def _normalize_view_ptr_expr(
 
             if base_ptrcls is None:
                 base_ptrcls = shape_expr_ctx.view_rptr.base_ptrcls
+                base_ptrcls_is_alias = shape_expr_ctx.view_rptr.ptrcls_is_alias
 
         ptr_cardinality = None
         ptr_target = inference.infer_type(irexpr, ctx.env)
@@ -683,11 +685,34 @@ def _normalize_view_ptr_expr(
             if qlexpr is None and ptrcls is not base_ptrcls:
                 ctx.pointer_derivation_map[base_ptrcls].append(ptrcls)
 
+            base_cardinality = None
+            if base_ptrcls is not None and not base_ptrcls_is_alias:
+                base_cardinality = base_ptrcls.get_cardinality(ctx.env.schema)
+
+            if base_cardinality is None:
+                specified_cardinality = shape_el.cardinality
+            else:
+                specified_cardinality = base_cardinality
+                if (shape_el.cardinality is not None
+                        and base_ptrcls is not None
+                        and shape_el.cardinality != base_cardinality):
+                    base_src = base_ptrcls.get_source(ctx.env.schema)
+                    assert base_src is not None
+                    base_src_name = base_src.get_verbosename(ctx.env.schema)
+                    raise errors.SchemaError(
+                        f'cannot redefine the cardinality of '
+                        f'{ptrcls.get_verbosename(ctx.env.schema)}: '
+                        f'it is defined as {base_cardinality.as_ptr_qual()!r} '
+                        f'in the base {base_src_name}',
+                        context=compexpr.context,
+                    )
+
             stmtctx.pend_pointer_cardinality_inference(
                 ptrcls=ptrcls,
-                specified_card=shape_el.cardinality,
+                specified_card=specified_cardinality,
                 source_ctx=shape_el.context,
-                ctx=ctx)
+                ctx=ctx,
+            )
 
             ctx.env.schema = ptrcls.set_field_value(
                 ctx.env.schema, 'cardinality', None)
@@ -918,7 +943,7 @@ def _get_shape_configuration(
         )
         with ctx.newscope(fenced=True) as scopectx:
             scopectx.anchors = scopectx.anchors.copy()
-            scopectx.anchors[qlast.Source] = ir_set
+            scopectx.anchors[qlast.Source().name] = ir_set
             ptr = _normalize_view_ptr_expr(
                 ql, stype, path_id=ir_set.path_id, ctx=scopectx)
             view_shape = ctx.env.view_shapes[stype]
