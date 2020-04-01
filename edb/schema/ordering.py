@@ -21,7 +21,6 @@ from __future__ import annotations
 from typing import *
 
 import collections
-import uuid
 
 from edb.common import topological
 
@@ -258,6 +257,11 @@ def _trace_op(
             new_value_name = op.new_value.get_name(new_schema)
             deps.add(('create', new_value_name))
             deps.add(('alter', new_value_name))
+        elif isinstance(op.new_value, so.ObjectShell):
+            nvn = op.new_value.name
+            if nvn is not None:
+                deps.add(('create', nvn))
+                deps.add(('alter', nvn))
 
         parent_op = opstack[-2]
         assert isinstance(parent_op, sd.ObjectCommand)
@@ -363,11 +367,13 @@ def get_object(
 ) -> so.Object:
     metaclass = op.get_schema_metaclass()
 
-    if issubclass(metaclass, s_types.SchemaCollection):
+    if issubclass(metaclass, s_types.Collection):
         if sn.Name.is_qualified(name):
             return schema.get(name)
         else:
-            return schema.get_by_id(uuid.UUID(name))
+            t_id = s_types.type_id_from_name(name)
+            assert t_id is not None
+            return schema.get_by_id(t_id)
     elif not issubclass(metaclass, so.QualifiedObject):
         return schema.get_global(metaclass, name)
     else:

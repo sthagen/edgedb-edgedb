@@ -161,13 +161,11 @@ class ObjectMetaCommand(MetaCommand, sd.ObjectCommand,
         raise NotImplementedError
 
     def _get_id(self, schema, value):
-        if isinstance(value, s_obj.BaseObjectRef):
-            obj_id = value._resolve_ref(schema).id
-        elif isinstance(value, s_obj.Object):
+        if isinstance(value, s_obj.Object):
             obj_id = value.id
         else:
             raise ValueError(
-                f'expecting a ObjectRef or an Object, got {value!r}')
+                f'expecting an Object, got {value!r}')
 
         return obj_id
 
@@ -182,14 +180,14 @@ class ObjectMetaCommand(MetaCommand, sd.ObjectCommand,
             recvalue = dbops.Query(f'ARRAY[{id_array}]::uuid[]')
 
         elif isinstance(value, (s_obj.ObjectIndexBase, s_obj.ObjectDict)):
-            result = s_types.Tuple.from_subtypes(
+            schema, result = s_types.Tuple.from_subtypes(
                 schema,
                 dict(value.items(schema)),
                 {'named': True})
             recvalue = types.TypeDesc.from_type(schema, result)
 
         elif isinstance(value, s_obj.ObjectCollection):
-            result = s_types.Tuple.from_subtypes(schema, value)
+            schema, result = s_types.Tuple.from_subtypes(schema, value)
             recvalue = types.TypeDesc.from_type(schema, result)
 
         elif isinstance(value, s_obj.Object):
@@ -378,6 +376,9 @@ class CreateTuple(TupleCommand, adapts=s_types.CreateTuple):
         schema = self.__class__.get_adaptee().apply(self, schema, context)
         schema = TupleCommand.apply(self, schema, context)
 
+        if self.scls.is_polymorphic(schema):
+            return schema
+
         elements = self.scls.get_element_types(schema).items(schema)
 
         ctype = dbops.CompositeType(
@@ -404,12 +405,13 @@ class DeleteTuple(TupleCommand, adapts=s_types.DeleteTuple):
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
-        tup = schema.get_global(s_types.SchemaTuple, self.classname)
+        tup = schema.get_global(s_types.Tuple, self.classname)
 
-        self.pgops.add(dbops.DropCompositeType(
-            name=common.get_backend_name(schema, tup, catenate=False),
-            priority=2,
-        ))
+        if not tup.is_polymorphic(schema):
+            self.pgops.add(dbops.DropCompositeType(
+                name=common.get_backend_name(schema, tup, catenate=False),
+                priority=2,
+            ))
 
         schema = self.__class__.get_adaptee().apply(self, schema, context)
         schema = TupleCommand.apply(self, schema, context)
@@ -1902,6 +1904,18 @@ class RebaseIndex(
     pass
 
 
+class CreateUnionType(
+    MetaCommand,
+    adapts=s_types.CreateUnionType,
+    metaclass=ObjectCommandMeta,
+):
+
+    def apply(self, schema, context):
+        schema = self.__class__.get_adaptee().apply(self, schema, context)
+        schema = ObjectMetaCommand.apply(self, schema, context)
+        return schema
+
+
 class ObjectTypeMetaCommand(AliasCapableObjectMetaCommand,
                             CompositeObjectMetaCommand):
     def get_table(self, schema):
@@ -2788,18 +2802,6 @@ class AlterLink(LinkMetaCommand, adapts=s_links.AlterLink):
                     dbops.Update(
                         table=table, record=rec,
                         condition=[('id', link.id)], priority=1))
-
-            new_type = None
-            for op in self.get_subcommands(type=sd.AlterObjectProperty):
-                if op.property == 'target':
-                    new_type = op.new_value.get_name(schema) \
-                        if op.new_value is not None else None
-                    break
-
-            if new_type:
-                if not isinstance(link.get_target(schema), s_obj.Object):
-                    schema = link.set_field_value(
-                        schema, 'target', schema.get(link.get_target(schema)))
 
             self.attach_alter_table(context)
 
@@ -3934,21 +3936,20 @@ class RebaseRole(ObjectMetaCommand, adapts=s_roles.RebaseRole):
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
-        orig_schema = schema
         schema = s_roles.RebaseRole.apply(self, schema, context)
         role = self.scls
         schema = ObjectMetaCommand.apply(self, schema, context)
 
         for dropped in self.removed_bases:
             self.pgops.add(dbops.AlterRoleDropMember(
-                name=dropped.get_name(orig_schema),
+                name=dropped.name,
                 member=role.get_name(schema),
             ))
 
         for bases, _pos in self.added_bases:
             for added in bases:
                 self.pgops.add(dbops.AlterRoleAddMember(
-                    name=added.get_name(schema),
+                    name=added.name,
                     member=role.get_name(schema),
                 ))
 

@@ -37,6 +37,7 @@ from . import inheriting
 from . import objects as so
 from . import schema as s_schema
 from . import types as s_types
+from . import utils as s_utils
 
 
 class ScalarType(
@@ -87,11 +88,11 @@ class ScalarType(
     def _to_nonpolymorphic(
         self,
         schema: s_schema.Schema,
-        concrete_type: s_types.Type,
-    ) -> s_types.Type:
+        concrete_type: ScalarType,
+    ) -> Tuple[s_schema.Schema, ScalarType]:
         if (not concrete_type.is_polymorphic(schema) and
                 concrete_type.issubclass(schema, self)):
-            return concrete_type
+            return schema, concrete_type
         raise TypeError(
             f'cannot interpret {concrete_type.get_name(schema)} '
             f'as {self.get_name(schema)}')
@@ -148,23 +149,27 @@ class ScalarType(
         self,
         other: s_types.Type,
         schema: s_schema.Schema,
-    ) -> Optional[s_types.Type]:
+    ) -> Tuple[s_schema.Schema, Optional[ScalarType]]:
 
         if not isinstance(other, ScalarType):
-            return None
+            return schema, None
 
         if self.is_polymorphic(schema) and other.is_polymorphic(schema):
-            return self
+            return schema, self
 
         left = self.get_topmost_concrete_base(schema)
         right = other.get_topmost_concrete_base(schema)
-        assert isinstance(left, ScalarType)
-        assert isinstance(right, ScalarType)
 
         if left == right:
-            return left
+            return schema, left
         else:
-            return s_casts.find_common_castable_type(schema, left, right)
+            return (
+                schema,
+                cast(
+                    Optional[ScalarType],
+                    s_casts.find_common_castable_type(schema, left, right),
+                )
+            )
 
     def get_base_for_cast(self, schema: s_schema.Schema) -> so.Object:
         if self.is_enum(schema):
@@ -184,11 +189,23 @@ class ScalarType(
         return f"{clsname} '{dname}'"
 
 
-class AnonymousEnumTypeRef(so.ObjectRef):
+class AnonymousEnumTypeShell(s_types.TypeShell):
 
-    def __init__(self, *, name: str, elements: List[str]):
+    elements: Sequence[str]
+
+    def __init__(
+        self,
+        *,
+        name: str = 'std::anyenum',
+        elements: Iterable[str],
+    ) -> None:
         super().__init__(name=name)
-        self.__dict__['elements'] = elements
+        self.elements = list(elements)
+
+    def resolve(self, schema: s_schema.Schema) -> s_types.Type:
+        raise NotImplementedError(
+            f'cannot resolve {self.__class__.__name__!r}'
+        )
 
 
 class ScalarTypeCommandContext(sd.ObjectCommandContext[ScalarType],
@@ -198,8 +215,8 @@ class ScalarTypeCommandContext(sd.ObjectCommandContext[ScalarType],
 
 
 class ScalarTypeCommand(
-    s_types.InheritingTypeCommand,
-    constraints.ConsistencySubjectCommand,
+    s_types.InheritingTypeCommand[ScalarType],
+    constraints.ConsistencySubjectCommand[ScalarType],
     s_anno.AnnotationSubjectCommand,
     schema_metaclass=ScalarType,
     context_class=ScalarTypeCommandContext,
@@ -217,30 +234,11 @@ class ScalarTypeCommand(
         assert isinstance(astnode, qlast.ObjectDDL)
         return cls._handle_view_op(schema, cmd, astnode, context)
 
-    @classmethod
-    def _validate_base_refs(
-        cls,
-        schema: s_schema.Schema,
-        base_refs: List[so.Object],
-        astnode: qlast.ObjectDDL,
-        context: sd.CommandContext,
-    ) -> so.ObjectList[so.InheritingObject]:
-        has_enums = any(isinstance(br, AnonymousEnumTypeRef)
-                        for br in base_refs)
 
-        if has_enums:
-            if len(base_refs) > 1:
-                assert isinstance(astnode, qlast.BasesMixin)
-                raise errors.SchemaError(
-                    f'invalid scalar type definition, enumeration must be the '
-                    f'only supertype specified',
-                    context=astnode.bases[0].context,
-                )
-
-        return super()._validate_base_refs(schema, base_refs, astnode, context)
-
-
-class CreateScalarType(ScalarTypeCommand, inheriting.CreateInheritingObject):
+class CreateScalarType(
+    ScalarTypeCommand,
+    inheriting.CreateInheritingObject[ScalarType],
+):
     astnode = qlast.CreateScalarType
 
     @classmethod
@@ -264,26 +262,66 @@ class CreateScalarType(ScalarTypeCommand, inheriting.CreateInheritingObject):
         else:
             create_cmd = cmd
 
-        bases = create_cmd.get_attribute_value('bases')
-        is_enum = False
-        if len(bases) == 1 and isinstance(bases._ids[0], AnonymousEnumTypeRef):
-            # type ignore below because this class elements is set
-            # directly on __dict__
-            elements = bases._ids[0].elements  # type: ignore
-            create_cmd.set_attribute_value('enum_values', elements)
-            create_cmd.set_attribute_value('is_final', True)
-            is_enum = True
+        if isinstance(astnode, qlast.CreateScalarType):
+            bases = [
+                s_utils.ast_to_type_shell(
+                    b,
+                    modaliases=context.modaliases,
+                    schema=schema,
+                )
+                for b in astnode.bases
+            ]
 
-        for sub in create_cmd.get_subcommands(type=sd.AlterObjectProperty):
-            if sub.property == 'default':
-                if is_enum:
-                    raise errors.UnsupportedFeatureError(
-                        f'enumerated types do not support defaults'
+            if any(isinstance(br, AnonymousEnumTypeShell) for br in bases):
+                # This is an enumerated type.
+                if len(bases) > 1:
+                    assert isinstance(astnode, qlast.BasesMixin)
+                    raise errors.SchemaError(
+                        f'invalid scalar type definition, enumeration must be'
+                        f' the only supertype specified',
+                        context=astnode.bases[0].context,
                     )
-                else:
-                    sub.new_value = [sub.new_value]
-        assert isinstance(cmd, (CreateScalarType, sd.CommandGroup))
+                deflt = create_cmd.get_attribute_set_cmd('default')
+                if deflt is not None:
+                    raise errors.UnsupportedFeatureError(
+                        f'enumerated types do not support defaults',
+                        context=deflt.source_context,
+                    )
+
+                shell = bases[0]
+                assert isinstance(shell, AnonymousEnumTypeShell)
+                create_cmd.set_attribute_value('enum_values', shell.elements)
+                create_cmd.set_attribute_value('is_final', True)
+
         return cmd
+
+    @classmethod
+    def _classbases_from_ast(
+        cls,
+        schema: s_schema.Schema,
+        astnode: qlast.ObjectDDL,
+        context: sd.CommandContext,
+    ) -> so.ObjectList[ScalarType]:
+
+        modaliases = context.modaliases
+
+        base_refs: List[ScalarType] = []
+        for b in getattr(astnode, 'bases', []):
+            shell = s_utils.ast_to_object_shell(
+                b,
+                modaliases=modaliases,
+                schema=schema,
+                metaclass=cls.get_schema_metaclass(),
+            )
+            if isinstance(shell, AnonymousEnumTypeShell):
+                obj = schema.get('std::anyenum', type=ScalarType)
+            else:
+                resolved = shell.resolve(schema)
+                assert isinstance(resolved, ScalarType)
+                obj = resolved
+            base_refs.append(obj)
+
+        return cls._validate_base_refs(schema, base_refs, astnode, context)
 
     def _get_ast_node(
         self,
@@ -332,7 +370,10 @@ class RenameScalarType(ScalarTypeCommand, sd.RenameObject):
     pass
 
 
-class RebaseScalarType(ScalarTypeCommand, inheriting.RebaseInheritingObject):
+class RebaseScalarType(
+    ScalarTypeCommand,
+    inheriting.RebaseInheritingObject[ScalarType],
+):
 
     def apply(
         self,
@@ -405,10 +446,15 @@ class RebaseScalarType(ScalarTypeCommand, inheriting.RebaseInheritingObject):
         return schema
 
 
-class AlterScalarType(ScalarTypeCommand,
-                      inheriting.AlterInheritingObject):
+class AlterScalarType(
+    ScalarTypeCommand,
+    inheriting.AlterInheritingObject[ScalarType],
+):
     astnode = qlast.AlterScalarType
 
 
-class DeleteScalarType(ScalarTypeCommand, inheriting.DeleteInheritingObject):
+class DeleteScalarType(
+    ScalarTypeCommand,
+    inheriting.DeleteInheritingObject[ScalarType],
+):
     astnode = qlast.DropScalarType

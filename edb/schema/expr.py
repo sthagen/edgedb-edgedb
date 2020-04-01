@@ -91,7 +91,7 @@ class Expression(struct.MixedStruct, s_abc.ObjectContainer, s_abc.Expression):
                        *,
                        our_schema: s_schema.Schema,
                        their_schema: s_schema.Schema,
-                       context: Any,
+                       context: so.ComparisonContext,
                        compcoef: float) -> float:
         if not ours and not theirs:
             return 1.0
@@ -202,18 +202,48 @@ class Expression(struct.MixedStruct, s_abc.ObjectContainer, s_abc.Expression):
             _irast=expr._irast,
         )
 
-    def _reduce_to_ref(self,
-                       schema: s_schema.Schema) -> Tuple[Expression,
-                                                         Expression]:
-        return type(self)(
+    def as_shell(self, schema: s_schema.Schema) -> ExpressionShell:
+        return ExpressionShell(
+            text=self.text,
+            origtext=self.origtext,
+            refs=(
+                r.as_shell(schema) for r in self.refs.objects(schema)
+            ) if self.refs is not None else None,
+            _qlast=self._qlast,
+        )
+
+
+class ExpressionShell(so.Shell):
+
+    def __init__(
+        self,
+        *,
+        text: str,
+        origtext: Optional[str],
+        refs: Optional[Iterable[so.ObjectShell]],
+        _qlast: Optional[qlast_.Base] = None,
+    ) -> None:
+        self.text = text
+        self.origtext = origtext
+        self.refs = tuple(refs) if refs is not None else None
+        self._qlast = _qlast
+
+    def resolve(self, schema: s_schema.Schema) -> Expression:
+        return Expression(
             text=self.text,
             origtext=self.origtext,
             refs=so.ObjectSet.create(
                 schema,
-                (scls._reduce_to_ref(schema)[0]
-                 for scls in self.refs.objects(schema))
-            ) if self.refs is not None else None
-        ), self
+                (s.resolve(schema) for s in self.refs),
+            ) if self.refs is not None else None,
+            _qlast=self._qlast,
+        )
+
+    @property
+    def qlast(self) -> qlast_.Base:
+        if self._qlast is None:
+            self._qlast = qlparser.parse_fragment(self.text)
+        return self._qlast
 
 
 class ExpressionList(checked.FrozenCheckedList[Expression]):

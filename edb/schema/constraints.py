@@ -135,7 +135,7 @@ class Constraint(referencing.ReferencedInheritingObject,
     ) -> Optional[s_pseudo.Any]:
         # Point subject placeholder to a dummy pointer to make EdgeQL
         # pipeline happy.
-        return s_pseudo.Any.instance()
+        return s_pseudo.Any.get(schema)
 
     @classmethod
     def get_concrete_constraint_attrs(
@@ -316,11 +316,11 @@ class Constraint(referencing.ReferencedInheritingObject,
     @classmethod
     def delta_properties(
         cls,
-        delta: sd.ObjectCommand[Constraint],
+        delta: sd.ObjectCommand[so.Object],
         old: Optional[so.Object],
         new: so.Object,
         *,
-        context: so.ComparisonContext = None,
+        context: so.ComparisonContext,
         old_schema: Optional[s_schema.Schema],
         new_schema: s_schema.Schema,
     ) -> None:
@@ -368,7 +368,7 @@ class ConsistencySubject(
         ref_cls=Constraint)
 
     constraints = so.SchemaField(
-        so.ObjectIndexByFullname,
+        so.ObjectIndexByFullname[Constraint],
         inheritable=False, ephemeral=True, coerce=True, compcoef=0.887,
         default=so.DEFAULT_CONSTRUCTOR
     )
@@ -395,7 +395,9 @@ class ConsistencySubjectCommandContext:
     pass
 
 
-class ConsistencySubjectCommand(inheriting.InheritingObjectCommand):
+class ConsistencySubjectCommand(
+    inheriting.InheritingObjectCommand[so.InheritingObjectT],
+):
     pass
 
 
@@ -549,8 +551,8 @@ class ConstraintCommand(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
-        refcls: so.InheritingObject,
-        implicit_bases: List[so.InheritingObject]
+        refcls: Constraint,
+        implicit_bases: List[Constraint],
     ) -> sd.Command:
         mcls = type(self.scls)
         ref_rebase_cmd = sd.ObjectCommandMeta.get_command_class_or_die(
@@ -610,7 +612,7 @@ class CreateConstraint(
             num=param_offset,
             name='__subject__',
             default=None,
-            type=s_pseudo.Any.instance(),
+            type=s_pseudo.AnyTypeShell(),
             typemod=ft.TypeModifier.SINGLETON,
             kind=ft.ParameterKind.POSITIONAL,
         ))
@@ -747,7 +749,7 @@ class CreateConstraint(
         if cmd.get_attribute_value('return_type') is None:
             cmd.set_attribute_value(
                 'return_type',
-                utils.reduce_to_typeref(schema, schema.get('std::bool')),
+                schema.get('std::bool'),
             )
 
         if cmd.get_attribute_value('return_typemod') is None:
@@ -849,13 +851,12 @@ class CreateConstraint(
         schema: s_schema.Schema,
         astnode: qlast.ObjectDDL,
         context: sd.CommandContext,
-    ) -> so.ObjectList[so.InheritingObject]:
+    ) -> so.ObjectList[Constraint]:
         if isinstance(astnode, qlast.CreateConcreteConstraint):
             classname = cls._classname_from_ast(schema, astnode, context)
             base_name = sn.shortname_from_fullname(classname)
-            base: so.Object = schema.get(base_name)
-            return so.ObjectList.create(
-                schema, [utils.reduce_to_typeref(schema, base)])
+            base = schema.get(base_name, type=Constraint)
+            return so.ObjectList.create(schema, [base])
         else:
             return super()._classbases_from_ast(schema, astnode, context)
 
@@ -919,6 +920,8 @@ class DeleteConstraint(
     referenced_astnode = qlast.DropConcreteConstraint
 
 
-class RebaseConstraint(ConstraintCommand,
-                       inheriting.RebaseInheritingObject):
+class RebaseConstraint(
+    ConstraintCommand,
+    inheriting.RebaseInheritingObject[Constraint],
+):
     pass

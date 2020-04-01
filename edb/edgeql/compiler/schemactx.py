@@ -61,9 +61,9 @@ def get_schema_object(
         module = name.module
         name = name.name
     elif isinstance(name, qlast.AnyType):
-        return s_pseudo.Any.instance()
+        return s_pseudo.Any.get(ctx.env.schema)
     elif isinstance(name, qlast.AnyTuple):
-        return s_pseudo.AnyTuple.instance()
+        return s_pseudo.AnyTuple.get(ctx.env.schema)
     elif isinstance(name, qlast.BaseObjectRef):
         raise AssertionError(f"Unhandled BaseObjectRef subclass: {name!r}")
 
@@ -263,6 +263,9 @@ def derive_ptr(
                 # This is a view of a view.  Make sure query-level
                 # computable expressions for pointers are carried over.
                 src_ptr = scls_pointers.get(ctx.env.schema, pn)
+                # mypy somehow loses the type argument in the
+                # "pointers" ObjectIndex.
+                assert isinstance(src_ptr, s_pointers.Pointer)
                 computable_data = ctx.source_map.get(src_ptr)
                 if computable_data is not None:
                     ctx.source_map[ptr] = computable_data
@@ -343,6 +346,16 @@ def get_intersection_type(
         ctx.env.schema_refs.add(intersection)
 
     return intersection
+
+
+def get_material_type(
+    t: s_types.TypeT,
+    *,
+    ctx: context.ContextLevel,
+) -> s_types.TypeT:
+
+    ctx.env.schema, mtype = t.material_type(ctx.env.schema)
+    return mtype
 
 
 class TypeIntersectionResult(NamedTuple):
@@ -472,8 +485,8 @@ def is_type_compatible(
     ctx: context.ContextLevel,
 ) -> bool:
 
-    material_type_a = type_a.material_type(ctx.env.schema)
-    material_type_b = type_b.material_type(ctx.env.schema)
+    material_type_a = get_material_type(type_a, ctx=ctx)
+    material_type_b = get_material_type(type_b, ctx=ctx)
 
     compatible = material_type_b.issubclass(ctx.env.schema, material_type_a)
     if compatible:

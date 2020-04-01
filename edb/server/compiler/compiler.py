@@ -408,14 +408,14 @@ class Compiler(BaseCompiler):
                             array_params.append(
                                 (idx, el_type.get_backend_id(ir.schema)))
 
-                params_type = s_types.Tuple.create(
+                ir.schema, params_type = s_types.Tuple.create(
                     ir.schema,
                     element_types=collections.OrderedDict(subtypes),
                     named=named)
                 if array_params:
                     in_array_backend_tids = {p[0]: p[1] for p in array_params}
             else:
-                params_type = s_types.Tuple.create(
+                ir.schema, params_type = s_types.Tuple.create(
                     ir.schema, element_types={}, named=False)
 
             in_type_data, in_type_id = sertypes.TypeSerializer.describe(
@@ -1275,7 +1275,7 @@ class Compiler(BaseCompiler):
 
         schema_ddl = s_ddl.ddl_text_from_schema(schema)
 
-        all_objects = schema.get_objects(excluded_modules=s_schema.STD_MODULES)
+        all_objects = schema.get_objects(exclude_stdlib=True)
         ids = []
         for obj in all_objects:
             if isinstance(obj, s_obj.QualifiedObject):
@@ -1291,7 +1291,7 @@ class Compiler(BaseCompiler):
 
         objtypes = schema.get_objects(
             type=s_objtypes.ObjectType,
-            excluded_modules=s_schema.STD_MODULES,
+            exclude_stdlib=True,
         )
         descriptors = []
 
@@ -1317,7 +1317,7 @@ class Compiler(BaseCompiler):
         ptrdesc: List[DumpBlockDescriptor] = []
 
         if isinstance(source, s_props.Property):
-            prop_tuple = s_types.Tuple.from_subtypes(
+            schema, prop_tuple = s_types.Tuple.from_subtypes(
                 schema,
                 {
                     'source': schema.get('std::uuid'),
@@ -1369,7 +1369,7 @@ class Compiler(BaseCompiler):
 
                 props[ptr.get_shortname(schema).name] = ptr.get_target(schema)
 
-            link_tuple = s_types.Tuple.from_subtypes(
+            schema, link_tuple = s_types.Tuple.from_subtypes(
                 schema,
                 props,
                 {'named': True},

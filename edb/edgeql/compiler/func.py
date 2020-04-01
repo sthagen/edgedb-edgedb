@@ -52,6 +52,9 @@ from . import setgen
 from . import stmtctx
 from . import typegen
 
+if TYPE_CHECKING:
+    import uuid
+
 
 @dispatch.compile.register(qlast.FunctionCall)
 def compile_FunctionCall(
@@ -370,8 +373,8 @@ def compile_operator(
         matched_call = matched[0]
     else:
         if len(args) == 2:
-            ltype = args[0][0].material_type(env.schema)
-            rtype = args[1][0].material_type(env.schema)
+            ltype = schemactx.get_material_type(args[0][0], ctx=ctx)
+            rtype = schemactx.get_material_type(args[1][0], ctx=ctx)
 
             types = (
                 f'{ltype.get_displayname(env.schema)!r} and '
@@ -379,7 +382,8 @@ def compile_operator(
         else:
             types = ', '.join(
                 repr(
-                    a[0].material_type(env.schema).get_displayname(env.schema)
+                    schemactx.get_material_type(
+                        a[0], ctx=ctx).get_displayname(env.schema)
                 ) for a in args
             )
 
@@ -453,10 +457,14 @@ def compile_operator(
         else:
             larg, _, rarg = (a.expr for a in final_args)
 
-        left_type = setgen.get_set_type(larg, ctx=ctx).material_type(
-            ctx.env.schema)
-        right_type = setgen.get_set_type(rarg, ctx=ctx).material_type(
-            ctx.env.schema)
+        left_type = schemactx.get_material_type(
+            setgen.get_set_type(larg, ctx=ctx),
+            ctx=ctx,
+        )
+        right_type = schemactx.get_material_type(
+            setgen.get_set_type(rarg, ctx=ctx),
+            ctx=ctx,
+        )
 
         if left_type.issubclass(env.schema, right_type):
             rtype = right_type
@@ -475,6 +483,7 @@ def compile_operator(
         sql_operator = tuple(from_op)
 
     origin_name: Optional[sn.SchemaName]
+    origin_module_id: Optional[uuid.UUID]
     if derivative_op is not None:
         origin_name = oper_name
         origin_module_id = env.schema.get_global(

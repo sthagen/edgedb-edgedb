@@ -152,13 +152,6 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
             result.add(mcls.adapt(op))
         return result
 
-    def _resolve_type_ref(
-        self,
-        ref: so.Object,
-        schema: s_schema.Schema,
-    ) -> so.Object:
-        return utils.resolve_typeref(ref, schema)
-
     def _resolve_attr_value(
         self,
         value: Any,
@@ -168,44 +161,43 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
     ) -> Any:
         ftype = field.type
 
-        if isinstance(ftype, so.ObjectMeta):
-            value = self._resolve_type_ref(value, schema)
-
-        elif issubclass(ftype, checked.CheckedDict):
-            if issubclass(ftype.valuetype, so.Object):
-                dct = {}
-
-                for k, val in value.items():
-                    dct[k] = self._resolve_type_ref(val, schema)
-
-                value = ftype(dct)
-            else:
-                value = field.coerce_value(schema, value)
-
-        elif issubclass(ftype, (checked.AbstractCheckedList,
-                                checked.AbstractCheckedSet)):
-            if issubclass(ftype.type, so.Object):
-                lst = []
-
-                for val in value:
-                    lst.append(self._resolve_type_ref(val, schema))
-
-                value = ftype(lst)
-            else:
-                value = field.coerce_value(schema, value)
-
-        elif issubclass(ftype, so.ObjectDict):
-            value = ftype.create(schema, dict(value.items(schema)))
-
-        elif issubclass(ftype, so.ObjectCollection):
-            value = ftype.create(schema, value.objects(schema))
-
-        elif issubclass(ftype, s_expr.Expression):
-            if value is not None:
-                value = ftype.from_expr(value, schema)
-
+        if isinstance(value, so.Shell):
+            value = value.resolve(schema)
         else:
-            value = field.coerce_value(schema, value)
+            if issubclass(ftype, so.ObjectDict):
+                if isinstance(value, so.ObjectDict):
+                    items = dict(value.items(schema))
+                elif isinstance(value, collections.abc.Mapping):
+                    items = {}
+                    for k, v in value.items():
+                        if isinstance(v, so.Shell):
+                            val = v.resolve(schema)
+                        else:
+                            val = v
+                        items[k] = val
+
+                value = ftype.create(schema, items)
+
+            elif issubclass(ftype, so.ObjectCollection):
+                sequence: Sequence[so.Object]
+                if isinstance(value, so.ObjectCollection):
+                    sequence = value.objects(schema)
+                else:
+                    sequence = []
+                    for v in value:
+                        if isinstance(v, so.Shell):
+                            val = v.resolve(schema)
+                        else:
+                            val = v
+                        sequence.append(val)
+                value = ftype.create(schema, sequence)
+
+            elif issubclass(ftype, s_expr.Expression):
+                if value is not None:
+                    value = ftype.from_expr(value, schema)
+
+            else:
+                value = field.coerce_value(schema, value)
 
         return value
 
@@ -505,7 +497,7 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         schema: s_schema.Schema,
         astnode: qlast.DDLOperation,
         context: CommandContext,
-    ) -> Command_T:
+    ) -> Command:
         return cls()
 
     @classmethod
@@ -1148,7 +1140,7 @@ class ObjectCommand(
         *,
         name: Optional[str] = None,
         default: None = None,
-    ) -> Optional[so.Object]:
+    ) -> Optional[so.Object_T]:
         ...
 
     def get_object(  # NoQA: F811
@@ -1158,7 +1150,7 @@ class ObjectCommand(
         *,
         name: Optional[str] = None,
         default: Union[so.Object_T, so.NoDefaultT, None] = so.NoDefault,
-    ) -> Optional[so.Object]:
+    ) -> Optional[so.Object_T]:
         metaclass = self.get_schema_metaclass()
         if name is None:
             name = self.classname
@@ -1180,6 +1172,13 @@ class ObjectCommand(
                 result[op.property] = op.source == 'inheritance'
 
         return result
+
+    def resolve_refs(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> s_schema.Schema:
+        return schema
 
     def get_resolved_attribute_value(
         self,
@@ -1211,6 +1210,18 @@ class ObjectCommand(
             context.cache_value((self, 'attribute', attr_name), value)
 
         return value
+
+    def get_attributes(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> Dict[str, Any]:
+        result = {}
+
+        for attr in self.enumerate_attributes():
+            result[attr] = self.get_attribute_value(attr)
+
+        return result
 
     def get_resolved_attributes(
         self,
@@ -1433,6 +1444,9 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
             if specified_id is not None:
                 self.set_attribute_value('id', specified_id)
 
+        if not context.canonical:
+            schema = self.resolve_refs(schema, context)
+
         props = self.get_resolved_attributes(schema, context)
         metaclass = self.get_schema_metaclass()
         schema, self.scls = metaclass.create_in_schema(schema, **props)
@@ -1530,6 +1544,8 @@ class AlterObjectFragment(ObjectCommand[so.Object]):
         schema: s_schema.Schema,
         context: CommandContext,
     ) -> s_schema.Schema:
+        if not context.canonical:
+            schema = self.resolve_refs(schema, context)
         props = self.get_resolved_attributes(schema, context)
         schema = self.scls.update(schema, props)
         return schema
@@ -1697,13 +1713,13 @@ class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
             cmd.set_attribute_value('is_abstract', True)
 
         added_bases = []
-        dropped_bases: List[so.Object] = []
+        dropped_bases: List[so.ObjectShell] = []
 
         if getattr(astnode, 'commands', None):
             for astcmd in astnode.commands:
                 if isinstance(astcmd, qlast.AlterDropInherit):
                     dropped_bases.extend(
-                        utils.ast_to_typeref(
+                        utils.ast_to_object_shell(
                             b,
                             metaclass=cls.get_schema_metaclass(),
                             modaliases=context.modaliases,
@@ -1714,7 +1730,7 @@ class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
 
                 elif isinstance(astcmd, qlast.AlterAddInherit):
                     bases = [
-                        utils.ast_to_typeref(
+                        utils.ast_to_object_shell(
                             b,
                             metaclass=cls.get_schema_metaclass(),
                             modaliases=context.modaliases,
@@ -1963,8 +1979,7 @@ class AlterSpecialObjectProperty(Command):
         new_value: Any = astnode.value
 
         if field.type is s_expr.Expression:
-            orig_expr_field = parent_cls.get_field(f'orig_{field.name}')
-            if orig_expr_field:
+            if parent_cls.has_field(f'orig_{field.name}'):
                 orig_text = cls.get_orig_expr_text(
                     schema, parent_op.qlast, field.name)
             else:
@@ -2058,8 +2073,7 @@ class AlterObjectProperty(Command):
         new_value: Any
 
         if field.type is s_expr.Expression:
-            orig_expr_field = parent_cls.get_field(f'orig_{field.name}')
-            if orig_expr_field:
+            if parent_cls.has_field(f'orig_{field.name}'):
                 orig_text = cls.get_orig_expr_text(
                     schema, parent_op.qlast, field.name)
             else:
@@ -2080,9 +2094,11 @@ class AlterObjectProperty(Command):
 
             elif isinstance(astnode.value, qlast.ObjectRef):
 
-                new_value = utils.ast_objref_to_objref(
-                    astnode.value, modaliases=context.modaliases,
-                    schema=schema)
+                new_value = utils.ast_to_object(
+                    astnode.value,
+                    modaliases=context.modaliases,
+                    schema=schema,
+                )
 
             elif (isinstance(astnode.value, qlast.Set)
                     and not astnode.value.elements):
@@ -2199,7 +2215,10 @@ class AlterObjectProperty(Command):
 
         astcls: Type[qlast.BaseSetField]
 
-        assert isinstance(self.new_value, s_expr.Expression)
+        assert isinstance(
+            self.new_value,
+            (s_expr.Expression, s_expr.ExpressionShell),
+        )
 
         if self.property == 'expr':
             astcls = qlast.SetSpecialField
@@ -2207,7 +2226,7 @@ class AlterObjectProperty(Command):
             astcls = qlast.SetField
 
         parent_cls = parent_op.get_schema_metaclass()
-        has_shadow = parent_cls.get_field(f'orig_{field.name}') is not None
+        has_shadow = parent_cls.has_field(f'orig_{field.name}')
 
         if context.descriptive_mode:
             # When generating AST for DESCRIBE AS TEXT, we want

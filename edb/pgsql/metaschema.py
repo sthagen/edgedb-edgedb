@@ -34,7 +34,6 @@ from edb.common import uuidgen
 
 from edb.edgeql import qltypes
 
-from edb.schema import abc as s_abc
 from edb.schema import constraints as s_constraints
 from edb.schema import database as s_db
 from edb.schema import expr as s_expr
@@ -43,7 +42,6 @@ from edb.schema import modules as s_mod
 from edb.schema import name as sn
 from edb.schema import objects as s_obj
 from edb.schema import pseudo as s_pseudo
-from edb.schema import types as s_types
 
 from edb.server import defines
 
@@ -2033,14 +2031,10 @@ def get_interesting_metaclasses():
     metaclasses = []
 
     for mcls in s_obj.ObjectMeta.get_schema_metaclasses():
-        if issubclass(mcls, (s_obj.ObjectRef, s_db.Database)):
+        if issubclass(mcls, s_db.Database):
             continue
 
         if isinstance(mcls, adapter.Adapter):
-            continue
-
-        if (issubclass(mcls, s_abc.Collection)
-                and not issubclass(mcls, s_types.SchemaCollection)):
             continue
 
         metaclasses.append(mcls)
@@ -2529,24 +2523,6 @@ def _generate_type_element_view(schema, type_fields):
             types AS q
         WHERE
             q.position IS NOT NULL
-
-        UNION ALL
-
-        SELECT
-            st.id           AS id,
-            (SELECT id FROM edgedb.Object
-                 WHERE name = 'schema::TypeElement')
-                            AS __type__,
-            st.maintype     AS type,
-            st.name         AS name,
-            st.position     AS num
-        FROM
-            edgedb.TupleExprAlias AS q,
-            LATERAL UNNEST ((q.element_types).types) AS st(
-                id, maintype, name, position
-            )
-        WHERE
-            st.position IS NOT NULL
     '''
 
     return dbops.View(name=tabname(schema, TypeElement), query=view_query)
@@ -3120,22 +3096,23 @@ async def generate_views(conn, schema):
             if ptr.is_pure_computable(schema):
                 continue
 
-            field = mcls.get_field(pn)
-            if field is not None and (field.ephemeral or
-                                      not field.introspectable):
+            if mcls.has_field(pn):
+                field = mcls.get_field(pn)
+                if field.ephemeral or not field.introspectable:
+                    field = None
+            else:
                 field = None
 
             refdict = None
             if field is None:
                 fn = classref_attr_aliases.get(pn, pn)
-                refdict = mcls.get_refdict(fn)
-                if refdict is not None and ptr.singular(schema):
-                    # This is nether a field, nor a refdict, that's
-                    # not expected.
-                    raise RuntimeError(
-                        'introspection schema error: {!r} must not be '
-                        'singular'.format(
-                            '(' + schema_cls.name + ')' + '.' + pn))
+                if mcls.has_refdict(fn):
+                    refdict = mcls.get_refdict(fn)
+                    if ptr.singular(schema):
+                        raise RuntimeError(
+                            'introspection schema error: {!r} must not be '
+                            'singular'.format(
+                                '(' + schema_cls.name + ')' + '.' + pn))
 
             if field is None and refdict is None:
                 if pn == 'id':

@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "edb/edgeql-parser",
+    "edb/edgeql-rust",
+    "edb/graphql-rewrite",
+]
+
+[profile.release]
+debug = true
+lto = true

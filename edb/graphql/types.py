@@ -27,7 +27,7 @@ from graphql import (
     GraphQLInterfaceType,
     GraphQLInputObjectType,
     GraphQLField,
-    GraphQLInputObjectField,
+    GraphQLInputField as GraphQLInputObjectField,
     GraphQLArgument,
     GraphQLList,
     GraphQLNonNull,
@@ -78,7 +78,7 @@ def coerce_bigint(value):
 
 
 def parse_int_literal(ast):
-    if isinstance(ast, gql_ast.IntValue):
+    if isinstance(ast, gql_ast.IntValueNode):
         return int(ast.value)
     return None
 
@@ -105,7 +105,7 @@ GraphQLBigint = GraphQLScalarType(
 
 
 def parse_decimal_literal(ast):
-    if isinstance(ast, (gql_ast.FloatValue, gql_ast.IntValue)):
+    if isinstance(ast, (gql_ast.FloatValueNode, gql_ast.IntValueNode)):
         return float(ast.value)
     return None
 
@@ -242,13 +242,18 @@ class GQLCoreSchema:
     def get_gql_name(self, name):
         module, shortname = name.split('::', 1)
         if module in {'default', 'std'}:
-            return shortname
+            if shortname.startswith('__'):
+                return '_edb' + shortname
+            else:
+                return shortname
         else:
+            assert module != '', f'get_gl_name {name=}'
             return f'{module}__{shortname}'
 
     def get_input_name(self, inputtype, name):
         if '__' in name:
             module, shortname = name.split('__', 1)
+            assert module != '', f'get_input_name {name=}'
             return f'{module}__{inputtype}{shortname}'
         else:
             return f'{inputtype}{name}'
@@ -955,8 +960,7 @@ class GQLCoreSchema:
 
         else:
             edb_base = name
-            edb_base_name = edb_base.get_name(self.edb_schema)
-            name = f'{edb_base_name.module}::{edb_base_name.name}'
+            name = edb_base.get_name(self.edb_schema)
 
         if not name.startswith('stdgraphql::'):
             if edb_base is None:
@@ -1012,7 +1016,7 @@ class GQLBaseType(metaclass=GQLTypeMeta):
 
         # __typename
         if name is None:
-            self._name = f'{edb_base_name.module}::{edb_base_name.name}'
+            self._name = edb_base_name
         else:
             self._name = name
         # determine module from name if not already specified
@@ -1109,6 +1113,7 @@ class GQLBaseType(metaclass=GQLTypeMeta):
         if module in {'default', 'std'}:
             return f'{shortname}_Type'
         else:
+            assert module != '', 'gql_typename ' + module
             return f'{module}__{shortname}_Type'
 
     @property

@@ -18,11 +18,11 @@
 
 
 from __future__ import annotations
+from typing import *
 
 import collections
 import decimal
 import itertools
-from typing import *
 
 from edb import errors
 
@@ -37,14 +37,53 @@ if TYPE_CHECKING:
     from . import types as s_types
 
 
-def ast_objref_to_objref(
-        node: qlast.ObjectRef, *,
-        metaclass: Optional[so.ObjectMeta] = None,
-        modaliases: Mapping[Optional[str], str],
-        schema: s_schema.Schema) -> so.Object:
+def ast_objref_to_object_shell(
+    node: qlast.ObjectRef, *,
+    metaclass: Optional[Type[so.Object]] = None,
+    modaliases: Mapping[Optional[str], str],
+    schema: s_schema.Schema,
+) -> so.ObjectShell:
 
-    if metaclass is not None and issubclass(metaclass, so.GlobalObject):
-        return schema.get_global(metaclass, node.name)
+    nqname = node.name
+    module = node.module
+    if module is not None:
+        lname = sn.Name(module=module, name=nqname)
+    else:
+        lname = nqname
+    obj = schema.get(lname, module_aliases=modaliases, default=None)
+
+    if metaclass is not None and not issubclass(metaclass, so.QualifiedObject):
+        name = nqname
+    else:
+        if obj is not None:
+            actual_name = obj.get_name(schema)
+            module = actual_name.module
+        else:
+            aliased_module = modaliases.get(module)
+            if aliased_module is not None:
+                module = aliased_module
+
+        name = sn.Name(module=module, name=nqname)
+
+    return so.ObjectShell(
+        name=name,
+        origname=lname,
+        schemaclass=metaclass or so.Object,
+        sourcectx=node.context,
+    )
+
+
+def ast_objref_to_type_shell(
+    node: qlast.ObjectRef,
+    *,
+    metaclass: Optional[Type[s_types.Type]] = None,
+    modaliases: Mapping[Optional[str], str],
+    schema: s_schema.Schema,
+) -> s_types.TypeShell:
+    from . import types as s_types
+
+    if metaclass is None:
+        metaclass = s_types.Type
 
     nqname = node.name
     module = node.module
@@ -61,27 +100,32 @@ def ast_objref_to_objref(
         if aliased_module is not None:
             module = aliased_module
 
-    return so.ObjectRef(name=sn.Name(module=module, name=nqname),
-                        origname=lname,
-                        schemaclass=metaclass,
-                        sourcectx=node.context)
+    return s_types.TypeShell(
+        name=sn.Name(module=module, name=nqname),
+        origname=lname,
+        schemaclass=metaclass,
+        sourcectx=node.context,
+    )
 
 
-def ast_to_typeref(
-        node: qlast.TypeName, *,
-        metaclass: Optional[so.ObjectMeta] = None,
-        modaliases: Mapping[Optional[str], str],
-        schema: s_schema.Schema) -> so.Object:
+def ast_to_type_shell(
+    node: qlast.TypeName,
+    *,
+    metaclass: Optional[Type[s_types.Type]] = None,
+    modaliases: Mapping[Optional[str], str],
+    schema: s_schema.Schema,
+) -> s_types.TypeShell:
 
-    if node.subtypes is not None and isinstance(node.maintype,
-                                                qlast.ObjectRef) \
-            and node.maintype.name == 'enum':
+    if (node.subtypes is not None
+            and isinstance(node.maintype, qlast.ObjectRef)
+            and node.maintype.name == 'enum'):
         from . import scalars as s_scalars
 
-        return s_scalars.AnonymousEnumTypeRef(
-            name='std::anyenum',
-            elements=[st.val.value for st in cast(List[qlast.TypeExprLiteral],
-                                                  node.subtypes)],
+        return s_scalars.AnonymousEnumTypeShell(
+            elements=[
+                st.val.value
+                for st in cast(List[qlast.TypeExprLiteral], node.subtypes)
+            ],
         )
 
     elif node.subtypes is not None:
@@ -95,8 +139,7 @@ def ast_to_typeref(
             # to assert it is an instance of s_types.Tuple to make mypy happy
             # (rightly so, because later we use from_subtypes method)
 
-            subtypes: Dict[str, so.Object] \
-                = collections.OrderedDict()
+            subtypes: Dict[str, s_types.TypeShell] = {}
             # tuple declaration must either be named or unnamed, but not both
             named = None
             unnamed = None
@@ -115,83 +158,146 @@ def ast_to_typeref(
                         context=node.subtypes[0].context,
                     )
 
-                subtypes[type_name] = ast_to_typeref(
+                subtypes[type_name] = ast_to_type_shell(
                     cast(qlast.TypeName, st),
                     modaliases=modaliases,
                     metaclass=metaclass,
-                    schema=schema)
+                    schema=schema,
+                )
 
             try:
-                return coll.from_subtypes(
+                return coll.create_shell(
                     schema,
-                    cast(Mapping[str, s_types.Type], subtypes),
-                    {'named': bool(named)})
+                    subtypes=subtypes,
+                    typemods={'named': bool(named)},
+                )
             except errors.SchemaError as e:
                 # all errors raised inside are pertaining to subtypes, so
                 # the context should point to the first subtype
                 e.set_source_context(node.subtypes[0].context)
                 raise e
 
-        else:
-            subtypes_list: List[so.Object] = []
+        elif issubclass(coll, s_types.Array):
+
+            subtypes_list: List[s_types.TypeShell] = []
             for st in node.subtypes:
-                subtypes_list.append(ast_to_typeref(
-                    cast(qlast.TypeName, st),
-                    modaliases=modaliases,
-                    metaclass=metaclass,
-                    schema=schema))
+                subtypes_list.append(
+                    ast_to_type_shell(
+                        cast(qlast.TypeName, st),
+                        modaliases=modaliases,
+                        metaclass=metaclass,
+                        schema=schema,
+                    )
+                )
+
+            if len(subtypes_list) != 1:
+                raise errors.SchemaError(
+                    f'unexpected number of subtypes,'
+                    f' expecting 1, got {len(subtypes_list)}',
+                    context=node.context,
+                )
+
+            if isinstance(subtypes_list[0], s_types.ArrayTypeShell):
+                raise errors.UnsupportedFeatureError(
+                    'nested arrays are not supported',
+                    context=node.subtypes[0].context,
+                )
 
             try:
-                return coll.from_subtypes(schema,
-                                          cast(Sequence[s_types.Type],
-                                               subtypes_list))
+                return coll.create_shell(
+                    schema,
+                    subtypes=subtypes_list,
+                )
             except errors.SchemaError as e:
                 e.set_source_context(node.context)
                 raise e
 
     elif isinstance(node.maintype, qlast.AnyType):
         from . import pseudo as s_pseudo
-        return s_pseudo.AnyObjectRef()
+        return s_pseudo.AnyTypeShell()
 
     elif isinstance(node.maintype, qlast.AnyTuple):
         from . import pseudo as s_pseudo
-        return s_pseudo.AnyTupleRef()
+        return s_pseudo.AnyTupleShell()
 
     assert isinstance(node.maintype, qlast.ObjectRef)
 
-    return ast_objref_to_objref(
-        node.maintype, modaliases=modaliases,
-        metaclass=metaclass, schema=schema)
+    return ast_objref_to_type_shell(
+        node.maintype,
+        modaliases=modaliases,
+        metaclass=metaclass,
+        schema=schema,
+    )
 
 
-def typeref_to_ast(schema: s_schema.Schema,
-                   t: so.Object,
-                   *,
-                   _name: Optional[str] = None) -> qlast.TypeExpr:
+def ast_to_object_shell(
+    node: Union[qlast.ObjectRef, qlast.TypeName],
+    *,
+    metaclass: Optional[Type[so.Object]] = None,
+    modaliases: Mapping[Optional[str], str],
+    schema: s_schema.Schema,
+) -> so.ObjectShell:
     from . import types as s_types
 
-    if isinstance(t, so.ObjectRef):
-        # We want typenames like 'anytype` that are wrapped in an
-        # ObjectRef to be unwrapped to proper types, so that we
-        # can generate proper AST nodes for them (e.g. for `anytype` it
-        # is `qlast.AnyType()`).
-        t = t._resolve_ref(schema)
+    if isinstance(node, qlast.TypeName):
+        if metaclass is not None and issubclass(metaclass, s_types.Type):
+            return ast_to_type_shell(
+                node,
+                metaclass=metaclass,
+                modaliases=modaliases,
+                schema=schema,
+            )
+        else:
+            objref = node.maintype
+            if node.subtypes:
+                raise AssertionError(
+                    'must pass s_types.Type subclass as type when '
+                    'creating a type shell from type AST'
+                )
+            assert isinstance(objref, qlast.ObjectRef)
+            return ast_objref_to_object_shell(
+                objref,
+                modaliases=modaliases,
+                metaclass=metaclass,
+                schema=schema,
+            )
+    else:
+        return ast_objref_to_object_shell(
+            node,
+            modaliases=modaliases,
+            metaclass=metaclass,
+            schema=schema,
+        )
+
+
+def typeref_to_ast(
+    schema: s_schema.Schema,
+    ref: Union[so.Object, so.ObjectShell],
+    *,
+    _name: Optional[str] = None,
+) -> qlast.TypeExpr:
+    from . import types as s_types
+
+    if isinstance(ref, so.ObjectShell):
+        t = ref.resolve(schema)
+    else:
+        t = ref
 
     result: qlast.TypeExpr
-    components: Tuple[so.ObjectRef, ...]
+    components: Tuple[so.Object, ...]
 
     if t.is_type() and cast(s_types.Type, t).is_any():
         result = qlast.TypeName(name=_name, maintype=qlast.AnyType())
     elif t.is_type() and cast(s_types.Type, t).is_anytuple():
         result = qlast.TypeName(name=_name, maintype=qlast.AnyTuple())
-    elif isinstance(t, s_types.Tuple) and t.named:
+    elif isinstance(t, s_types.Tuple) and t.is_named(schema):
         result = qlast.TypeName(
             name=_name,
             maintype=qlast.ObjectRef(
                 name=t.schema_name
             ),
             subtypes=[
-                typeref_to_ast(schema, cast(so.ObjectRef, st), _name=sn)
+                typeref_to_ast(schema, st, _name=sn)
                 for sn, st in t.iter_subtypes(schema)
             ]
         )
@@ -208,29 +314,20 @@ def typeref_to_ast(schema: s_schema.Schema,
                 for st in t.get_subtypes(schema)
             ]
         )
-    elif isinstance(t, s_types.UnionTypeRef):
-        components = t.get_union_of(schema)
-        result = typeref_to_ast(schema, components[0])
-        for component in components[1:]:
-            result = qlast.TypeOp(
-                left=result,
-                op='|',
-                right=typeref_to_ast(schema, component),
-            )
     elif t.is_type() and cast(s_types.Type, t).is_union_type(schema):
         object_set: Optional[so.ObjectSet[s_types.Type]] = \
             cast(s_types.Type, t).get_union_of(schema)
         assert object_set is not None
 
-        components = tuple(object_set.objects(schema))
-        result = typeref_to_ast(schema, components[0])
-        for component in components[1:]:
+        component_objects = tuple(object_set.objects(schema))
+        result = typeref_to_ast(schema, component_objects[0])
+        for component_object in component_objects[1:]:
             result = qlast.TypeOp(
                 left=result,
                 op='|',
-                right=typeref_to_ast(schema, component),
+                right=typeref_to_ast(schema, component_object),
             )
-    else:
+    elif isinstance(t, so.QualifiedObject):
         result = qlast.TypeName(
             name=_name,
             maintype=qlast.ObjectRef(
@@ -238,20 +335,80 @@ def typeref_to_ast(schema: s_schema.Schema,
                 name=t.get_name(schema).name
             )
         )
+    else:
+        raise NotImplementedError(f'cannot represent {t!r} as a shell')
 
     return result
 
 
-def reduce_to_typeref(schema: s_schema.Schema, t: so.Object) -> so.Object:
-    ref, _ = t._reduce_to_ref(schema)
-    return ref
+def name_to_ast_ref(name: str) -> qlast.ObjectRef:
+    if isinstance(name, sn.Name):
+        return qlast.ObjectRef(
+            module=name.module,
+            name=name.name,
+        )
+    else:
+        return qlast.ObjectRef(
+            name=name,
+        )
 
 
-def resolve_typeref(ref: so.Object, schema: s_schema.Schema) -> so.Object:
-    return ref._resolve_ref(schema)
+def ast_to_object(
+    node: Union[qlast.TypeName, qlast.ObjectRef],
+    *,
+    metaclass: Optional[Type[so.Object]] = None,
+    modaliases: Mapping[Optional[str], str],
+    schema: s_schema.Schema,
+) -> so.Object:
+
+    ref = ast_to_object_shell(
+        node,
+        metaclass=metaclass,
+        modaliases=modaliases,
+        schema=schema,
+    )
+
+    return ref.resolve(schema)
 
 
-def is_nontrivial_container(value: Any) -> Optional[collections.abc.Iterable]:
+@overload
+def ast_to_type(  # NoQA: F811
+    node: qlast.TypeName, *,
+    metaclass: Type[s_types.TypeT],
+    modaliases: Mapping[Optional[str], str],
+    schema: s_schema.Schema,
+) -> s_types.TypeT:
+    ...
+
+
+@overload
+def ast_to_type(  # NoQA: F811
+    node: qlast.TypeName, *,
+    metaclass: None = None,
+    modaliases: Mapping[Optional[str], str],
+    schema: s_schema.Schema,
+) -> s_types.Type:
+    ...
+
+
+def ast_to_type(  # NoQA: F811
+    node: qlast.TypeName, *,
+    metaclass: Optional[Type[s_types.TypeT]] = None,
+    modaliases: Mapping[Optional[str], str],
+    schema: s_schema.Schema,
+) -> s_types.TypeT:
+
+    ref = ast_to_type_shell(
+        node,
+        metaclass=metaclass,
+        modaliases=modaliases,
+        schema=schema,
+    )
+
+    return ref.resolve(schema)  # type: ignore
+
+
+def is_nontrivial_container(value: Any) -> Optional[Iterable[Any]]:
     trivial_classes = (str, bytes, bytearray, memoryview)
     if (isinstance(value, collections.abc.Iterable) and
             not isinstance(value, trivial_classes)):
@@ -413,8 +570,9 @@ def find_item_suggestions(
 
     filters = []
 
-    if item_type:
-        filters.append(lambda s: isinstance(s, item_type))
+    if item_type is not None:
+        it = item_type
+        filters.append(lambda s: isinstance(s, it))
 
     if condition is not None:
         filters.append(condition)
@@ -472,12 +630,17 @@ def enrich_schema_lookup_error(
         collection=collection, condition=condition)
 
     if suggestions:
-        names: Union[List[str], Set[str]] = []
-        current_module_name = modaliases.get(None)
+        names: Union[List[str]] = []
+        cur_module_name = modaliases.get(None)
 
         for suggestion in suggestions:
-            if (suggestion.get_name(schema).module == 'std' or
-                    suggestion.get_name(schema).module == current_module_name):
+            if (
+                isinstance(suggestion, so.QualifiedObject)
+                and (
+                    suggestion.get_name(schema).module == 'std'
+                    or suggestion.get_name(schema).module == cur_module_name
+                )
+            ):
                 names.append(get_nq_name(schema, suggestion))
             else:
                 names.append(str(suggestion.get_displayname(schema)))
@@ -487,7 +650,7 @@ def enrich_schema_lookup_error(
             # E.g. "to_datetime" function has multiple variants, and
             # we don't want to diplay "did you mean one of these:
             # to_datetime, to_datetime, to_datetime?"
-            names = {name_template.format(name=name) for name in names}
+            names = list({name_template.format(name=name) for name in names})
 
         if len(names) > 1:
             hint = f'did you mean one of these: {", ".join(names)}?'
@@ -519,7 +682,15 @@ def ensure_union_type(
         else:
             components.add(t)
 
-    components_list = minimize_class_set_by_most_generic(schema, components)
+    components_list: Sequence[s_types.Type]
+
+    if all(isinstance(c, s_types.InheritingType) for c in components):
+        components_list = minimize_class_set_by_most_generic(
+            schema,
+            cast(Set[s_types.InheritingType], components),
+        )
+    else:
+        components_list = list(components)
 
     if len(components_list) == 1 and not opaque:
         return schema, next(iter(components_list)), False
@@ -529,7 +700,7 @@ def ensure_union_type(
     created = False
 
     for component in components_list:
-        if component.is_object_type():
+        if isinstance(component, s_objtypes.ObjectType):
             if seen_scalars:
                 raise _union_error(schema, components_list)
             seen_objtypes = True
@@ -542,26 +713,32 @@ def ensure_union_type(
         uniontype: s_types.Type = components_list[0]
         for t1 in components_list[1:]:
 
-            common_type = uniontype.\
-                find_common_implicitly_castable_type(t1, schema)
+            schema, common_type = (
+                uniontype.find_common_implicitly_castable_type(t1, schema)
+            )
 
             if common_type is None:
                 raise _union_error(schema, components_list)
             else:
                 uniontype = common_type
     else:
+        objtypes = cast(
+            Sequence[s_objtypes.ObjectType],
+            components_list,
+        )
         schema, uniontype, created = s_objtypes.get_or_create_union_type(
             schema,
-            components=components_list,
+            components=objtypes,
             opaque=opaque,
-            module=module)
+            module=module,
+        )
 
     return schema, uniontype, created
 
 
 def get_union_type(
     schema: s_schema.Schema,
-    types: Iterable[s_types.InheritinType],
+    types: Iterable[s_types.Type],
     *,
     opaque: bool = False,
     module: Optional[str] = None,
@@ -606,6 +783,7 @@ def ensure_intersection_type(
 ) -> Tuple[s_schema.Schema, s_types.Type, bool]:
 
     from edb.schema import objtypes as s_objtypes
+    from edb.schema import types as s_types
 
     components: Set[s_types.Type] = set()
     for t in types:
@@ -615,7 +793,15 @@ def ensure_intersection_type(
         else:
             components.add(t)
 
-    components_list = minimize_class_set_by_least_generic(schema, components)
+    components_list: Sequence[s_types.Type]
+
+    if all(isinstance(c, s_types.InheritingType) for c in components):
+        components_list = minimize_class_set_by_least_generic(
+            schema,
+            cast(Set[s_types.InheritingType], components),
+        )
+    else:
+        components_list = list(components)
 
     if len(components_list) == 1:
         return schema, next(iter(components_list)), False
@@ -638,8 +824,10 @@ def ensure_intersection_type(
         raise _intersection_error(schema, components_list)
     else:
         return s_objtypes.get_or_create_intersection_type(
-            schema, components=cast(Iterable[s_objtypes.ObjectType],
-                                    components_list), module=module)
+            schema,
+            components=cast(Iterable[s_objtypes.ObjectType], components_list),
+            module=module,
+        )
 
 
 def get_intersection_type(
@@ -681,6 +869,6 @@ def const_ast_from_python(val: Any) -> qlast.BaseConstant:
     elif isinstance(val, float):
         return qlast.FloatConstant(value=str(val))
     elif isinstance(val, bytes):
-        return qlast.BytesConstant.from_python(value=val)
+        return qlast.BytesConstant.from_python(val)
     else:
         raise ValueError(f'unexpected constant type: {type(val)!r}')
