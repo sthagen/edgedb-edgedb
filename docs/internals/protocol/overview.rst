@@ -9,6 +9,8 @@ clients and servers.  The protocol is supported over TCP/IP and also over
 Unix-domain sockets.
 
 
+.. _ref_protocol_conventions:
+
 Conventions and Data Types
 ==========================
 
@@ -307,6 +309,50 @@ ends if:
 * a :eql:stmt:`COMMIT` command is executed,
 * a :eql:stmt:`ROLLBACK` command is executed,
 * a :ref:`ref_protocol_msg_sync` message is received.
+
+
+.. _ref_protocol_dump_flow:
+
+Dump Database Flow
+------------------
+
+Backup flow goes as following:
+
+1. Client sends :ref:`ref_protocol_msg_dump` message
+2. Server sends :ref:`ref_protocol_msg_dump_header` message
+3. Server sends one or more :ref:`ref_protocol_msg_dump_block` messages
+4. Server sends :ref:`ref_protocol_msg_command_complete` message
+
+Usually client should send :ref:`ref_protocol_msg_sync` after ``Dump`` message
+to finish implicit transaction.
+
+
+.. _ref_protocol_restore_flow:
+
+Restore Database Flow
+---------------------
+
+Restore procedure fills up the database the client is connected to with the
+schema and data from the dump file.
+
+Flow is the following:
+
+1. Client sends :ref:`ref_protocol_msg_restore` message with the dump header
+   block
+2. Server sends :ref:`ref_protocol_msg_restore_ready` message as a confirmation
+   that it has accepted the header, restored schema and ready to receive data
+   blocks
+3. Clients sends one or more :ref:`ref_protocol_msg_restore_block` messages
+4. Client sends :ref:`ref_protocol_msg_restore_eof` message
+5. Server sends :ref:`ref_protocol_msg_command_complete` message
+
+Note: :ref:`ref_protocol_msg_error` may be sent from the server at
+any time. In case of error, :ref:`ref_protocol_msg_sync` must be sent and all
+subsequent messages ignored until :ref:`ref_protocol_msg_ready_for_command` is
+received.
+
+Other than for error case, restore protocol doesn't require
+:ref:`ref_protocol_msg_sync` message.
 
 
 Termination

@@ -30,6 +30,12 @@ Messages
     * - :ref:`ref_protocol_msg_data`
       - Command result data element.
 
+    * - :ref:`ref_protocol_msg_dump_header`
+      - Initial message of the database backup protocol
+
+    * - :ref:`ref_protocol_msg_dump_block`
+      - Single chunk of database backup data
+
     * - :ref:`ref_protocol_msg_error`
       - Server error.
 
@@ -44,6 +50,9 @@ Messages
 
     * - :ref:`ref_protocol_msg_ready_for_command`
       - Server is ready for a command.
+
+    * - :ref:`ref_protocol_msg_restore_ready`
+      - Successful response to the :ref:`ref_protocol_msg_restore` message
 
     * - :ref:`ref_protocol_msg_server_handshake`
       - Initial server connection handshake.
@@ -66,6 +75,9 @@ Messages
     * - :ref:`ref_protocol_msg_describe_statement`
       - Describe a previously prepared statement.
 
+    * - :ref:`ref_protocol_msg_dump`
+      - Initiate database backup
+
     * - :ref:`ref_protocol_msg_execute`
       - Execute a prepared statement.
 
@@ -80,6 +92,15 @@ Messages
 
     * - :ref:`ref_protocol_msg_optimistic_execute`
       - Optimistically prepare and execute a query.
+
+    * - :ref:`ref_protocol_msg_restore`
+      - Initiate database restore
+
+    * - :ref:`ref_protocol_msg_restore_block`
+      - Next block of database dump
+
+    * - :ref:`ref_protocol_msg_restore_eof`
+      - End of database dump
 
     * - :ref:`ref_protocol_msg_sync`
       - Provide an explicit synchronization point.
@@ -210,6 +231,36 @@ Format:
         // (commands will be rejected until the block is ended).
         IN_FAILED_TRANSACTION = 0x45
     };
+
+
+.. _ref_protocol_msg_restore_ready:
+
+RestoreReady
+============
+
+Sent by: server.
+
+Initial :ref:`ref_protocol_msg_restore` message accepted, ready do receive
+data. See :ref:`ref_protocol_restore_flow`.
+
+Format:
+
+.. code-block:: c
+
+    struct RestoreReady {
+        // Message type ('+')
+        int8                mtype = 0x2b;
+
+        // Length of message contents in bytes,
+        // including self.
+        int32               message_length;
+
+        // A set of extension headers.
+        Headers             headers;
+
+        // Number of parallel jobs for restore, currently always "1"
+        int16               jobs;
+    }
 
 
 .. _ref_protocol_msg_command_complete:
@@ -361,6 +412,32 @@ Format:
     };
 
 
+.. _ref_protocol_msg_dump:
+
+Dump
+====
+
+Sent by: client.
+
+Initiates a database backup. See :ref:`ref_protocol_dump_flow`.
+
+Format:
+
+.. code-block:: c
+
+    struct Dump {
+        // Message type ('>')
+        int8                 mtype = 0x3e;
+
+        // Length of message contents in bytes,
+        // including self.
+        int32                message_length;
+
+        // A set of message headers.
+        Headers              headers;
+    };
+
+
 
 .. _ref_protocol_msg_command_data_description:
 
@@ -487,6 +564,90 @@ Format:
     };
 
 
+.. _ref_protocol_msg_restore:
+
+Restore
+=======
+
+Sent by: client.
+
+Initiate restore to the current database.
+See :ref:`ref_protocol_restore_flow`.
+
+Format:
+
+.. code-block:: c
+
+    struct Restore {
+        // Message type ('<')
+        int8                mtype = 0x3c;
+
+        // Length of message contents in bytes,
+        // including self.
+        int32               message_length;
+
+        // A set of extension headers.
+        Headers             headers;
+
+        // Number of parallel jobs for restore, only 1 is supported now
+        int16               jobs;
+
+        // Original DumpHeader packet data excluding mtype and message_length
+        bytes               dump_header[];
+    }
+
+
+.. _ref_protocol_msg_restore_block:
+
+RestoreBlock
+============
+
+Sent by: client.
+
+Send dump file data block.
+See :ref:`ref_protocol_restore_flow`.
+
+Format:
+
+.. code-block:: c
+
+    struct RestoreBlock {
+        // Message type ('=')
+        int8                mtype = 0x3d;
+
+        // Length of message contents in bytes,
+        // including self.
+        int32               message_length;
+
+        // Original DumpBlock packet data excluding mtype and message_length
+        bytes               block_data[];
+    }
+
+
+.. _ref_protocol_msg_restore_eof:
+
+RestoreEof
+==========
+
+Sent by: client.
+
+Notify server that dump is fully uploaded.
+See :ref:`ref_protocol_restore_flow`.
+
+Format:
+
+.. code-block:: c
+
+    struct RestoreEof {
+        // Message type ('.')
+        int8                mtype = 0x2e;
+
+        // Length of message contents in bytes,
+        // including self.
+        int32               message_length;
+    }
+
+
 .. _ref_protocol_msg_optimistic_execute:
 
 Optimistic Execute
@@ -563,6 +724,103 @@ Format:
 The type of *data* is determined by the query output type descriptor.  Wire
 formats for the standard scalar types and collections are documented in
 :ref:`ref_proto_dataformats`.
+
+
+.. _ref_protocol_msg_dump_header:
+
+Dump Header
+===========
+
+Sent by: server.
+
+Initial message of database backup protocol.
+See :ref:`ref_protocol_dump_flow`.
+
+Format:
+
+.. code-block:: c
+
+    struct DumpHeader {
+        // Message type ('@')
+        int8            mtype = 0x40;
+
+        // Length of message contents in bytes,
+        // including self.
+        int32           message_length;
+
+        // A set of message headers.
+        Headers         headers;
+
+        // Protocol version of the dump
+        int16           major_ver;
+        int16           minor_ver;
+
+        // Schema data
+        string          schema_ddl;
+
+        // Type identifiers
+        int32           num_types;
+        TypeInfo        types[num_types];
+
+        // Object descriptors
+        int32           num_descriptors;
+        ObjectDesc      descriptors[num_descriptors]
+    };
+
+    struct TypeInfo {
+        string          type_name;
+        string          type_class;
+        byte            type_id[16];
+    }
+
+    struct ObjectDesc {
+        byte            object_id[16];
+        bytes           description;
+
+        int16           num_dependencies;
+        byte            dependency_id[num_dependencies][16];
+    }
+
+Known headers:
+
+* 101 ``BLOCK_TYPE`` -- block type, always "I"
+* 102 ``SERVER_TIME`` -- server time when dump is started as a floating point
+                       unix timestamp stringified
+* 103 ``SERVER_VERSION`` -- full version of server as string
+
+
+.. _ref_protocol_msg_dump_block:
+
+Dump Block
+==========
+
+Sent by: server.
+
+The actual protocol data in the backup protocol.
+See :ref:`ref_protocol_dump_flow`.
+
+Format:
+
+.. code-block:: c
+
+    struct DumpBlock {
+        // Message type ('=')
+        int8            mtype = 0x3d;
+
+        // Length of message contents in bytes,
+        // including self.
+        int32           message_length;
+
+        // A set of message headers.
+        Headers         headers;
+    }
+
+Known headers:
+
+* 101 ``BLOCK_TYPE`` -- block type, always "D"
+* 110 ``BLOCK_ID`` -- block identifier (16 bytes of UUID)
+* 111 ``BLOCK_NUM`` -- integer block index stringified
+* 112 ``BLOCK_DATA`` -- the actual block data
 
 
 .. _ref_protocol_msg_server_key_data:
