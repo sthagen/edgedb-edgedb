@@ -134,7 +134,8 @@ def compile_ForQuery(
 
             stmt.iterator_stmt = iterator_stmt
 
-            iterator_scope, _ = scopectx.path_scope_map[iterator_view]
+            view_scope_info = scopectx.path_scope_map[iterator_view]
+            iterator_scope = view_scope_info.path_scope
 
         pathctx.register_set_in_scope(
             iterator_stmt,
@@ -189,7 +190,7 @@ def compile_GroupQuery(
 
         typename = s_name.Name(
             module='__group__', name=ctx.aliases.get('Group'))
-        obj = ctx.env.get_track_schema_object('std::Object')
+        obj = ctx.env.get_track_schema_object('std::BaseObject')
         stmt.group_path_id = pathctx.get_path_id(
             obj, typename=typename, ctx=ictx)
 
@@ -293,13 +294,17 @@ def compile_InsertQuery(
             ctx=ctx,
         )
 
-        stmt.result = compile_query_subject(
-            result,
-            view_scls=ctx.view_scls,
-            view_name=ctx.toplevel_result_view_name,
-            compile_views=ictx.stmt is ictx.toplevel_stmt,
-            ctx=ictx,
-        )
+        with ictx.new() as resultctx:
+            if ictx.stmt is ctx.toplevel_stmt:
+                resultctx.expr_exposed = True
+
+            stmt.result = compile_query_subject(
+                result,
+                view_scls=ctx.view_scls,
+                view_name=ctx.toplevel_result_view_name,
+                compile_views=ictx.stmt is ictx.toplevel_stmt,
+                ctx=resultctx,
+            )
 
         result = fini_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
 
@@ -357,13 +362,17 @@ def compile_UpdateQuery(
             ctx=ctx,
         )
 
-        stmt.result = compile_query_subject(
-            result,
-            view_scls=ctx.view_scls,
-            view_name=ctx.toplevel_result_view_name,
-            compile_views=ictx.stmt is ictx.toplevel_stmt,
-            ctx=ictx,
-        )
+        with ictx.new() as resultctx:
+            if ictx.stmt is ctx.toplevel_stmt:
+                resultctx.expr_exposed = True
+
+            stmt.result = compile_query_subject(
+                result,
+                view_scls=ctx.view_scls,
+                view_name=ctx.toplevel_result_view_name,
+                compile_views=ictx.stmt is ictx.toplevel_stmt,
+                ctx=resultctx,
+            )
 
         result = fini_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
 
@@ -444,13 +453,17 @@ def compile_DeleteQuery(
             ctx=ctx,
         )
 
-        stmt.result = compile_query_subject(
-            result,
-            view_scls=ctx.view_scls,
-            view_name=ctx.toplevel_result_view_name,
-            compile_views=ictx.stmt is ictx.toplevel_stmt,
-            ctx=ictx,
-        )
+        with ictx.new() as resultctx:
+            if ictx.stmt is ctx.toplevel_stmt:
+                resultctx.expr_exposed = True
+
+            stmt.result = compile_query_subject(
+                result,
+                view_scls=ctx.view_scls,
+                view_name=ctx.toplevel_result_view_name,
+                compile_views=ictx.stmt is ictx.toplevel_stmt,
+                ctx=resultctx,
+            )
 
         result = fini_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
 
@@ -587,9 +600,8 @@ def init_stmt(
     ctx.stmt = irstmt
     if ctx.toplevel_stmt is None:
         parent_ctx.toplevel_stmt = ctx.toplevel_stmt = irstmt
-        ctx.path_scope = parent_ctx.path_scope
-    else:
-        ctx.path_scope = parent_ctx.path_scope.attach_fence()
+
+    ctx.path_scope = parent_ctx.path_scope.attach_fence()
 
     pending_own_ns = parent_ctx.pending_stmt_own_path_id_namespace
     if pending_own_ns:
@@ -704,14 +716,9 @@ def compile_result_clause(
             shape = None
 
         if result_alias:
-            # `SELECT foo := expr` is largely equivalent to
-            # `WITH foo := expr SELECT foo` with one important exception:
-            # the scope namespace does not get added to the current query
-            # path scope.  This is needed to handle FOR queries correctly.
-            with sctx.newscope(temporary=True, fenced=True) as scopectx:
-                stmtctx.declare_view(
-                    result_expr, alias=result_alias,
-                    temporary_scope=False, ctx=scopectx)
+            # `SELECT foo := expr` is equivalent to
+            # `WITH foo := expr SELECT foo`
+            stmtctx.declare_view(result_expr, alias=result_alias, ctx=sctx)
 
             result_expr = qlast.Path(
                 steps=[qlast.ObjectRef(name=result_alias)]

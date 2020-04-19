@@ -28,8 +28,8 @@ from typing import *
 from edb import errors
 
 from edb.edgeql import ast as ql_ast
-from edb.edgeql import compiler as ql_compiler
 from edb.edgeql import qltypes as ql_ft
+from edb.edgeql import compiler as qlcompiler
 
 from edb.schema import annos as s_anno
 from edb.schema import casts as s_casts
@@ -48,6 +48,7 @@ from edb.schema import name as sn
 from edb.schema import objects as s_obj
 from edb.schema import operators as s_opers
 from edb.schema import pointers as s_pointers
+from edb.schema import pseudo as s_pseudo
 from edb.schema import referencing as s_referencing
 from edb.schema import roles as s_roles
 from edb.schema import sources as s_sources
@@ -361,6 +362,22 @@ class AlterObjectProperty(MetaCommand, adapts=sd.AlterObjectProperty):
     pass
 
 
+class PseudoTypeCommand(ObjectMetaCommand):
+
+    _table = metaschema.get_metaclass_table(s_pseudo.PseudoType)
+
+    def get_table(self, schema):
+        return self._table
+
+
+class CreatePseudoType(
+    PseudoTypeCommand,
+    CreateObject,
+    adapts=s_pseudo.CreatePseudoType,
+):
+    pass
+
+
 class TupleCommand(ObjectMetaCommand):
 
     pass
@@ -523,7 +540,7 @@ class FunctionCommand:
         return common.get_backend_name(schema, func, catenate=False)
 
     def get_pgtype(self, func: s_funcs.Function, obj, schema):
-        if obj.is_any():
+        if obj.is_any(schema):
             return ('anyelement',)
 
         try:
@@ -560,7 +577,6 @@ class FunctionCommand:
 
     def compile_args(self, func: s_funcs.Function, schema):
         func_params = func.get_params(schema)
-        pg_params = s_funcs.PgParams.from_params(schema, func_params)
         has_inlined_defaults = func.has_inlined_defaults(schema)
 
         args = []
@@ -571,7 +587,7 @@ class FunctionCommand:
             has_inlined_defaults or func_params.find_named_only(schema)
         )
 
-        for param in pg_params.params:
+        for param in func_params.get_in_canonical_order(schema):
             param_type = param.get_type(schema)
             param_default = param.get_default(schema)
 
@@ -605,11 +621,13 @@ class CreateFunction(FunctionCommand, CreateObject,
     def compile_sql_function(self, func: s_funcs.Function, schema):
         return self.make_function(func, func.get_code(schema), schema)
 
-    def compile_edgeql_function(self, func: s_funcs.Function, schema):
-        body_ir = ql_compiler.compile_func_to_ir(func, schema)
+    def compile_edgeql_function(self, func: s_funcs.Function, schema, context):
+        nativecode = func.get_nativecode(schema)
+        if nativecode.irast is None:
+            nativecode = self.compile_function(schema, context, nativecode)
 
         sql_text, _ = compiler.compile_ir_to_sql(
-            body_ir,
+            nativecode.irast,
             ignore_shapes=True,
             explicit_top_cast=irtyputils.type_to_typeref(  # note: no cache
                 schema, func.get_return_type(schema)),
@@ -626,7 +644,10 @@ class CreateFunction(FunctionCommand, CreateObject,
         schema = super().apply(schema, context)
         func = self.scls
 
-        if func.get_code(schema) is None:
+        if (
+            func.get_code(schema) is None
+            and func.get_nativecode(schema) is None
+        ):
             return schema
 
         func_language = func.get_language(schema)
@@ -634,7 +655,7 @@ class CreateFunction(FunctionCommand, CreateObject,
         if func_language is ql_ast.Language.SQL:
             dbf = self.compile_sql_function(func, schema)
         elif func_language is ql_ast.Language.EdgeQL:
-            dbf = self.compile_edgeql_function(func, schema)
+            dbf = self.compile_edgeql_function(func, schema, context)
         else:
             raise errors.QueryError(
                 f'cannot compile function {func.get_shortname(schema)}: '
@@ -668,7 +689,7 @@ class DeleteFunction(
         schema = super().apply(schema, context)
         func = self.scls
 
-        if func.get_code(orig_schema):
+        if func.get_code(orig_schema) or func.get_nativecode(orig_schema):
             # An EdgeQL or a SQL function
             # (not just an alias to a SQL function).
 
@@ -729,9 +750,8 @@ class OperatorCommand(FunctionCommand):
     def compile_args(self, oper: s_opers.Operator, schema):
         args = []
         oper_params = oper.get_params(schema)
-        pg_params = s_funcs.PgParams.from_params(schema, oper_params)
 
-        for param in pg_params.params:
+        for param in oper_params.get_in_canonical_order(schema):
             pg_at = self.get_pgtype(oper, param.get_type(schema), schema)
             args.append((param.get_parameter_name(schema), pg_at))
 
@@ -1034,6 +1054,14 @@ class CreateAnnotationValue(
 class AlterAnnotationValue(
         AnnotationValueCommand, AlterObject,
         adapts=s_anno.AlterAnnotationValue):
+    pass
+
+
+class RebaseAnnotationValue(
+    AnnotationValueCommand,
+    RebaseObject,
+    adapts=s_anno.RebaseAnnotationValue,
+):
     pass
 
 
@@ -1788,11 +1816,13 @@ class CreateIndex(IndexCommand, CreateObject, adapts=s_indexes.CreateIndex):
             index_expr = type(index_expr).compiled(
                 index_expr,
                 schema=schema,
-                modaliases=context.modaliases,
-                parent_object_type=self.get_schema_metaclass(),
-                anchors={ql_ast.Subject().name: subject},
-                path_prefix_anchor=path_prefix_anchor,
-                singletons=singletons,
+                options=qlcompiler.CompilerOptions(
+                    modaliases=context.modaliases,
+                    schema_object_context=self.get_schema_metaclass(),
+                    anchors={ql_ast.Subject().name: subject},
+                    path_prefix_anchor=path_prefix_anchor,
+                    singletons=singletons,
+                ),
             )
             ir = index_expr.irast
 
@@ -1951,7 +1981,7 @@ class CreateObjectType(ObjectTypeMetaCommand,
         self.table_name = new_table_name
 
         columns = []
-        if objtype.get_name(schema) == 'std::Object':
+        if objtype.get_name(schema) == 'std::BaseObject':
             token_col = dbops.Column(
                 name='__edb_token', type='uuid', required=False)
             columns.append(token_col)
@@ -1984,7 +2014,7 @@ class CreateObjectType(ObjectTypeMetaCommand,
             cid_col = dbops.Column(
                 name='__type__', type='uuid', required=True)
 
-            if objtype.get_name(schema) == 'std::Object':
+            if objtype.get_name(schema) == 'std::BaseObject':
                 alter_table.add_operation(dbops.AlterTableAddColumn(cid_col))
 
             constraint = dbops.PrimaryKey(
@@ -2265,7 +2295,10 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
             dbops.Column(
                 name=ptr_stor_info.column_name,
                 type=col_type,
-                required=pointer.get_required(schema),
+                required=(
+                    pointer.get_required(schema)
+                    and not pointer.is_pure_computable(schema)
+                ),
                 default=default,
                 comment=pointer.get_shortname(schema))
         ]
@@ -3039,7 +3072,8 @@ class CreateProperty(PropertyMetaCommand, adapts=s_props.CreateProperty):
                     cond = dbops.ColumnExists(
                         table_name=alter_table.name, column_name=col.name)
 
-                    if prop.get_required(schema):
+                    if (prop.get_required(schema)
+                            and not prop.is_pure_computable(schema)):
                         # For some reason, Postgres allows dropping NOT NULL
                         # constraints from inherited columns, but we really
                         # should only always increase constraints down the

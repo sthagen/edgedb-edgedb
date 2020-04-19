@@ -79,7 +79,7 @@ def new_empty_set(*, stype: Optional[s_types.Type]=None, alias: str,
                   srcctx: Optional[
                       parsing.ParserContext]=None) -> irast.Set:
     if stype is None:
-        stype = s_pseudo.Any.get(ctx.env.schema)
+        stype = s_pseudo.PseudoType.get(ctx.env.schema, 'anytype')
         if srcctx is not None:
             ctx.env.type_origins[stype] = srcctx
 
@@ -164,7 +164,7 @@ def new_array_set(
     if elements:
         stype = inference.infer_type(arr, env=ctx.env)
     else:
-        anytype = s_pseudo.Any.get(ctx.env.schema)
+        anytype = s_pseudo.PseudoType.get(ctx.env.schema, 'anytype')
         ctx.env.schema, stype = s_types.Array.from_subtypes(
             ctx.env.schema, [anytype])
         if srcctx is not None:
@@ -229,13 +229,16 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
 
                 view_set = ctx.view_sets.get(stype)
                 if view_set is not None:
-                    path_scope, path_scope_ns = ctx.path_scope_map[view_set]
+                    view_scope_info = ctx.path_scope_map[view_set]
                     path_tip = new_set_from_set(
                         view_set,
-                        preserve_scope_ns=path_scope_ns is not None,
+                        preserve_scope_ns=(
+                            view_scope_info.pinned_path_id_ns is not None
+                        ),
                         ctx=ctx,
                     )
-                    extra_scopes[path_tip] = path_scope.copy()
+
+                    extra_scopes[path_tip] = view_scope_info
                 else:
                     path_tip = class_set(stype, ctx=ctx)
 
@@ -297,23 +300,22 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
             else:
                 source = get_set_type(path_tip, ctx=ctx)
 
-            with ctx.newscope(fenced=True, temporary=True) as subctx:
-                if isinstance(source, s_types.Tuple):
-                    path_tip = tuple_indirection_set(
-                        path_tip, source=source, ptr_name=ptr_name,
-                        source_context=step.context, ctx=subctx)
+            if isinstance(source, s_types.Tuple):
+                path_tip = tuple_indirection_set(
+                    path_tip, source=source, ptr_name=ptr_name,
+                    source_context=step.context, ctx=ctx)
 
-                else:
-                    path_tip = ptr_step_set(
-                        path_tip, source=source, ptr_name=ptr_name,
-                        direction=direction,
-                        ignore_computable=True,
-                        source_context=step.context, ctx=subctx)
+            else:
+                path_tip = ptr_step_set(
+                    path_tip, source=source, ptr_name=ptr_name,
+                    direction=direction,
+                    ignore_computable=True,
+                    source_context=step.context, ctx=ctx)
 
-                    ptrcls = typegen.ptrcls_from_ptrref(
-                        path_tip.rptr.ptrref, ctx=ctx)
-                    if _is_computable_ptr(ptrcls, ctx=ctx):
-                        computables.append(path_tip)
+                ptrcls = typegen.ptrcls_from_ptrref(
+                    path_tip.rptr.ptrref, ctx=ctx)
+                if _is_computable_ptr(ptrcls, ctx=ctx):
+                    computables.append(path_tip)
 
         elif isinstance(step, qlast.TypeIntersection):
             arg_type = inference.infer_type(path_tip, ctx.env)
@@ -354,7 +356,14 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
                 else:
                     scope_set = path_tip
 
-                extra_scopes[scope_set] = subctx.path_scope
+                extra_scopes[scope_set] = context.ScopeInfo(
+                    path_scope=subctx.path_scope,
+                    tentative_work=[
+                        cb
+                        for cb in subctx.tentative_work
+                        if cb not in ctx.tentative_work
+                    ],
+                )
 
         for key_path_id in path_tip.path_id.iter_weak_namespace_prefixes():
             mapped = ctx.view_map.get(key_path_id)
@@ -417,6 +426,30 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
     for fence in fences:
         fence.fenced = True
 
+    for ir_set, scope_info in extra_scopes.items():
+        nodes = tuple(
+            node for node in ctx.path_scope.find_descendants(ir_set.path_id)
+            # if node.parent_fence not in fences
+        )
+
+        if not nodes:
+            # The path portion not being a descendant means
+            # that is is already present in the scope above us,
+            # along with the view scope.
+            continue
+
+        assert len(nodes) == 1
+
+        nodes[0].fuse_subtree(scope_info.path_scope.copy())
+
+        for cb in scope_info.tentative_work:
+            stmtctx.at_stmt_fini(cb, ctx=ctx)
+
+        scope_info.tentative_work[:] = []
+
+        if ir_set.path_scope_id is None:
+            pathctx.assign_set_scope(ir_set, nodes[0], ctx=ctx)
+
     for ir_set in computables:
         scope = ctx.path_scope.find_descendant(ir_set.path_id)
         if scope is None:
@@ -433,24 +466,6 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
             else:
                 path_tip = comp_ir_set
             path_sets[i] = comp_ir_set
-
-    for ir_set, scope in extra_scopes.items():
-        nodes = tuple(
-            node for node in ctx.path_scope.find_descendants(ir_set.path_id)
-            if node.parent_fence not in fences
-        )
-
-        if not nodes:
-            # The path portion not being a descendant means
-            # that is is already present in the scope above us,
-            # along with the view scope.
-            continue
-
-        assert len(nodes) == 1
-
-        nodes[0].fuse_subtree(scope)
-        if ir_set.path_scope_id is None:
-            pathctx.assign_set_scope(ir_set, nodes[0], ctx=ctx)
 
     for fence in fences:
         fence.fenced = False
@@ -590,7 +605,6 @@ def extend_path(
         direction: PtrDir=PtrDir.Outbound,
         *,
         ignore_computable: bool=False,
-        is_mut_assign: bool=False,
         hoist_iterators: bool=False,
         unnest_fence: bool=False,
         same_computable_scope: bool=False,
@@ -602,6 +616,7 @@ def extend_path(
     else:
         if direction is not s_pointers.PointerDirection.Inbound:
             source = ptrcls.get_near_endpoint(ctx.env.schema, direction)
+            assert isinstance(source, s_types.Type)
             stype = get_set_type(source_set, ctx=ctx)
             if not stype.issubclass(ctx.env.schema, source):
                 # Polymorphic link reference
@@ -616,6 +631,7 @@ def extend_path(
         ns=ctx.path_id_namespace, ctx=ctx)
 
     target = ptrcls.get_far_endpoint(ctx.env.schema, direction)
+    assert isinstance(target, s_types.Type)
     target_set = new_set(stype=target, path_id=path_id, ctx=ctx)
 
     ptr = irast.Pointer(
@@ -626,14 +642,12 @@ def extend_path(
     )
 
     target_set.rptr = ptr
-    is_computable = _is_computable_ptr(
-        ptrcls, is_mut_assign=is_mut_assign, ctx=ctx)
+    is_computable = _is_computable_ptr(ptrcls, ctx=ctx)
     if not ignore_computable and is_computable:
         target_set = computable_ptr_set(
             ptr,
             unnest_fence=unnest_fence,
             hoist_iterators=hoist_iterators,
-            from_default_expr=is_mut_assign,
             same_computable_scope=same_computable_scope,
             ctx=ctx,
         )
@@ -642,9 +656,10 @@ def extend_path(
 
 
 def _is_computable_ptr(
-        ptrcls: s_pointers.PointerLike, *,
-        is_mut_assign: bool=False,
-        ctx: context.ContextLevel) -> bool:
+    ptrcls: s_pointers.PointerLike,
+    *,
+    ctx: context.ContextLevel,
+) -> bool:
     try:
         qlexpr = ctx.source_map[ptrcls][0]
     except KeyError:
@@ -652,13 +667,7 @@ def _is_computable_ptr(
     else:
         return qlexpr is not None
 
-    if ptrcls.is_pure_computable(ctx.env.schema):
-        return True
-
-    if is_mut_assign and ptrcls.get_default(ctx.env.schema) is not None:
-        return True
-
-    return False
+    return ptrcls.is_pure_computable(ctx.env.schema)
 
 
 def tuple_indirection_set(
@@ -735,7 +744,7 @@ def type_intersection_set(
         # The type intersection cannot increase the cardinality
         # of the input set, so semantically, the cardinality
         # of the type intersection "link" is, at most, ONE.
-        cardinality=qltypes.Cardinality.ONE,
+        cardinality=qltypes.SchemaCardinality.ONE,
     )
 
     ptrref = irtyputils.ptrref_from_ptrcls(
@@ -858,7 +867,7 @@ def ensure_set(
         stype = type_override
 
     if (isinstance(ir_set, irast.EmptySet)
-            and (stype is None or stype.is_any())
+            and (stype is None or stype.is_any(ctx.env.schema))
             and typehint is not None):
         inference.amend_empty_set_type(ir_set, typehint, env=ctx.env)
         stype = get_set_type(ir_set, ctx=ctx)
@@ -888,12 +897,13 @@ def ensure_stmt(
 
 
 def computable_ptr_set(
-        rptr: irast.Pointer, *,
-        unnest_fence: bool=False,
-        hoist_iterators: bool=False,
-        same_computable_scope: bool=False,
-        from_default_expr: bool=False,
-        ctx: context.ContextLevel) -> irast.Set:
+    rptr: irast.Pointer,
+    *,
+    unnest_fence: bool=False,
+    hoist_iterators: bool=False,
+    same_computable_scope: bool=False,
+    ctx: context.ContextLevel,
+) -> irast.Set:
     """Return ir.Set for a pointer defined as a computable."""
     ptrcls = typegen.ptrcls_from_ptrref(rptr.ptrref, ctx=ctx)
     source_set = rptr.source
@@ -924,14 +934,10 @@ def computable_ptr_set(
         qlexpr, qlctx, inner_source_path_id, path_id_ns = \
             ctx.source_map[ptrcls]
     except KeyError:
-        if from_default_expr:
-            comp_expr = ptrcls.get_default(ctx.env.schema)
-        else:
-            comp_expr = ptrcls.get_expr(ctx.env.schema)
+        comp_expr = ptrcls.get_expr(ctx.env.schema)
         if comp_expr is None:
             ptrcls_sn = ptrcls.get_shortname(ctx.env.schema)
-            raise ValueError(
-                f'{ptrcls_sn!r} is not a computable pointer')
+            raise ValueError(f'{ptrcls_sn!r} is not a computable pointer')
 
         qlexpr = qlparser.parse(comp_expr.text)
         # NOTE: Validation of the expression type is not the concern
@@ -1003,10 +1009,13 @@ def computable_ptr_set(
     pending_cardinality = ctx.pending_cardinality.get(ptrcls)
     if pending_cardinality is not None:
         stmtctx.get_pointer_cardinality_later(
-            ptrcls=ptrcls, irexpr=comp_ir_set_copy,
+            ptrcls=ptrcls,
+            irexpr=comp_ir_set_copy,
             specified_card=pending_cardinality.specified_cardinality,
+            is_mut_assignment=pending_cardinality.is_mut_assignment,
             source_ctx=pending_cardinality.source_ctx,
-            ctx=ctx)
+            ctx=ctx,
+        )
 
     stmtctx.enforce_pointer_cardinality(
         ptrcls,

@@ -18,6 +18,7 @@
 
 
 from __future__ import annotations
+from typing import *
 
 import copy
 
@@ -26,17 +27,15 @@ from edb.common import struct
 
 from edb.edgeql import ast as qlast_
 from edb.edgeql import codegen as qlcodegen
+from edb.edgeql import compiler as qlcompiler
 from edb.edgeql import parser as qlparser
-from typing import *
 
 from . import abc as s_abc
 from . import objects as so
 
 
 if TYPE_CHECKING:
-    from edb.schema import types as s_types
     from edb.schema import schema as s_schema
-    from edb.schema import functions as s_func
     from edb.ir import ast as irast_
 
 
@@ -130,38 +129,23 @@ class Expression(struct.MixedStruct, s_abc.ObjectContainer, s_abc.Expression):
         expr: Expression,
         schema: s_schema.Schema,
         *,
+        options: Optional[qlcompiler.CompilerOptions] = None,
         as_fragment: bool = False,
-        modaliases: Optional[Mapping[Optional[str], str]] = None,
-        parent_object_type: Optional[so.ObjectMeta] = None,
-        anchors: Optional[Mapping[str, Any]] = None,
-        path_prefix_anchor: Optional[str] = None,
-        allow_generic_type_output: bool = False,
-        func_params: Optional[s_func.ParameterLikeList] = None,
-        singletons: Sequence[s_types.Type] = (),
     ) -> Expression:
 
-        from edb.edgeql import compiler as qlcompiler
         from edb.ir import ast as irast_
 
         if as_fragment:
             ir: irast_.Command = qlcompiler.compile_ast_fragment_to_ir(
                 expr.qlast,
                 schema=schema,
-                modaliases=modaliases,
-                anchors=anchors,
-                path_prefix_anchor=path_prefix_anchor,
+                options=options,
             )
         else:
             ir = qlcompiler.compile_ast_to_ir(
                 expr.qlast,
                 schema=schema,
-                modaliases=modaliases,
-                anchors=anchors,
-                path_prefix_anchor=path_prefix_anchor,
-                func_params=func_params,
-                parent_object_type=parent_object_type,
-                allow_generic_type_output=allow_generic_type_output,
-                singletons=singletons,
+                options=options,
             )
 
         assert isinstance(ir, irast_.Statement)
@@ -222,11 +206,13 @@ class ExpressionShell(so.Shell):
         origtext: Optional[str],
         refs: Optional[Iterable[so.ObjectShell]],
         _qlast: Optional[qlast_.Base] = None,
+        _irast: Optional[irast_.Command] = None,
     ) -> None:
         self.text = text
         self.origtext = origtext
         self.refs = tuple(refs) if refs is not None else None
         self._qlast = _qlast
+        self._irast = _irast
 
     def resolve(self, schema: s_schema.Schema) -> Expression:
         return Expression(
@@ -237,6 +223,7 @@ class ExpressionShell(so.Shell):
                 (s.resolve(schema) for s in self.refs),
             ) if self.refs is not None else None,
             _qlast=self._qlast,
+            _irast=self._irast,
         )
 
     @property

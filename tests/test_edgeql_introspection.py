@@ -18,7 +18,6 @@
 
 
 import os.path
-import textwrap
 
 from edb.testbase import server as tb
 from edb.tools import test
@@ -324,6 +323,8 @@ class TestIntrospection(tb.QueryTestCase):
                     'name': 'test::Text',
                 }, {
                     'name': 'std::Object',
+                }, {
+                    'name': 'std::BaseObject',
                 }],
             }]
         )
@@ -516,10 +517,11 @@ class TestIntrospection(tb.QueryTestCase):
                     subject: {
                         name
                     },
-                    args: {
+                    params: {
                         num,
                         @value
-                    } ORDER BY .num
+                    } FILTER .name != '__subject__'
+                      ORDER BY .num
                 }
                 FILTER
                     .subject.name = 'body'
@@ -531,7 +533,7 @@ class TestIntrospection(tb.QueryTestCase):
                 'subject': {
                     'name': 'body'
                 },
-                'args': [{
+                'params': [{
                     'num': 1,
                     '@value': '10000'
                 }]
@@ -551,7 +553,11 @@ class TestIntrospection(tb.QueryTestCase):
                             expr,
                             annotations: { name, @value },
                             subject: { name },
-                            args: { name, @value, type: { name } },
+                            params: {
+                                name,
+                                @value,
+                                type: { name }
+                            } FILTER .name != '__subject__',
                             return_typemod,
                             return_type: { name },
                             errmessage,
@@ -571,7 +577,7 @@ class TestIntrospection(tb.QueryTestCase):
                                 'expr': '(__subject__ <= max)',
                                 'annotations': {},
                                 'subject': {'name': 'body'},
-                                'args': [
+                                'params': [
                                     {
                                         'name': 'max',
                                         'type': {'name': 'std::int64'},
@@ -594,7 +600,7 @@ class TestIntrospection(tb.QueryTestCase):
                                 'expr': 'std::_is_exclusive(__subject__)',
                                 'annotations': {},
                                 'subject': {'name': 'id'},
-                                'args': {},
+                                'params': {},
                                 'return_typemod': 'SINGLETON',
                                 'return_type': {'name': 'std::bool'},
                                 'errmessage':
@@ -618,7 +624,11 @@ class TestIntrospection(tb.QueryTestCase):
                         expr,
                         annotations: { name, @value },
                         subject: { name },
-                        args: { name, @value, type: { name } },
+                        params: {
+                            name,
+                            @value,
+                            type: { name }
+                        } FILTER .name != '__subject__',
                         return_typemod,
                         return_type: { name },
                         errmessage,
@@ -635,7 +645,7 @@ class TestIntrospection(tb.QueryTestCase):
                         'expr': 'contains(vals, __subject__)',
                         'annotations': {},
                         'subject': {'name': 'test::EmulatedEnum'},
-                        'args': [
+                        'params': [
                             {
                                 'name': 'vals',
                                 'type': {'name': 'array'},
@@ -1043,14 +1053,22 @@ class TestIntrospection(tb.QueryTestCase):
         )
 
     async def test_edgeql_introspection_meta_13(self):
-        # make sure that ALL schema Objects are std::Objects
         res = await self.con.fetchone(r"""
             SELECT count(schema::Object);
         """)
 
+        # make sure that ALL schema Objects are std::BaseObjects
         await self.assert_query_result(
             r"""
-                SELECT schema::Object IS std::Object;
+                SELECT schema::Object IS std::BaseObject;
+            """,
+            [True] * res
+        )
+
+        # ...but not std::Objects
+        await self.assert_query_result(
+            r"""
+                SELECT schema::Object IS NOT std::Object;
             """,
             [True] * res
         )
@@ -1327,56 +1345,3 @@ class TestIntrospection(tb.QueryTestCase):
         """)
 
         self.assertGreater(res, 0)
-
-    async def test_edgeql_introspection_describe_01(self):
-        # Test that things like "\1" are serialized correctly
-        # by the DESCRIBE command as they would in a raw string.
-        async with self.con.transaction():
-            await self.con.execute(r'''
-                CREATE FUNCTION bad() -> str
-                    USING ( SELECT r'\1' );
-            ''')
-
-            desc = await self.con.fetchone('''
-                DESCRIBE OBJECT bad AS TEXT
-            ''')
-
-        self.assertEqual(
-            desc,
-            r"function default::bad() ->  std::str "
-            r"using ( SELECT r'\1' );"
-        )
-
-    async def test_edgeql_introspection_describe_02(self):
-        # Test that things like "\1" are serialized correctly
-        # by the DESCRIBE command as they would in a raw string.
-
-        output = await self.con.fetchone('''
-            DESCRIBE OBJECT test::User AS TEXT VERBOSE
-        ''')
-
-        expected = textwrap.dedent('''\
-            type test::User extending test::Dictionary {
-                index on (__subject__.name);
-                required single link __type__ -> schema::Type {
-                    readonly := true;
-                };
-                multi link todo -> test::Issue {
-                    single property rank -> std::int64 {
-                        default := 42;
-                    };
-                };
-                required single property id -> std::uuid {
-                    readonly := true;
-                    constraint std::exclusive;
-                };
-                required single property name -> std::str {
-                    constraint std::exclusive;
-                };
-            };''')
-
-        self.assertEqual(
-            output,
-            expected,
-            f'output:\n\n{output}\n\nIS NOT EQUAL TO EXPECTED:\n\n{expected}'
-        )

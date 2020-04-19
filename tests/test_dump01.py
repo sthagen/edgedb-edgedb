@@ -508,10 +508,10 @@ class TestDump01(tb.QueryTestCase, tb.CLITestCaseMixin):
                     } ORDER BY @index,
                     constraints: {
                         name,
-                        args: {
+                        params: {
                             name,
                             @value,
-                        },
+                        } FILTER .name != '__subject__',
                     },
                 }
                 FILTER
@@ -538,7 +538,7 @@ class TestDump01(tb.QueryTestCase, tb.CLITestCaseMixin):
                     'constraints': [
                         {
                             'name': 'default::user_int_constr',
-                            'args': [{'name': 'x', '@value': '5'}],
+                            'params': [{'name': 'x', '@value': '5'}],
                         },
                     ],
                 },
@@ -551,7 +551,7 @@ class TestDump01(tb.QueryTestCase, tb.CLITestCaseMixin):
                     'constraints': [
                         {
                             'name': 'std::max_len_value',
-                            'args': [{'name': 'max', '@value': '5'}],
+                            'params': [{'name': 'max', '@value': '5'}],
                         },
                     ],
                 },
@@ -568,10 +568,10 @@ class TestDump01(tb.QueryTestCase, tb.CLITestCaseMixin):
                         name,
                         constraints: {
                             name,
-                            args: {
+                            params: {
                                 name,
                                 @value,
-                            },
+                            } FILTER .name != '__subject__',
                         },
                     }
                     FILTER .name IN {'m0', 'm1'}
@@ -589,7 +589,7 @@ class TestDump01(tb.QueryTestCase, tb.CLITestCaseMixin):
                             'constraints': [
                                 {
                                     'name': 'default::user_int_constr',
-                                    'args': [{'name': 'x', '@value': '3'}],
+                                    'params': [{'name': 'x', '@value': '3'}],
                                 },
                             ],
                         },
@@ -598,7 +598,7 @@ class TestDump01(tb.QueryTestCase, tb.CLITestCaseMixin):
                             'constraints': [
                                 {
                                     'name': 'std::max_len_value',
-                                    'args': [{'name': 'max', '@value': '3'}],
+                                    'params': [{'name': 'max', '@value': '3'}],
                                 },
                             ],
                         }
@@ -674,6 +674,7 @@ class TestDump01(tb.QueryTestCase, tb.CLITestCaseMixin):
                         {'name': 'default::T', '@index': 3},
                         {'name': 'default::R', '@index': 4},
                         {'name': 'std::Object', '@index': 5},
+                        {'name': 'std::BaseObject', '@index': 6},
                     ],
                 }
             ]

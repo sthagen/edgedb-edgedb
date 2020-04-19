@@ -61,6 +61,7 @@ class TraceContextBase:
         self.parents = {}
         self.ancestors = {}
         self.defdeps = defaultdict(set)
+        self.constraints = defaultdict(set)
 
     def set_module(self, module):
         self.module = module
@@ -157,13 +158,14 @@ class LayoutTraceContext(TraceContextBase):
 
 class DepTraceContext(TraceContextBase):
     def __init__(self, schema, ddlgraph, objects, parents, ancestors,
-                 defdeps):
+                 defdeps, constraints):
         super().__init__(schema)
         self.ddlgraph = ddlgraph
         self.objects = objects
         self.parents = parents
         self.ancestors = ancestors
         self.defdeps = defdeps
+        self.constraints = constraints
 
 
 def sdl_to_ddl(schema, documents):
@@ -215,7 +217,7 @@ def sdl_to_ddl(schema, documents):
 
     ctx = DepTraceContext(
         schema, ddlgraph, ctx.objects, ctx.parents, ctx.ancestors,
-        ctx.defdeps
+        ctx.defdeps, ctx.constraints
     )
     for module_name, declarations in documents:
         ctx.set_module(module_name)
@@ -333,6 +335,12 @@ def _trace_item_layout(node: qlast.CreateObject, *,
             _trace_item_layout(
                 decl, obj=ptr, fq_name=ptr_name, ctx=ctx)
 
+        elif isinstance(decl, qlast.CreateConcreteConstraint):
+            _, con_fq_name = ctx.get_fq_name(decl)
+            con_name = f'{fq_name}@{con_fq_name}'
+            ctx.objects[con_name] = qltracer.ConcreteConstraint(con_name)
+            ctx.constraints[fq_name].add(con_name)
+
 
 def get_ancestors(fq_name, ancestors, parents):
     '''Recursively compute ancestors (in place) from the parents graph.'''
@@ -369,6 +377,7 @@ def trace_SetField(node: qlast.SetField, *, ctx: DepTraceContext):
         schema=ctx.schema,
         module=ctx.module,
         objects=ctx.objects,
+        params={},
     ):
         # ignore std module dependencies
         if not STD_PREFIX_RE.match(dep):
@@ -460,6 +469,17 @@ def trace_Function(node: qlast.CreateFunction, *, ctx: DepTraceContext):
     # before the function.
     deps = [param.type for param in node.params]
     deps.append(node.returning)
+
+    params = {}
+    for param in node.params:
+        if not param.type.subtypes:
+            param_t = ctx.get_ref_name(param.type.maintype)
+            params[param.name] = param_t
+        else:
+            params[param.name] = 'std::BaseObject'
+
+    if node.nativecode is not None:
+        deps.append((node.nativecode, params))
 
     # XXX: hard_dep_expr is used because it ultimately calls the
     # _get_hard_deps helper that extracts the proper dependency list
@@ -589,14 +609,21 @@ def _register_item(
             if isinstance(expr, qlast.TypeExpr):
                 deps |= _get_hard_deps(expr, ctx=ctx)
             else:
+                if isinstance(expr, tuple):
+                    qlexpr, params = expr
+                else:
+                    qlexpr = expr
+                    params = {}
+
                 tdeps = qltracer.trace_refs(
-                    expr,
+                    qlexpr,
                     schema=ctx.schema,
                     module=ctx.module,
                     source=source,
                     path_prefix=source,
                     subject=subject or fq_name,
                     objects=ctx.objects,
+                    params=params,
                 )
 
                 for dep in tdeps:
@@ -604,13 +631,27 @@ def _register_item(
                     if not STD_PREFIX_RE.match(dep):
                         deps.add(dep)
 
-                        # If the declaration is a view, we need to be
-                        # dependent on all the types and their props
-                        # used in the view.
                         if isinstance(decl, qlast.CreateAlias):
+                            # If the declaration is a view, we need to be
+                            # dependent on all the types and their props
+                            # used in the view.
                             vdeps = {dep} | ctx.ancestors.get(dep, set())
                             for vdep in vdeps:
                                 deps |= ctx.defdeps.get(vdep, set())
+
+                        elif (isinstance(decl, qlast.CreateConcretePointer)
+                              and isinstance(decl.target, qlast.Expr)):
+                            # If the declaration is a computable
+                            # pointer, we need to include the possible
+                            # constraints for every dependency that it
+                            # lists. This is so that any other
+                            # links/props that this computable uses
+                            # has all of their constraints defined
+                            # before the computable and the
+                            # cardinality can be inferred correctly.
+                            cdeps = {dep} | ctx.ancestors.get(dep, set())
+                            for cdep in cdeps:
+                                deps |= ctx.constraints.get(cdep, set())
 
     orig_op.commands = commands
 

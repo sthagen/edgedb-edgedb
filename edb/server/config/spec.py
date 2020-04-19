@@ -29,6 +29,7 @@ from edb.edgeql import codegen as qlcodegen
 from edb.edgeql import compiler as qlcompiler
 from edb.edgeql import qltypes
 from edb.ir import staeval
+from edb.schema import utils as s_utils
 
 from . import types
 
@@ -139,7 +140,7 @@ def load_spec_from_schema(schema):
             for a, v in p.get_annotations(schema).items(schema)
         }
 
-        set_of = p.get_cardinality(schema) is qltypes.Cardinality.MANY
+        set_of = p.get_cardinality(schema) is qltypes.SchemaCardinality.MANY
 
         deflt = p.get_default(schema)
         if deflt is not None:
@@ -179,7 +180,7 @@ def generate_config_query(schema) -> str:
             expr=qlast.Path(
                 steps=[ref]
             ),
-            elements=qlcompiler.get_config_type_shape(schema, cfg, path=[ref]),
+            elements=s_utils.get_config_type_shape(schema, cfg, path=[ref]),
         ),
         limit=qlast.IntegerConstant(
             value='1',

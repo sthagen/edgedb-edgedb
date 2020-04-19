@@ -289,6 +289,7 @@ class develop(setuptools_develop.develop):
         subprocess.run(
             [
                 'cargo', 'install',
+                '--verbose', '--verbose',
                 '--git', EDGEDBCLI_REPO,
                 '--bin', 'edgedb',
                 '--root', rust_root,
@@ -540,6 +541,12 @@ setuptools.setup(
         distutils_extension.Extension(
             "edb.server.dbview.dbview",
             ["edb/server/dbview/dbview.pyx"],
+            extra_compile_args=EXT_CFLAGS,
+            extra_link_args=EXT_LDFLAGS),
+
+        distutils_extension.Extension(
+            "edb.server.tokenizer",
+            ["edb/server/tokenizer.pyx"],
             extra_compile_args=EXT_CFLAGS,
             extra_link_args=EXT_LDFLAGS),
 

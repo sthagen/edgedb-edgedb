@@ -41,7 +41,6 @@ from edb.schema import migrations  # NoQA
 from edb.schema import modules as s_mod
 from edb.schema import name as sn
 from edb.schema import objects as s_obj
-from edb.schema import pseudo as s_pseudo
 
 from edb.server import defines
 
@@ -181,6 +180,114 @@ class StrToDecimal(dbops.Function):
             args=[('val', ('text',))],
             returns=('numeric',),
             # Stable because it's raising exceptions.
+            volatility='stable',
+            text=self.text,
+        )
+
+
+class StrToInt64NoInline(dbops.Function):
+    """String-to-int64 cast with noinline guard.
+
+    Adding a LIMIT clause to the function statement makes it
+    uninlinable due to the Postgres inlining heuristic looking
+    for simple SELECT expressions only (i.e. no clauses.)
+
+    This might need to change in the future if the heuristic
+    changes.
+    """
+    text = r'''
+        SELECT
+            "val"::bigint
+        LIMIT
+            1
+        ;
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', 'str_to_int64_noinline'),
+            args=[('val', ('text',))],
+            returns=('bigint',),
+            volatility='stable',
+            text=self.text,
+        )
+
+
+class StrToInt32NoInline(dbops.Function):
+    """String-to-int32 cast with noinline guard."""
+    text = r'''
+        SELECT
+            "val"::int
+        LIMIT
+            1
+        ;
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', 'str_to_int32_noinline'),
+            args=[('val', ('text',))],
+            returns=('int',),
+            volatility='stable',
+            text=self.text,
+        )
+
+
+class StrToInt16NoInline(dbops.Function):
+    """String-to-int16 cast with noinline guard."""
+    text = r'''
+        SELECT
+            "val"::smallint
+        LIMIT
+            1
+        ;
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', 'str_to_int16_noinline'),
+            args=[('val', ('text',))],
+            returns=('smallint',),
+            volatility='stable',
+            text=self.text,
+        )
+
+
+class StrToFloat64NoInline(dbops.Function):
+    """String-to-float64 cast with noinline guard."""
+    text = r'''
+        SELECT
+            "val"::float8
+        LIMIT
+            1
+        ;
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', 'str_to_float64_noinline'),
+            args=[('val', ('text',))],
+            returns=('float8',),
+            volatility='stable',
+            text=self.text,
+        )
+
+
+class StrToFloat32NoInline(dbops.Function):
+    """String-to-float32 cast with noinline guard."""
+    text = r'''
+        SELECT
+            "val"::float4
+        LIMIT
+            1
+        ;
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', 'str_to_float32_noinline'),
+            args=[('val', ('text',))],
+            returns=('float4',),
             volatility='stable',
             text=self.text,
         )
@@ -2098,22 +2205,6 @@ def get_metaclass_table(mcls):
     return metaclass_tables[mcls]
 
 
-def make_register_any_command():
-    pseudo_type_table = get_metaclass_table(s_pseudo.PseudoType)
-
-    anytype = pseudo_type_table.record
-    anytype.ancestors = None
-    anytype.id = s_obj.get_known_type_id('anytype')
-    anytype.name = 'anytype'
-
-    anytuple = pseudo_type_table.record
-    anytuple.ancestors = None
-    anytuple.id = s_obj.get_known_type_id('anytuple')
-    anytuple.name = 'anytuple'
-
-    return dbops.Insert(table=pseudo_type_table, records=[anytype, anytuple])
-
-
 async def bootstrap(conn):
     commands = dbops.CommandGroup()
     commands.add_commands([
@@ -2164,6 +2255,11 @@ async def bootstrap(conn):
         dbops.CreateDomain(BigintDomain()),
         dbops.CreateFunction(StrToBigint()),
         dbops.CreateFunction(StrToDecimal()),
+        dbops.CreateFunction(StrToInt64NoInline()),
+        dbops.CreateFunction(StrToInt32NoInline()),
+        dbops.CreateFunction(StrToInt16NoInline()),
+        dbops.CreateFunction(StrToFloat64NoInline()),
+        dbops.CreateFunction(StrToFloat32NoInline()),
         dbops.CreateFunction(GetTableDescendantsFunction()),
         dbops.CreateFunction(ParseTriggerConditionFunction()),
         dbops.CreateFunction(NormalizeArrayIndexFunction()),
@@ -2194,9 +2290,6 @@ async def bootstrap(conn):
         dbops.CreateFunction(SysVersionFunction()),
         dbops.CreateFunction(SysGetTransactionIsolation()),
     ])
-
-    # Register "any" pseudo-type.
-    commands.add_command(make_register_any_command())
 
     block = dbops.PLTopBlock(disable_ddl_triggers=True)
     commands.generate(block)
@@ -2268,13 +2361,14 @@ def _get_link_view(mcls, schema_cls, field, ptr, refdict, schema):
         else:
             ftype = type(None)
 
-        if pn.name == 'args' and mcls is s_constraints.Constraint:
-            # Constraint args need special handling.
+        if pn.name == 'params' and mcls is s_constraints.Constraint:
+            # Constraint params need special handling to support
+            # currying (@value property injection)
             link_query = f'''
                 SELECT
                     q.id            AS source,
                     q.param_id      AS target,
-                    q.value         AS value
+                    COALESCE(q.value, '')         AS value
                 FROM
                     edgedb.{mcls.__name__} AS s,
 
@@ -2290,7 +2384,7 @@ def _get_link_view(mcls, schema_cls, field, ptr, refdict, schema):
                             INNER JOIN edgedb.Parameter AS param
                                 ON param.id = p.param_id
 
-                            INNER JOIN
+                            LEFT JOIN
                                 UNNEST(s.args)
                                     WITH ORDINALITY AS tv(_, value, _, num)
                                 ON (p.num = tv.num + 1)
@@ -2317,8 +2411,6 @@ def _get_link_view(mcls, schema_cls, field, ptr, refdict, schema):
                             param.kind = 'VARIADIC'
 
                     ) AS q
-                WHERE
-                    s.subject IS NOT NULL
             '''
 
         elif pn.name == 'bases' or pn.name == 'ancestors':
@@ -2741,7 +2833,7 @@ def _build_key_expr(key_components):
 def _build_data_source(schema, rptr, source_idx, *, alias=None):
 
     rptr_name = rptr.get_shortname(schema).name
-    rptr_multi = rptr.get_cardinality(schema) is qltypes.Cardinality.MANY
+    rptr_multi = rptr.get_cardinality(schema) is qltypes.SchemaCardinality.MANY
 
     if alias is None:
         alias = f'q{source_idx + 1}'
@@ -2789,7 +2881,7 @@ def _generate_config_type_view(schema, stype, *, path, rptr, _memo=None):
                 FROM edgedb._read_sys_config() cfg) AS q0''')
         else:
             rptr_multi = (
-                rptr.get_cardinality(schema) is qltypes.Cardinality.MANY)
+                rptr.get_cardinality(schema) is qltypes.SchemaCardinality.MANY)
 
             rptr_name = rptr.get_shortname(schema).name
 
@@ -2814,7 +2906,8 @@ def _generate_config_type_view(schema, stype, *, path, rptr, _memo=None):
         key_start = 0
 
         for i, (l, exc_props) in enumerate(path):
-            l_multi = l.get_cardinality(schema) is qltypes.Cardinality.MANY
+            l_multi = (l.get_cardinality(schema) is
+                       qltypes.SchemaCardinality.MANY)
             l_name = l.get_shortname(schema).name
 
             if i == 0:
@@ -2872,7 +2965,7 @@ def _generate_config_type_view(schema, stype, *, path, rptr, _memo=None):
 
         pp_type = pp.get_target(schema)
         pp_multi = (
-            pp.get_cardinality(schema) is qltypes.Cardinality.MANY
+            pp.get_cardinality(schema) is qltypes.SchemaCardinality.MANY
         )
 
         if pp_type.is_object_type():

@@ -26,8 +26,7 @@ from edb import errors
 from edb import graphql
 
 from edb.common import debug
-from edb.edgeql import compiler as ql_compiler
-from edb.edgeql import qltypes
+from edb.edgeql import compiler as qlcompiler
 from edb.pgsql import compiler as pg_compiler
 from edb.server import compiler
 
@@ -82,12 +81,15 @@ class Compiler(compiler.BaseCompiler):
             substitutions=substitutions,
             operation_name=operation_name)
 
-        ir = ql_compiler.compile_ast_to_ir(
+        ir = qlcompiler.compile_ast_to_ir(
             op.edgeql_ast,
             schema=db.schema,
-            json_parameters=True)
+            options=qlcompiler.CompilerOptions(
+                json_parameters=True,
+            ),
+        )
 
-        if ir.cardinality is not qltypes.Cardinality.ONE:
+        if ir.cardinality.is_multi():
             raise errors.ResultCardinalityMismatchError(
                 f'compiled GrqphQL query has cardinality {ir.cardinality}, '
                 f'expected ONE')

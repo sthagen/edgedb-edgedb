@@ -107,6 +107,10 @@ class WithDDLStmt(Nonterm):
 # DDL statements that are allowed inside CREATE DATABASE and CREATE MIGRATION
 #
 class InnerDDLStmt(Nonterm):
+
+    def reduce_CreatePseudoTypeStmt(self, *kids):
+        self.val = kids[0].val
+
     def reduce_CreateScalarTypeStmt(self, *kids):
         self.val = kids[0].val
 
@@ -734,6 +738,30 @@ class DropConcreteConstraintStmt(Nonterm):
 
 
 #
+# CREATE PSEUDO TYPE
+#
+
+commands_block(
+    'CreatePseudoType',
+    SetFieldStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
+)
+
+
+class CreatePseudoTypeStmt(Nonterm):
+
+    def reduce_CreatePseudoTypeStmt(self, *kids):
+        r"""%reduce
+            CREATE PSEUDO TYPE NodeName OptCreatePseudoTypeCommandsBlock
+        """
+        self.val = qlast.CreatePseudoType(
+            name=kids[3].val,
+            commands=kids[4].val,
+        )
+
+
+#
 # CREATE SCALAR TYPE
 #
 
@@ -1046,13 +1074,13 @@ class SetCardinalityStmt(Nonterm):
     def reduce_SET_SINGLE(self, *kids):
         self.val = qlast.SetSpecialField(
             name='cardinality',
-            value=qltypes.Cardinality.ONE,
+            value=qltypes.SchemaCardinality.ONE,
         )
 
     def reduce_SET_MULTI(self, *kids):
         self.val = qlast.SetSpecialField(
             name='cardinality',
-            value=qltypes.Cardinality.MANY,
+            value=qltypes.SchemaCardinality.MANY,
         )
 
 

@@ -206,7 +206,7 @@ _123456789_123456789_123456789 -> str
         obj = schema.get('test::Object')
         self.assertEqual(
             obj.getptr(schema, 'foo_plus_bar').get_cardinality(schema),
-            qltypes.Cardinality.ONE)
+            qltypes.SchemaCardinality.ONE)
 
     def test_schema_computable_cardinality_inference_02(self):
         schema = self.load_schema("""
@@ -220,7 +220,7 @@ _123456789_123456789_123456789 -> str
         obj = schema.get('test::Object')
         self.assertEqual(
             obj.getptr(schema, 'foo_plus_bar').get_cardinality(schema),
-            qltypes.Cardinality.MANY)
+            qltypes.SchemaCardinality.MANY)
 
     def test_schema_refs_01(self):
         schema = self.load_schema("""
@@ -584,6 +584,31 @@ _123456789_123456789_123456789 -> str
             'there should be no constraints on alias links or properties',
         )
 
+    def test_schema_ref_diamond_inheritance(self):
+        schema = tb._load_std_schema()
+
+        schema = self.run_ddl(schema, '''
+            CREATE MODULE default;
+            CREATE TYPE default::A;
+            CREATE TYPE default::B EXTENDING A;
+            CREATE TYPE default::C EXTENDING A, B;
+        ''')
+
+        orig_get_children = type(schema).get_children
+
+        def stable_get_children(self, scls):
+            children = orig_get_children(self, scls)
+            return list(sorted(children, key=lambda obj: obj.get_name(schema)))
+
+        type(schema).get_children = stable_get_children
+
+        try:
+            schema = self.run_ddl(schema, '''
+                ALTER TYPE default::A CREATE PROPERTY foo -> str;
+            ''')
+        finally:
+            type(schema).get_children = orig_get_children
+
     def test_schema_object_verbosename(self):
         schema = self.load_schema("""
             abstract inheritable annotation attr;
@@ -610,7 +635,7 @@ _123456789_123456789_123456789 -> str
 
         schema = self.run_ddl(schema, '''
             CREATE FUNCTION test::foo (a: int64) -> int64
-            USING EdgeQL $$ SELECT a; $$;
+            USING ( SELECT a );
         ''')
 
         self.assertEqual(
@@ -783,11 +808,13 @@ _123456789_123456789_123456789 -> str
             type C extending B;
         """)
 
+        BaseObject = schema.get('std::BaseObject')
         Object = schema.get('std::Object')
         A = schema.get('test::A')
         B = schema.get('test::B')
         C = schema.get('test::C')
         std_link = schema.get('std::link')
+        BaseObject__type__ = BaseObject.getptr(schema, '__type__')
         Object__type__ = Object.getptr(schema, '__type__')
         A__type__ = A.getptr(schema, '__type__')
         B__type__ = B.getptr(schema, '__type__')
@@ -798,6 +825,7 @@ _123456789_123456789_123456789 -> str
                 B__type__,
                 A__type__,
                 Object__type__,
+                BaseObject__type__,
                 std_link,
             )
         )
@@ -818,6 +846,7 @@ _123456789_123456789_123456789 -> str
             (
                 B__type__,
                 Object__type__,
+                BaseObject__type__,
                 std_link,
             )
         )
@@ -1073,11 +1102,11 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
 
             function get_ingredients(
                 recipe: Recipe
-            ) -> tuple<name: str, quantity: decimal> {
+            ) -> set of tuple<name: str, quantity: decimal> {
                 using (
                     SELECT (
                         name := recipe.ingredients.name,
-                        quantity := recipe.ingredients.quantity,
+                        quantity := recipe.ingredients@quantity,
                     )
                 )
             }
@@ -1399,7 +1428,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         }
 
         function str_upper(val: str) -> str {
-            using (SELECT '^^' ++ str_upper(val) ++ '^^');
+            using (SELECT '^^' ++ std::str_upper(val) ++ '^^');
         }
         '''
 
@@ -3627,6 +3656,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
         r'[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}'
         r'-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
     )
+    maxDiff = 10000
 
     def _assert_describe(
         self,
@@ -3642,7 +3672,9 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             stmt = qlcompiler.compile_ast_to_ir(
                 qltree,
                 schema,
-                modaliases={None: 'test'},
+                options=qlcompiler.CompilerOptions(
+                    modaliases={None: 'test'},
+                ),
             )
 
             output = self.uuid_re.sub(
@@ -3789,13 +3821,19 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             r"""
             function stdgraphql::short_name(name: std::str) -> std::str {
+                orig_nativecode :=
+                    r"SELECT (((name)[5:] IF (name LIKE 'std::%') ELSE
+                      ((name)[9:] IF (name LIKE 'default::%') ELSE
+                      re_replace('(.+?)::(.+$)', r'\1__\2', name)))
+                      ++ '_Type')";
                 volatility := 'IMMUTABLE';
                 using (
                     SELECT (
-                        name[5:] IF name LIKE 'std::%' ELSE
-                        name[9:] IF name LIKE 'default::%' ELSE
-                        re_replace(r'(.+?)::(.+$)', r'\1__\2', name)
-                    ) ++ '_Type'
+                       ((name)[5:] IF (name LIKE 'std::%') ELSE
+                       ((name)[9:] IF (name LIKE 'default::%') ELSE
+                        re_replace('(.+?)::(.+$)', r'\1__\2', name)))
+                      ++ '_Type'
+                    )
                 )
             ;};
             """,
@@ -4411,7 +4449,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 LIMIT
                     1
                 );
-                CREATE SINGLE PROPERTY compprop := ('foo');
+                CREATE REQUIRED SINGLE PROPERTY compprop := ('foo');
             };
             """
         )
@@ -4458,7 +4496,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 LIMIT
                     1
                 );
-                CREATE SINGLE PROPERTY compprop := ('foo');
+                CREATE REQUIRED SINGLE PROPERTY compprop := ('foo');
             };
             """
         )
@@ -4574,4 +4612,16 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 };
             };
             """,
+        )
+
+    def test_describe_escape(self):
+        self._assert_describe(
+            r"""
+            function foo() -> str using ( SELECT r'\1' );
+            """,
+
+            'DESCRIBE OBJECT foo AS TEXT',
+
+            r"function test::foo() ->  std::str "
+            r"using (SELECT r'\1');"
         )

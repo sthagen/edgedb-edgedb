@@ -63,6 +63,7 @@ Set (
 
 from __future__ import annotations
 
+import dataclasses
 import typing
 import uuid
 
@@ -180,7 +181,6 @@ class BasePointerRef(ImmutableBase):
     union_components: typing.Set[BasePointerRef]
     union_is_concrete: bool
     has_properties: bool
-    required: bool
     is_derived: bool
     is_computable: bool
     # Relation cardinality in the direction specified
@@ -195,6 +195,10 @@ class BasePointerRef(ImmutableBase):
             return self.out_target
         else:
             return self.out_source
+
+    @property
+    def required(self) -> bool:
+        return self.out_cardinality.to_schema_value()[0]
 
 
 class PointerRef(BasePointerRef):
@@ -229,8 +233,11 @@ class TupleIndirectionLink(s_pointers.PseudoPointer):
     def get_name(self, schema: s_schema.Schema) -> str:
         return self._name
 
-    def get_cardinality(self, schema: s_schema.Schema) -> qltypes.Cardinality:
-        return qltypes.Cardinality.ONE
+    def get_cardinality(
+        self,
+        schema: s_schema.Schema
+    ) -> qltypes.SchemaCardinality:
+        return qltypes.SchemaCardinality.ONE
 
     def singular(
         self,
@@ -272,7 +279,7 @@ class TypeIntersectionLink(s_pointers.PseudoPointer):
         is_empty: bool,
         is_subtype: bool,
         rptr_specialization: typing.Iterable[PointerRef] = (),
-        cardinality: qltypes.Cardinality,
+        cardinality: qltypes.SchemaCardinality,
     ) -> None:
         name = 'optindirection' if optional else 'indirection'
         self._name = sn.Name(module='__type__', name=name)
@@ -287,7 +294,10 @@ class TypeIntersectionLink(s_pointers.PseudoPointer):
     def get_name(self, schema: s_schema.Schema) -> sn.Name:
         return self._name
 
-    def get_cardinality(self, schema: s_schema.Schema) -> qltypes.Cardinality:
+    def get_cardinality(
+        self,
+        schema: s_schema.Schema
+    ) -> qltypes.SchemaCardinality:
         return self._cardinality
 
     def get_computable(self, schema: s_schema.Schema) -> bool:
@@ -321,7 +331,8 @@ class TypeIntersectionLink(s_pointers.PseudoPointer):
             s_pointers.PointerDirection.Outbound
     ) -> bool:
         if direction is s_pointers.PointerDirection.Outbound:
-            return self.get_cardinality(schema) is qltypes.Cardinality.ONE
+            return (self.get_cardinality(schema) is
+                    qltypes.SchemaCardinality.ONE)
         else:
             return True
 
@@ -395,12 +406,27 @@ class Command(Base):
     __abstract_node__ = True
 
 
+@dataclasses.dataclass(frozen=True)
+class Param:
+    """Query parameter with it's schema type and IR type"""
+
+    name: str
+    """Parameter name"""
+
+    schema_type: s_types.Type
+    """Schema type"""
+
+    ir_type: TypeRef
+    """IR type reference"""
+
+
 class Statement(Command):
 
     expr: Set
     views: typing.Dict[sn.Name, s_types.Type]
-    params: typing.Dict[str, s_types.Type]
+    params: typing.List[Param]
     cardinality: qltypes.Cardinality
+    volatility: qltypes.Volatility
     stype: s_types.Type
     view_shapes: typing.Dict[so.Object, typing.List[s_pointers.Pointer]]
     view_shapes_metadata: typing.Dict[so.Object, ViewShapeMetadata]
@@ -484,6 +510,7 @@ class ConstantSet(ConstExpr):
 class Parameter(ImmutableExpr):
 
     name: str
+    optional: bool
     typeref: TypeRef
 
 
@@ -701,7 +728,7 @@ class ConfigCommand(Command):
     __abstract_node__ = True
     name: str
     system: bool
-    cardinality: qltypes.Cardinality
+    cardinality: qltypes.SchemaCardinality
     requires_restart: bool
     backend_setting: str
     scope_tree: ScopeTreeNode

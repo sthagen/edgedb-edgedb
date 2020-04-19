@@ -42,6 +42,8 @@ from edb.schema import pointers as s_pointers
 from edb.schema import schema as s_schema
 from edb.schema import types as s_types
 
+from .options import GlobalCompilerOptions
+
 if TYPE_CHECKING:
     from edb.schema import objtypes as s_objtypes
     from edb.schema import sources as s_sources
@@ -88,6 +90,15 @@ class StatementMetadata:
     iterator_target: bool = False
 
 
+@dataclasses.dataclass
+class ScopeInfo:
+    path_scope: irast.ScopeTreeNode
+    pinned_path_id_ns: Optional[FrozenSet[str]] = None
+    tentative_work: List[CompletionWorkCallback] = (
+        dataclasses.field(default_factory=list)
+    )
+
+
 class CompletionWorkCallback(Protocol):
 
     def __call__(
@@ -114,6 +125,7 @@ class PendingCardinality(NamedTuple):
     specified_cardinality: Optional[qltypes.Cardinality]
     source_ctx: Optional[parsing.ParserContext]
     callbacks: List[PointerCardinalityCallback]
+    is_mut_assignment: bool
 
 
 class PointerRefCache(
@@ -153,8 +165,8 @@ class Environment:
     orig_schema: s_schema.Schema
     """A Schema as it was at the start of the compilation."""
 
-    parent_object_type: Optional[s_obj.ObjectMeta]
-    """The type of a schema object, if the expression is part of its def."""
+    options: GlobalCompilerOptions
+    """Compiler options."""
 
     path_scope: irast.ScopeTreeNode
     """Overrall expression path scope tree."""
@@ -162,12 +174,9 @@ class Environment:
     schema_view_cache: Dict[s_types.Type, s_types.Type]
     """Type cache used by schema-level views."""
 
-    query_parameters: Dict[str, s_types.Type]
+    query_parameters: Dict[str, irast.Param]
     """A mapping of query parameters to their types.  Gets populated during
     the compilation."""
-
-    schema_view_mode: bool
-    """Use material types for pointer targets in schema views."""
 
     set_types: Dict[irast.Set, s_types.Type]
     """A dictionary of all Set instances and their schema types."""
@@ -187,8 +196,10 @@ class Environment:
         qltypes.Cardinality]
     """A dictionary of all expressions and their inferred cardinality."""
 
-    constant_folding: bool
-    """Enables constant folding optimization (enabled by default)."""
+    inferred_volatility: Dict[
+        irast.Base,
+        qltypes.Volatility]
+    """A dictionary of expressions and their inferred volatility."""
 
     view_shapes: Dict[
         Union[s_types.Type, s_pointers.PointerLike],
@@ -198,23 +209,11 @@ class Environment:
 
     view_shapes_metadata: Dict[s_types.Type, irast.ViewShapeMetadata]
 
-    func_params: Optional[s_func.ParameterLikeList]
-    """If compiling a function body, a list of function parameters."""
-
-    json_parameters: bool
-    """Force types of all parameters to std::json"""
-
-    session_mode: bool
-    """Whether there is a specific session."""
-
     schema_refs: Set[s_obj.Object]
     """A set of all schema objects referenced by an expression."""
 
     created_schema_objects: Set[s_obj.Object]
     """A set of all schema objects derived by this compilation."""
-
-    allow_generic_type_output: bool
-    """Whether to allow the expression to be of a generic type."""
 
     # Caches for costly operations in edb.ir.typeutils
     ptr_ref_cache: PointerRefCache
@@ -225,35 +224,27 @@ class Environment:
         *,
         schema: s_schema.Schema,
         path_scope: irast.ScopeTreeNode,
-        parent_object_type: Optional[s_obj.ObjectMeta]=None,
-        schema_view_mode: bool=False,
-        constant_folding: bool=True,
-        json_parameters: bool=False,
-        session_mode: bool=False,
-        allow_generic_type_output: bool=False,
-        func_params: Optional[s_func.ParameterLikeList]=None,
+        options: Optional[GlobalCompilerOptions]=None,
     ) -> None:
+        if options is None:
+            options = GlobalCompilerOptions()
+
+        self.options = options
         self.schema = schema
         self.orig_schema = schema
         self.path_scope = path_scope
         self.schema_view_cache = {}
         self.query_parameters = {}
-        self.schema_view_mode = schema_view_mode
         self.set_types = {}
         self.type_origins = {}
         self.inferred_types = {}
         self.inferred_cardinality = {}
-        self.constant_folding = constant_folding
+        self.inferred_volatility = {}
         self.view_shapes = collections.defaultdict(list)
         self.view_shapes_metadata = collections.defaultdict(
             irast.ViewShapeMetadata)
-        self.json_parameters = json_parameters
-        self.session_mode = session_mode
-        self.allow_generic_type_output = allow_generic_type_output
         self.schema_refs = set()
         self.created_schema_objects = set()
-        self.func_params = func_params
-        self.parent_object_type = parent_object_type
         self.ptr_ref_cache = PointerRefCache()
         self.type_ref_cache = {}
 
@@ -426,14 +417,8 @@ class ContextLevel(compiler.ContextLevel):
     path_scope: irast.ScopeTreeNode
     """Path scope tree, with per-lexical-scope levels."""
 
-    path_scope_map: Dict[
-        irast.Set,
-        Tuple[irast.ScopeTreeNode, Optional[FrozenSet[str]]],
-    ]
-    """A dictionary of scope trees that are appropriate for a given view.
-    The second element in the value tuple is an optional pinned path id
-    namespace that must be used for all references to the view.
-    """
+    path_scope_map: Dict[irast.Set, ScopeInfo]
+    """A dictionary of scope info that are appropriate for a given view."""
 
     iterator_ctx: Optional[ContextLevel]
     """The context of the statement where all iterators should be placed."""
@@ -476,6 +461,12 @@ class ContextLevel(compiler.ContextLevel):
 
     in_conditional: Optional[parsing.ParserContext]
     """Whether currently in a conditional branch."""
+
+    in_temp_scope: bool
+    """Whether currently in a temporary scope."""
+
+    tentative_work: List[CompletionWorkCallback]
+    """Callbacks that rely on scope and scheduled tentatively."""
 
     def __init__(
         self,
@@ -534,6 +525,8 @@ class ContextLevel(compiler.ContextLevel):
             self.empty_result_type_hint = None
             self.defining_view = None
             self.in_conditional = None
+            self.in_temp_scope = False
+            self.tentative_work = []
 
         else:
             self.env = prevlevel.env
@@ -575,6 +568,8 @@ class ContextLevel(compiler.ContextLevel):
             self.empty_result_type_hint = prevlevel.empty_result_type_hint
             self.defining_view = prevlevel.defining_view
             self.in_conditional = prevlevel.in_conditional
+            self.in_temp_scope = prevlevel.in_temp_scope
+            self.tentative_work = prevlevel.tentative_work
 
             if mode == ContextSwitchMode.SUBQUERY:
                 self.anchors = prevlevel.anchors.copy()
@@ -636,6 +631,8 @@ class ContextLevel(compiler.ContextLevel):
                     prevlevel.path_scope = self.env.path_scope
 
                 self.path_scope = prevlevel.path_scope.copy()
+                self.in_temp_scope = True
+                self.tentative_work = list(prevlevel.tentative_work)
 
             if mode in {ContextSwitchMode.NEWFENCE,
                         ContextSwitchMode.NEWFENCE_TEMP}:

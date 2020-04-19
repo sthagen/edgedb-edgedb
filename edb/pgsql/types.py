@@ -24,7 +24,6 @@ import functools
 from typing import *
 
 from edb.common import uuidgen
-from edb.edgeql import qltypes
 
 from edb.ir import ast as irast
 from edb.ir import typeutils as irtyputils
@@ -150,7 +149,7 @@ def pg_type_from_object(
     if isinstance(obj, s_scalars.ScalarType):
         return pg_type_from_scalar(schema, obj)
 
-    elif obj.is_type() and obj.is_anytuple():
+    elif obj.is_type() and obj.is_anytuple(schema):
         return ('record',)
 
     elif isinstance(obj, s_abc.Tuple):
@@ -174,7 +173,7 @@ def pg_type_from_object(
     elif isinstance(obj, s_objtypes.ObjectType):
         return ('uuid',)
 
-    elif obj.is_type() and obj.is_any():
+    elif obj.is_type() and obj.is_any(schema):
         return ('anyelement',)
 
     else:
@@ -265,7 +264,7 @@ class _PointerStorageInfo:
         if pointer_target is not None:
             if pointer_target.is_object_type():
                 column_type = ('uuid',)
-            elif pointer_target.is_tuple():
+            elif pointer_target.is_tuple(schema):
                 column_type = common.get_backend_name(schema, pointer_target,
                                                       catenate=False)
             else:
@@ -459,7 +458,7 @@ def get_ptrref_storage_info(
 
 
 def _storable_in_source(ptrref: irast.PointerRef) -> bool:
-    return ptrref.out_cardinality is qltypes.Cardinality.ONE
+    return ptrref.out_cardinality.is_single()
 
 
 def _storable_in_pointer(ptrref: irast.PointerRef) -> bool:
@@ -467,7 +466,7 @@ def _storable_in_pointer(ptrref: irast.PointerRef) -> bool:
         return all(_storable_in_pointer(c) for c in ptrref.union_components)
     else:
         return (
-            ptrref.out_cardinality is qltypes.Cardinality.MANY
+            ptrref.out_cardinality.is_multi()
             or ptrref.has_properties
         )
 
@@ -568,12 +567,12 @@ class TypeDesc:
                     maintype=t.id, name=tn, collection=t.schema_name,
                     subtypes=subtypes, dimensions=dimensions,
                     position=i if not is_root else None)
-            elif t.is_type() and t.is_any():
+            elif t.is_type() and t.is_any(schema):
                 desc = TypeDescNode(
                     maintype=t.id, name=tn, collection=None,
                     subtypes=[], dimensions=[],
                     position=i if not is_root else None)
-            elif t.is_type() and t.is_anytuple():
+            elif t.is_type() and t.is_anytuple(schema):
                 desc = TypeDescNode(
                     maintype=t.id, name=tn, collection=None,
                     subtypes=[], dimensions=[],

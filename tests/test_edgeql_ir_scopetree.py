@@ -45,9 +45,19 @@ class TestEdgeQLIRScopeTree(tb.BaseEdgeQLCompilerTest):
         qltree = qlparser.parse(source)
         ir = compiler.compile_ast_to_ir(qltree, self.schema)
 
+        root = ir.scope_tree
+        if len(root.children) != 1:
+            self.fail(
+                f'Scope tree root is expected to have only one child, got'
+                f' {len(root.children)}'
+                f' \n{root.pformat()}'
+            )
+
+        scope_tree = next(iter(root.children))
+
         path_scope = self.UUID_RE.sub(
             '@SID@',
-            textwrap.indent(ir.scope_tree.pformat(), '    '),
+            textwrap.indent(scope_tree.pformat(), '    '),
         )
         expected_scope = textwrap.indent(
             textwrap.dedent(expected).strip(' \n'), '    ')
@@ -387,22 +397,21 @@ class TestEdgeQLIRScopeTree(tb.BaseEdgeQLCompilerTest):
                     "(__derived__::__derived__|U@@w~1)\
 .>cards[IS test::Card]": {
                         "BRANCH": {
-                            "(__derived__::__derived__|U@@w~1)"
+                            "(__derived__::__derived__|U@@w~1)": {
+                                "FENCE": {
+                                    "(test::User)",
+                                    "FENCE": {
+                                        "(test::User).>name[IS std::str]"
+                                    }
+                                }
+                            }
                         },
                         "FENCE": {
                             "(test::Card)",
                             "FENCE": {
                                 "(__derived__::__derived__|U@@w~1)\
 .>deck[IS test::Card]": {
-                                    "(__derived__::__derived__|U@@w~1)": {
-                                        "FENCE": {
-                                            "(test::User)",
-                                            "FENCE": {
-                                                "(test::User)\
-.>name[IS std::str]"
-                                            }
-                                        }
-                                    }
+                                    "(__derived__::__derived__|U@@w~1)"
                                 }
                             }
                         }

@@ -422,6 +422,11 @@ class IntrospectionMech:
             else:
                 initial_value = None
 
+            if row['nativecode']:
+                nativecode = self.unpack_expr(row['nativecode'], schema)
+            else:
+                nativecode = None
+
             func_data = {
                 'id': row['id'],
                 'name': name,
@@ -434,6 +439,7 @@ class IntrospectionMech:
                 'sql_func_has_out_params': row['sql_func_has_out_params'],
                 'error_on_null_result': row['error_on_null_result'],
                 'code': row['code'],
+                'nativecode': nativecode,
                 'initial_value': initial_value,
                 'session_only': row['session_only'],
                 'volatility': row['volatility'],
@@ -545,17 +551,17 @@ class IntrospectionMech:
             )
 
         elif t['maintype'] == 'anytype':
-            scls = s_pseudo.Any.get(schema)
+            scls = s_pseudo.PseudoType.get(schema, 'anytype')
 
         elif t['maintype'] == 'anytuple':
-            scls = s_pseudo.AnyTuple.get(schema)
+            scls = s_pseudo.PseudoType.get(schema, 'anytuple')
 
         else:
             type_id = t['maintype']
             if type_id == s_obj.get_known_type_id('anytype'):
-                scls = s_pseudo.Any.get(schema)
+                scls = s_pseudo.PseudoType.get(schema, 'anytype')
             elif type_id == s_obj.get_known_type_id('anytuple'):
-                scls = s_pseudo.AnyTuple.get(schema)
+                scls = s_pseudo.PseudoType.get(schema, 'anytuple')
             else:
                 scls = schema.get_by_id(t['maintype'])
 
@@ -694,7 +700,7 @@ class IntrospectionMech:
             required = r['required']
 
             if r['cardinality']:
-                cardinality = qltypes.Cardinality(r['cardinality'])
+                cardinality = qltypes.SchemaCardinality(r['cardinality'])
             else:
                 cardinality = None
 
@@ -773,7 +779,7 @@ class IntrospectionMech:
             schema, target = self.unpack_typeref(r['target'], schema)
 
             if r['cardinality']:
-                cardinality = qltypes.Cardinality(r['cardinality'])
+                cardinality = qltypes.SchemaCardinality(r['cardinality'])
             else:
                 cardinality = None
 

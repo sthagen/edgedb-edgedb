@@ -28,11 +28,16 @@ import uuid
 from edb import errors
 
 from edb.common import adapter
+from edb.common import checked
+from edb.common import markup
+from edb.common import ordered
 from edb.common import parsing
+from edb.common import struct
+
 from edb.edgeql import ast as qlast
+from edb.edgeql import compiler as qlcompiler
 from edb.edgeql import qltypes
 
-from edb.common import checked, markup, ordered, struct
 
 from . import expr as s_expr
 from . import name as sn
@@ -434,8 +439,6 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         astnode: qlast.DDLOperation,
         name: str,
     ) -> Optional[str]:
-        from edb.edgeql import compiler as qlcompiler
-
         orig_text_expr = qlast.get_ddl_field_value(astnode, f'orig_{name}')
         if orig_text_expr:
             orig_text = qlcompiler.evaluate_ast_to_python_val(
@@ -1084,7 +1087,7 @@ class ObjectCommand(
             if subnode is not None:
                 node.commands.append(subnode)
 
-    def get_ast_attr_for_field(self, field: so.Field[Any]) -> Optional[str]:
+    def get_ast_attr_for_field(self, field: str) -> Optional[str]:
         return None
 
     @classmethod
@@ -1495,11 +1498,14 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         dummy = cast(so.Object_T, _dummy_object)
         with self.new_context(schema, context, dummy):
             if self.if_not_exists:
-                try:
-                    self.scls = self.get_object(schema, context)
-                except errors.InvalidReferenceError:
-                    pass
-                else:
+                scls = self.get_object(schema, context, default=None)
+
+                if scls is not None:
+                    parent_ctx = context.parent()
+                    if parent_ctx is not None and not self.canonical:
+                        parent_ctx.op.discard(self)
+
+                    self.scls = scls
                     return schema
 
             schema = self._create_begin(schema, context)
@@ -1699,6 +1705,9 @@ class RenameQualifiedObject(AlterObjectFragment, Generic[so.Object_T]):
 class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
     _delta_action = 'alter'
 
+    #: If True, apply the command only if the object exists.
+    if_exists = struct.Field(bool, default=False)
+
     @classmethod
     def _cmd_tree_from_ast(
         cls,
@@ -1825,7 +1834,15 @@ class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         schema: s_schema.Schema,
         context: CommandContext,
     ) -> s_schema.Schema:
-        scls = self.get_object(schema, context)
+
+        if not context.canonical and self.if_exists:
+            scls = self.get_object(schema, context, default=None)
+            if scls is None:
+                context.current().op.discard(self)
+                return schema
+        else:
+            scls = self.get_object(schema, context)
+
         self.scls = scls
 
         with self.new_context(schema, context, scls):
@@ -2043,7 +2060,6 @@ class AlterObjectProperty(Command):
         astnode: qlast.DDLOperation,
         context: CommandContext,
     ) -> AlterObjectProperty:
-        from edb.edgeql import compiler as qlcompiler
         assert isinstance(astnode, qlast.BaseSetField)
 
         propname = astnode.name

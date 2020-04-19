@@ -31,8 +31,8 @@ from edb import errors
 from edb.common import parsing
 
 from edb.ir import ast as irast
+from edb.ir import typeutils
 
-from edb.schema import functions as s_func
 from edb.schema import modules as s_mod
 from edb.schema import name as s_name
 from edb.schema import objects as s_obj
@@ -45,74 +45,63 @@ from edb.schema import types as s_types
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
 from edb.edgeql import parser as qlparser
+from edb.edgeql.compiler.inference import cardinality as inf_card
 
 from . import astutils
 from . import context
 from . import dispatch
 from . import inference
+from . import options as coptions
 from . import pathctx
 from . import setgen
 from . import schemactx
 
 
 def init_context(
-        *,
-        schema: s_schema.Schema,
-        func_params: Optional[s_func.ParameterLikeList]=None,
-        parent_object_type: Optional[s_obj.ObjectMeta]=None,
-        modaliases: Optional[Mapping[Optional[str], str]]=None,
-        anchors: Optional[Mapping[str, Any]]=None,
-        singletons: Optional[Iterable[s_types.Type]]=None,
-        security_context: Optional[str]=None,
-        derived_target_module: Optional[str]=None,
-        result_view_name: Optional[s_name.SchemaName]=None,
-        schema_view_mode: bool=False,
-        disable_constant_folding: bool=False,
-        allow_generic_type_output: bool=False,
-        implicit_limit: int=0,
-        implicit_id_in_shapes: bool=False,
-        implicit_tid_in_shapes: bool=False,
-        json_parameters: bool=False,
-        session_mode: bool=False) -> \
-        context.ContextLevel:
+    *,
+    schema: s_schema.Schema,
+    options: coptions.CompilerOptions,
+) -> context.ContextLevel:
+
     if not schema.get_global(s_mod.Module, '__derived__', None):
         schema, _ = s_mod.Module.create_in_schema(schema, name='__derived__')
     env = context.Environment(
         schema=schema,
         path_scope=irast.new_scope_tree(),
-        constant_folding=not disable_constant_folding,
-        func_params=func_params,
-        parent_object_type=parent_object_type,
-        schema_view_mode=schema_view_mode,
-        json_parameters=json_parameters,
-        session_mode=session_mode,
-        allow_generic_type_output=allow_generic_type_output)
+        options=options,
+    )
     ctx = context.ContextLevel(None, context.ContextSwitchMode.NEW, env=env)
     _ = context.CompilerContext(initial=ctx)
 
-    if singletons:
+    if options.singletons:
         # The caller wants us to treat these type references
         # as singletons for the purposes of the overall expression
         # cardinality inference, so we set up the scope tree in
         # the necessary fashion.
-        for singleton in singletons:
+        for singleton in options.singletons:
             path_id = pathctx.get_path_id(singleton, ctx=ctx)
             ctx.env.path_scope.attach_path(path_id)
 
         ctx.path_scope = ctx.env.path_scope.attach_fence()
 
-    if modaliases:
-        ctx.modaliases.update(modaliases)
+    ctx.modaliases.update(options.modaliases)
 
-    if anchors:
+    if options.anchors:
         with ctx.newscope(fenced=True) as subctx:
-            populate_anchors(anchors, ctx=subctx)
+            populate_anchors(options.anchors, ctx=subctx)
 
-    ctx.derived_target_module = derived_target_module
-    ctx.toplevel_result_view_name = result_view_name
-    ctx.implicit_id_in_shapes = implicit_id_in_shapes
-    ctx.implicit_tid_in_shapes = implicit_tid_in_shapes
-    ctx.implicit_limit = implicit_limit
+    if options.path_prefix_anchor is not None:
+        path_prefix = options.anchors[options.path_prefix_anchor]
+        assert isinstance(path_prefix, s_types.Type)
+        ctx.partial_path_prefix = setgen.class_set(path_prefix, ctx=ctx)
+        ctx.partial_path_prefix.anchor = options.path_prefix_anchor
+        ctx.partial_path_prefix.show_as_anchor = options.path_prefix_anchor
+
+    ctx.derived_target_module = options.derived_target_module
+    ctx.toplevel_result_view_name = options.result_view_name
+    ctx.implicit_id_in_shapes = options.implicit_id_in_shapes
+    ctx.implicit_tid_in_shapes = options.implicit_tid_in_shapes
+    ctx.implicit_limit = options.implicit_limit
 
     return ctx
 
@@ -146,9 +135,11 @@ def fini_expression(
         cardinality = inference.infer_cardinality(
             ir, scope_tree=ctx.path_scope, env=ctx.env)
     else:
-        cardinality = qltypes.Cardinality.ONE
+        cardinality = qltypes.Cardinality.AT_MOST_ONE
 
-    if ctx.env.schema_view_mode:
+    volatility = inference.infer_volatility(ir, env=ctx.env)
+
+    if ctx.env.options.schema_view_mode:
         for view in ctx.view_nodes.values():
             if view.is_collection():
                 continue
@@ -166,11 +157,11 @@ def fini_expression(
                 tgt = vptr.get_target(ctx.env.schema)
                 if (tgt.is_union_type(ctx.env.schema)
                         and tgt.get_is_opaque_union(ctx.env.schema)):
-                    # Opaque unions should manifest as std::Object
+                    # Opaque unions should manifest as std::BaseObject
                     # in schema views.
                     ctx.env.schema = vptr.set_target(
                         ctx.env.schema,
-                        ctx.env.schema.get('std::Object'),
+                        ctx.env.schema.get('std::BaseObject'),
                     )
 
                 if not hasattr(vptr, 'get_pointers'):
@@ -183,11 +174,14 @@ def fini_expression(
     expr_type = inference.infer_type(ir, ctx.env)
 
     in_polymorphic_func = (
-        ctx.env.func_params is not None and
-        ctx.env.func_params.has_polymorphic(ctx.env.schema)
+        ctx.env.options.func_params is not None and
+        ctx.env.options.func_params.has_polymorphic(ctx.env.schema)
     )
 
-    if not in_polymorphic_func and not ctx.env.allow_generic_type_output:
+    if (
+        not in_polymorphic_func
+        and not ctx.env.options.allow_generic_type_output
+    ):
         anytype = expr_type.find_any(ctx.env.schema)
         if anytype is not None:
             raise errors.QueryError(
@@ -204,11 +198,12 @@ def fini_expression(
 
     result = irast.Statement(
         expr=ir,
-        params=ctx.env.query_parameters,
+        params=list(ctx.env.query_parameters.values()),
         views=ctx.view_nodes,
         source_map=ctx.source_map,
         scope_tree=ctx.path_scope,
         cardinality=cardinality,
+        volatility=volatility,
         stype=expr_type,
         view_shapes=ctx.env.view_shapes,
         view_shapes_metadata=ctx.env.view_shapes_metadata,
@@ -355,16 +350,18 @@ def populate_anchors(
 
 
 def declare_view(
-        expr: qlast.Expr, alias: str, *,
-        fully_detached: bool=False,
-        temporary_scope: bool=True,
-        must_be_used: bool=False,
-        path_id_namespace: Optional[FrozenSet[str]]=None,
-        ctx: context.ContextLevel) -> irast.Set:
+    expr: qlast.Expr,
+    alias: str,
+    *,
+    fully_detached: bool=False,
+    must_be_used: bool=False,
+    path_id_namespace: Optional[FrozenSet[str]]=None,
+    ctx: context.ContextLevel,
+) -> irast.Set:
 
     pinned_pid_ns = path_id_namespace
 
-    with ctx.newscope(temporary=temporary_scope, fenced=True) as subctx:
+    with ctx.newscope(temporary=True, fenced=True) as subctx:
         if path_id_namespace is not None:
             subctx.path_id_namespace = path_id_namespace
 
@@ -404,7 +401,15 @@ def declare_view(
         view_set = dispatch.compile(astutils.ensure_qlstmt(expr), ctx=subctx)
         assert isinstance(view_set, irast.Set)
 
-        ctx.path_scope_map[view_set] = subctx.path_scope, pinned_pid_ns
+        ctx.path_scope_map[view_set] = context.ScopeInfo(
+            path_scope=subctx.path_scope,
+            pinned_path_id_ns=pinned_pid_ns,
+            tentative_work=[
+                cb
+                for cb in subctx.tentative_work
+                if cb not in ctx.tentative_work
+            ],
+        )
 
         if not fully_detached:
             # The view path id _itself_ should not be in the nested namespace.
@@ -455,9 +460,10 @@ def declare_view_from_schema(
 
 
 def infer_expr_cardinality(
-        *,
-        irexpr: irast.Set,
-        ctx: context.ContextLevel) -> qltypes.Cardinality:
+    *,
+    irexpr: irast.Set,
+    ctx: context.ContextLevel,
+) -> qltypes.Cardinality:
 
     scope = pathctx.get_set_scope(ir_set=irexpr, ctx=ctx)
     if scope is None:
@@ -466,33 +472,64 @@ def infer_expr_cardinality(
 
 
 def _infer_pointer_cardinality(
-        *,
-        ptrcls: s_pointers.Pointer,
-        irexpr: irast.Set,
-        specified_card: Optional[qltypes.Cardinality] = None,
-        source_ctx: Optional[parsing.ParserContext] = None,
-        ctx: context.ContextLevel) -> None:
+    *,
+    ptrcls: s_pointers.Pointer,
+    irexpr: irast.Set,
+    specified_card: Optional[qltypes.Cardinality] = None,
+    is_mut_assignment: bool = False,
+    source_ctx: Optional[parsing.ParserContext] = None,
+    ctx: context.ContextLevel,
+) -> None:
 
+    # Infer cardinality and convert it back to schema values of "ONE/MANY".
     inferred_card = infer_expr_cardinality(irexpr=irexpr, ctx=ctx)
-    if specified_card is None or inferred_card is specified_card:
+
+    if specified_card is None:
         ptr_card = inferred_card
     else:
-        if specified_card is qltypes.Cardinality.MANY:
-            # Explicit many foo := <expr>, just take it.
-            ptr_card = specified_card
-        else:
-            # Specified cardinality is ONE, but we inferred MANY, this
-            # is an error.
-            raise errors.QueryError(
-                f'possibly more than one element returned by an '
-                f'expression for a computable '
-                f'{ptrcls.get_verbosename(ctx.env.schema)} '
-                f"declared as 'single'",
-                context=source_ctx
+        if inf_card.is_subset_cardinality(inferred_card, specified_card):
+            # The inferred cardinality is within the boundaries of
+            # specified cardinality, use the maximum lower and upper bounds.
+            ptr_card = inf_card.max_cardinality(
+                (specified_card, inferred_card),
             )
+        else:
+            sp_req, sp_card = specified_card.to_schema_value()
+            ic_req, ic_card = inferred_card.to_schema_value()
+            # Specified cardinality is stricter than inferred (e.g.
+            # ONE vs MANY), this is an error.
+            if sp_req and not ic_req:
+                if is_mut_assignment:
+                    # For mutations we punt the lower cardinality bound
+                    # check to the runtime constraint.  Doing it statically
+                    # is impractical because it is impossible to prove
+                    # non-emptiness of object-selecting expressions bound
+                    # for required links.
+                    ptr_card = inf_card.cartesian_cardinality(
+                        (specified_card, inferred_card),
+                    )
+                else:
+                    raise errors.QueryError(
+                        f'possibly an empty set returned by an '
+                        f'expression for a computable '
+                        f'{ptrcls.get_verbosename(ctx.env.schema)} '
+                        f"declared as 'required'",
+                        context=source_ctx
+                    )
+            else:
+                raise errors.QueryError(
+                    f'possibly more than one element returned by an '
+                    f'expression for a computable '
+                    f'{ptrcls.get_verbosename(ctx.env.schema)} '
+                    f"declared as 'single'",
+                    context=source_ctx
+                )
 
+    required, card = ptr_card.to_schema_value()
     ctx.env.schema = ptrcls.set_field_value(
-        ctx.env.schema, 'cardinality', ptr_card)
+        ctx.env.schema, 'cardinality', card)
+    ctx.env.schema = ptrcls.set_field_value(
+        ctx.env.schema, 'required', required)
     _update_cardinality_in_derived(ptrcls, ctx=ctx)
     _update_cardinality_callbacks(ptrcls, ctx=ctx)
 
@@ -522,11 +559,14 @@ def _update_cardinality_callbacks(
 
 
 def pend_pointer_cardinality_inference(
-        *,
-        ptrcls: s_pointers.Pointer,
-        specified_card: Optional[qltypes.Cardinality] = None,
-        source_ctx: Optional[parsing.ParserContext] = None,
-        ctx: context.ContextLevel) -> None:
+    *,
+    ptrcls: s_pointers.Pointer,
+    specified_required: bool = False,
+    specified_card: Optional[qltypes.SchemaCardinality] = None,
+    is_mut_assignment: bool = False,
+    source_ctx: Optional[parsing.ParserContext] = None,
+    ctx: context.ContextLevel,
+) -> None:
 
     existing = ctx.pending_cardinality.get(ptrcls)
     if existing is not None:
@@ -534,8 +574,16 @@ def pend_pointer_cardinality_inference(
     else:
         callbacks = []
 
+    # Convert the SchemaCardinality into Cardinality used for inference.
+    if specified_card is None:
+        sc = None
+    else:
+        sc = qltypes.Cardinality.from_schema_value(
+            specified_required, specified_card)
+
     ctx.pending_cardinality[ptrcls] = context.PendingCardinality(
-        specified_cardinality=specified_card,
+        specified_cardinality=sc,
+        is_mut_assignment=is_mut_assignment,
         source_ctx=source_ctx,
         callbacks=callbacks,
     )
@@ -558,12 +606,14 @@ def once_pointer_cardinality_is_inferred(
 
 
 def get_pointer_cardinality_later(
-        *,
-        ptrcls: s_pointers.PointerLike,
-        irexpr: irast.Set,
-        specified_card: Optional[qltypes.Cardinality] = None,
-        source_ctx: Optional[parsing.ParserContext] = None,
-        ctx: context.ContextLevel) -> None:
+    *,
+    ptrcls: s_pointers.PointerLike,
+    irexpr: irast.Set,
+    specified_card: Optional[qltypes.Cardinality] = None,
+    is_mut_assignment: bool = False,
+    source_ctx: Optional[parsing.ParserContext] = None,
+    ctx: context.ContextLevel,
+) -> None:
 
     at_stmt_fini(
         functools.partial(
@@ -571,8 +621,11 @@ def get_pointer_cardinality_later(
             ptrcls=ptrcls,
             irexpr=irexpr,
             specified_card=specified_card,
-            source_ctx=source_ctx),
-        ctx=ctx)
+            is_mut_assignment=is_mut_assignment,
+            source_ctx=source_ctx,
+        ),
+        ctx=ctx,
+    )
 
 
 def get_expr_cardinality_later(
@@ -586,9 +639,7 @@ def get_expr_cardinality_later(
         card = infer_expr_cardinality(irexpr=irexpr, ctx=ctx)
         setattr(target, field, card)
 
-    at_stmt_fini(
-        functools.partial(cb, irexpr=irexpr),
-        ctx=ctx)
+    at_stmt_fini(functools.partial(cb, irexpr=irexpr), ctx=ctx)
 
 
 def ensure_ptrref_cardinality(
@@ -605,13 +656,13 @@ def ensure_ptrref_cardinality(
             *,
             ctx: context.ContextLevel,
         ) -> None:
-            if ptrcls.singular(ctx.env.schema, ptrref.direction):
-                ptrref.dir_cardinality = qltypes.Cardinality.ONE
-            else:
-                ptrref.dir_cardinality = qltypes.Cardinality.MANY
-            out_cardinality = ptrcls.get_cardinality(ctx.env.schema)
-            assert out_cardinality is not None
-            ptrref.out_cardinality = out_cardinality
+
+            out_card, dir_card = typeutils.cardinality_from_ptrcls(
+                ctx.env.schema, ptrcls, direction=ptrref.direction)
+            assert dir_card is not None
+            assert out_card is not None
+            ptrref.dir_cardinality = dir_card
+            ptrref.out_cardinality = out_card
 
         once_pointer_cardinality_is_inferred(
             ptrcls, _update_ref_cardinality, ctx=ctx)
@@ -633,7 +684,7 @@ def enforce_singleton_now(
         env=ctx.env,
     )
 
-    if cardinality != qltypes.Cardinality.ONE:
+    if cardinality.is_multi():
         raise errors.QueryError(
             'possibly more than one element returned by an expression '
             'where only singletons are allowed',
@@ -641,20 +692,14 @@ def enforce_singleton_now(
 
 
 def enforce_singleton(
-        irexpr: irast.Base, *,
-        ctx: context.ContextLevel) -> None:
-
-    if not ctx.defining_view:
-        # We cannot reliably defer cardinality inference operations
-        # because the current scope is temporary and will not be
-        # accessible when the scheduled inference will run.
-        at_stmt_fini(
-            functools.partial(
-                enforce_singleton_now,
-                irexpr=irexpr
-            ),
-            ctx=ctx
-        )
+    irexpr: irast.Base,
+    *,
+    ctx: context.ContextLevel,
+) -> None:
+    at_stmt_fini(
+        functools.partial(enforce_singleton_now, irexpr=irexpr),
+        ctx=ctx,
+    )
 
 
 def enforce_pointer_cardinality(
@@ -665,16 +710,25 @@ def enforce_pointer_cardinality(
     ctx: context.ContextLevel,
 ) -> None:
 
-    if not ctx.defining_view:
-        def _enforce_singleton(ctx: context.ContextLevel) -> None:
-            if ptrcls.singular(ctx.env.schema):
-                enforce_singleton_now(irexpr, singletons=singletons, ctx=ctx)
+    def _enforce_singleton(ctx: context.ContextLevel) -> None:
+        if ptrcls.singular(ctx.env.schema):
+            enforce_singleton_now(irexpr, singletons=singletons, ctx=ctx)
 
-        at_stmt_fini(_enforce_singleton, ctx=ctx)
+    at_stmt_fini(_enforce_singleton, ctx=ctx)
 
 
 def at_stmt_fini(
-    cb: context.CompletionWorkCallback, *,
+    cb: context.CompletionWorkCallback,
+    *,
     ctx: context.ContextLevel,
 ) -> None:
-    ctx.completion_work.append(cb)
+
+    if ctx.in_temp_scope:
+        # We cannot reliably defer cardinality inference operations
+        # because the current scope is temporary and will not be
+        # accessible when the scheduled inference will run.
+        # If, however, the temp scope is later merged into the main
+        # scope, we need to schedule the inference operations properly.
+        ctx.tentative_work.append(cb)
+    else:
+        ctx.completion_work.append(cb)

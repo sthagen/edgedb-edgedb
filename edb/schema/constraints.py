@@ -24,6 +24,7 @@ from edb import errors
 
 from edb import edgeql
 from edb.edgeql import ast as qlast
+from edb.edgeql import compiler as qlcompiler
 from edb.edgeql import qltypes as ft
 
 from . import abc as s_abc
@@ -132,10 +133,10 @@ class Constraint(referencing.ReferencedInheritingObject,
     def _dummy_subject(
         cls,
         schema: s_schema.Schema,
-    ) -> Optional[s_pseudo.Any]:
+    ) -> Optional[s_pseudo.PseudoType]:
         # Point subject placeholder to a dummy pointer to make EdgeQL
         # pipeline happy.
-        return s_pseudo.Any.get(schema)
+        return s_pseudo.PseudoType.get(schema, 'anytype')
 
     @classmethod
     def get_concrete_constraint_attrs(
@@ -239,8 +240,10 @@ class Constraint(referencing.ReferencedInheritingObject,
         final_expr = s_expr.Expression.compiled(
             s_expr.Expression.from_ast(expr_ql, schema, module_aliases),
             schema=schema,
-            modaliases=module_aliases,
-            anchors={qlast.Subject().name: subject},
+            options=qlcompiler.CompilerOptions(
+                modaliases=module_aliases,
+                anchors={qlast.Subject().name: subject},
+            ),
         )
 
         bool_t: s_scalars.ScalarType = schema.get('std::bool')
@@ -491,7 +494,6 @@ class ConstraintCommand(
         field: so.Field[Any],
         value: s_expr.Expression,
     ) -> s_expr.Expression:
-        from edb.edgeql import compiler as qlcompiler
 
         if field.name in ('expr', 'subjectexpr'):
             if not isinstance(self, CreateConstraint):
@@ -500,14 +502,10 @@ class ConstraintCommand(
             params = self._get_params(schema, context)
 
             anchors: Dict[str, Any] = {}
-            # type ignore below, because so.ObjectList[Parameter]
-            # is in practice s_func.ParameterLikeList
-            param_anchors, _ = (
-                qlcompiler.get_param_anchors_for_callable(
-                    params,  # type: ignore
-                    schema,
-                    inlined_defaults=False
-                )
+            param_anchors = s_func.get_params_symtable(
+                params,
+                schema,
+                inlined_defaults=False,
             )
             anchors.update(param_anchors)
             referrer_ctx = self.get_referrer_context(context)
@@ -516,16 +514,16 @@ class ConstraintCommand(
                 assert isinstance(referrer_ctx.op, sd.ObjectCommand)
                 anchors['__subject__'] = referrer_ctx.op.scls
 
-            # type ignore below, because so.ObjectList[Parameter]
-            # is in practice s_func.ParameterLikeList
             return s_expr.Expression.compiled(
                 value,
                 schema=schema,
-                modaliases=context.modaliases,
-                anchors=anchors,
-                func_params=params,  # type: ignore
-                allow_generic_type_output=True,
-                parent_object_type=self.get_schema_metaclass(),
+                options=qlcompiler.CompilerOptions(
+                    modaliases=context.modaliases,
+                    anchors=anchors,
+                    func_params=params,
+                    allow_generic_type_output=True,
+                    schema_object_context=self.get_schema_metaclass(),
+                ),
             )
         else:
             return super().compile_expr_field(schema, context, field, value)
@@ -554,17 +552,13 @@ class ConstraintCommand(
 
         return nref
 
-    def _get_ref_rebase(
+    def get_ref_implicit_base_delta(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
         refcls: Constraint,
         implicit_bases: List[Constraint],
-    ) -> sd.Command:
-        mcls = type(self.scls)
-        ref_rebase_cmd = sd.ObjectCommandMeta.get_command_class_or_die(
-            inheriting.RebaseInheritingObject, mcls)
-
+    ) -> inheriting.BaseDelta_T:
         child_bases = refcls.get_bases(schema).objects(schema)
 
         default_base = refcls.get_default_base_name()
@@ -576,18 +570,10 @@ class ConstraintCommand(
         ]
 
         new_bases = implicit_bases + explicit_bases
-        removed_bases, added_bases = inheriting.delta_bases(
+        return inheriting.delta_bases(
             [b.get_name(schema) for b in child_bases],
             [b.get_name(schema) for b in new_bases],
         )
-
-        rebase_cmd = ref_rebase_cmd(
-            classname=refcls.get_name(schema),
-            added_bases=added_bases,
-            removed_bases=removed_bases,
-        )
-
-        return rebase_cmd
 
 
 class CreateConstraint(
@@ -619,7 +605,7 @@ class CreateConstraint(
             num=param_offset,
             name='__subject__',
             default=None,
-            type=s_pseudo.AnyTypeShell(),
+            type=s_pseudo.PseudoTypeShell(name='anytype'),
             typemod=ft.TypeModifier.SINGLETON,
             kind=ft.ParameterKind.POSITIONAL,
         ))
@@ -817,10 +803,7 @@ class CreateConstraint(
 
             node.params = [p[1] for p in params]
 
-    def get_ast_attr_for_field(
-        self,
-        field: so.Field[str],
-    ) -> Optional[str]:
+    def get_ast_attr_for_field(self, field: str) -> Optional[str]:
         if field == 'subjectexpr':
             return 'subjectexpr'
         else:
@@ -929,6 +912,6 @@ class DeleteConstraint(
 
 class RebaseConstraint(
     ConstraintCommand,
-    inheriting.RebaseInheritingObject[Constraint],
+    referencing.RebaseReferencedInheritingObject[Constraint],
 ):
     pass

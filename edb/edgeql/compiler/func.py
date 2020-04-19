@@ -63,8 +63,12 @@ def compile_FunctionCall(
     env = ctx.env
 
     if isinstance(expr.func, str):
-        if (ctx.env.func_params is not None
-                and ctx.env.func_params.get_by_name(env.schema, expr.func)):
+        if (
+            ctx.env.options.func_params is not None
+            and ctx.env.options.func_params.get_by_name(
+                env.schema, expr.func
+            )
+        ):
             raise errors.QueryError(
                 f'parameter `{expr.func}` is not callable',
                 context=expr.context)
@@ -81,13 +85,13 @@ def compile_FunctionCall(
             context=expr.context)
 
     in_polymorphic_func = (
-        ctx.env.func_params is not None and
-        ctx.env.func_params.has_polymorphic(env.schema)
+        ctx.env.options.func_params is not None and
+        ctx.env.options.func_params.has_polymorphic(env.schema)
     )
 
     in_abstract_constraint = (
         in_polymorphic_func and
-        ctx.env.parent_object_type is s_constr.Constraint
+        ctx.env.options.schema_object_context is s_constr.Constraint
     )
 
     args, kwargs = compile_call_args(expr, funcname, ctx=ctx)
@@ -110,7 +114,7 @@ def compile_FunctionCall(
     assert isinstance(func, s_func.Function)
     func_name = func.get_shortname(env.schema)
 
-    if not ctx.env.session_mode and func.get_session_only(env.schema):
+    if not ctx.env.options.session_mode and func.get_session_only(env.schema):
         raise errors.QueryError(
             f'{func_name}() cannot be called in a non-session context',
             context=expr.context)
@@ -162,7 +166,7 @@ def compile_FunctionCall(
     rtype = matched_call.return_type
     path_id = pathctx.get_expression_path_id(rtype, ctx=ctx)
 
-    if rtype.is_tuple():
+    if rtype.is_tuple(env.schema):
         rtype = cast(s_types.Tuple, rtype)
         tuple_path_ids = []
         nested_path_ids = []
@@ -295,19 +299,27 @@ def compile_operator(
         # If both of the args are arrays or tuples, potentially
         # compile the operator for them differently than for other
         # combinations.
-        if args[0][0].is_tuple() and args[1][0].is_tuple():
+        if args[0][0].is_tuple(env.schema) and args[1][0].is_tuple(env.schema):
             # Out of the candidate operators, find the ones that
             # correspond to tuples.
-            coll_opers = [op for op in opers
-                          if all(param.get_type(schema).is_tuple() for param
-                                 in op.get_params(schema).objects(schema))]
+            coll_opers = [
+                op for op in opers
+                if all(
+                    param.get_type(schema).is_tuple(schema)
+                    for param in op.get_params(schema).objects(schema)
+                )
+            ]
 
         elif args[0][0].is_array() and args[1][0].is_array():
             # Out of the candidate operators, find the ones that
             # correspond to arrays.
-            coll_opers = [op for op in opers
-                          if all(param.get_type(schema).is_array() for param
-                                 in op.get_params(schema).objects(schema))]
+            coll_opers = [
+                op for op in opers
+                if all(
+                    param.get_type(schema).is_array()
+                    for param in op.get_params(schema).objects(schema)
+                )
+            ]
 
         # Proceed only if we have a special case of collection operators.
         if coll_opers:
@@ -356,13 +368,13 @@ def compile_operator(
         matched = polyres.find_callable(opers, args=args, kwargs={}, ctx=ctx)
 
     in_polymorphic_func = (
-        ctx.env.func_params is not None and
-        ctx.env.func_params.has_polymorphic(env.schema)
+        ctx.env.options.func_params is not None and
+        ctx.env.options.func_params.has_polymorphic(env.schema)
     )
 
     in_abstract_constraint = (
         in_polymorphic_func and
-        ctx.env.parent_object_type is s_constr.Constraint
+        ctx.env.options.schema_object_context is s_constr.Constraint
     )
 
     if not in_polymorphic_func:
@@ -524,8 +536,15 @@ def validate_recursive_operator(
     matched: List[polyres.BoundCall] = []
 
     # if larg and rarg are tuples or arrays, recurse into their subtypes
-    if (larg[0].is_tuple() and rarg[0].is_tuple() or
-            larg[0].is_array() and rarg[0].is_array()):
+    if (
+        (
+            larg[0].is_tuple(ctx.env.schema)
+            and rarg[0].is_tuple(ctx.env.schema)
+        ) or (
+            larg[0].is_array()
+            and rarg[0].is_array()
+        )
+    ):
         assert isinstance(larg[0], s_types.Collection)
         assert isinstance(rarg[0], s_types.Collection)
         for rsub, lsub in zip(larg[0].get_subtypes(ctx.env.schema),
@@ -689,7 +708,8 @@ def finalize_args(
                 arg, paramtype, srcctx=None, ctx=ctx)
 
         if param_mod is not ft.TypeModifier.SET_OF:
-            call_arg = irast.CallArg(expr=arg, cardinality=ft.Cardinality.ONE)
+            call_arg = irast.CallArg(expr=arg,
+                                     cardinality=ft.Cardinality.ONE)
         else:
             call_arg = irast.CallArg(expr=arg, cardinality=None)
             stmtctx.get_expr_cardinality_later(

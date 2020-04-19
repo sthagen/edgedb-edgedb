@@ -61,9 +61,9 @@ def get_schema_object(
         module = name.module
         name = name.name
     elif isinstance(name, qlast.AnyType):
-        return s_pseudo.Any.get(ctx.env.schema)
+        return s_pseudo.PseudoType.get(ctx.env.schema, 'anytype')
     elif isinstance(name, qlast.AnyTuple):
-        return s_pseudo.AnyTuple.get(ctx.env.schema)
+        return s_pseudo.PseudoType.get(ctx.env.schema, 'anytuple')
     elif isinstance(name, qlast.BaseObjectRef):
         raise AssertionError(f"Unhandled BaseObjectRef subclass: {name!r}")
 
@@ -244,8 +244,8 @@ def derive_ptr(
     ctx.env.schema, derived = ptr.derive_ref(
         ctx.env.schema,
         source,
-        target,
         *qualifiers,
+        target=target,
         name=derived_name,
         inheritance_merge=inheritance_merge,
         refdict_whitelist={'pointers'},
@@ -427,7 +427,7 @@ def derive_dummy_ptr(
     *,
     ctx: context.ContextLevel,
 ) -> s_pointers.Pointer:
-    stdobj = cast(s_objtypes.ObjectType, ctx.env.schema.get('std::Object'))
+    stdobj = cast(s_objtypes.ObjectType, ctx.env.schema.get('std::BaseObject'))
     derived_obj_name = stdobj.get_derived_name(
         ctx.env.schema, stdobj, module='__derived__')
     derived_obj = ctx.env.schema.get(derived_obj_name, None)
@@ -445,9 +445,9 @@ def derive_dummy_ptr(
         ctx.env.schema, derived = ptr.derive_ref(
             ctx.env.schema,
             derived_obj,
-            derived_obj,
+            target=derived_obj,
             attrs={
-                'cardinality': qltypes.Cardinality.MANY,
+                'cardinality': qltypes.SchemaCardinality.MANY,
             },
             name=derived_name,
             mark_derived=True)

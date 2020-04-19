@@ -575,7 +575,7 @@ class GraphQLTranslator:
                 # preserve the original cardinality of the computable,
                 # which is basically one of the top-level query
                 # fields, all of which are returning lists
-                cardinality=qltypes.Cardinality.MANY,
+                cardinality=qltypes.SchemaCardinality.MANY,
             )
 
         # INSERT mutations have different arguments from queries
@@ -1431,9 +1431,10 @@ class GraphQLTranslator:
         var = self._context.vars[varname]
 
         vartype = var.defn.type
+        optional = True
         if isinstance(vartype, gql_ast.NonNullTypeNode):
-            # TODO: Add non-null validation to the produced EdgeQL?
             vartype = vartype.type
+            optional = False
 
         casttype = qlast.TypeName(
             maintype=qlast.ObjectRef(
@@ -1448,7 +1449,7 @@ class GraphQLTranslator:
 
         return qlast.TypeCast(
             type=casttype,
-            expr=qlast.Parameter(name=varname)
+            expr=qlast.Parameter(name=varname, optional=optional),
         )
 
     def visit_StringValueNode(self, node):
