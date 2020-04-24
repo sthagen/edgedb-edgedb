@@ -139,6 +139,19 @@ class TestHttpEdgeQL(tb.EdgeQLTestCase):
                 """
             )
 
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r'parameter \$name is required'):
+            self.edgeql_query(
+                r"""
+                    SELECT Setting {
+                        name,
+                        value
+                    }
+                    FILTER .name = <str>$name;
+                """,
+                variables={'name': None})
+
     def test_http_edgeql_query_05(self):
         with self.assertRaisesRegex(edgedb.InvalidReferenceError,
                                     r'UNRECOGNIZABLE'):
@@ -205,6 +218,41 @@ class TestHttpEdgeQL(tb.EdgeQLTestCase):
             ['xstd::int64'],
             variables={'x': 'x', 'y': 7},
         )
+
+    def test_http_edgeql_query_12(self):
+        self.assert_edgeql_query_result(
+            r'''SELECT <str>$x''',
+            ['xx'],
+            variables={'x': 'xx'},
+        )
+
+        self.assert_edgeql_query_result(
+            r'''SELECT <REQUIRED str>$x''',
+            ['yy'],
+            variables={'x': 'yy'},
+        )
+
+        self.assert_edgeql_query_result(
+            r'''SELECT <OPTIONAL str>$x ?? '-default-' ''',
+            ['-default-'],
+            variables={'x': None},
+        )
+
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r'parameter \$x is required'):
+            self.edgeql_query(
+                r'''SELECT <REQUIRED str>$x ?? '-default' ''',
+                variables={'x': None},
+            )
+
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r'parameter \$x is required'):
+            self.edgeql_query(
+                r'''SELECT <str>$x ?? '-default' ''',
+                variables={'x': None},
+            )
 
     def test_http_edgeql_session_func_01(self):
         with self.assertRaisesRegex(edgedb.QueryError,

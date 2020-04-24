@@ -81,6 +81,9 @@ class flags(metaclass=FlagsMeta):
     edgeql_compile = Flag(
         doc="Dump EdgeQL/IR/SQL ASTs.")
 
+    edgeql_disable_normalization = Flag(
+        doc="Disable EdgeQL normalization (constant extraction etc)")
+
     graphql_compile = Flag(
         doc="Debug GraphQL compiler.")
 
@@ -101,6 +104,9 @@ class flags(metaclass=FlagsMeta):
 
     server_proto = Flag(
         doc="Print server protocol querying messages.")
+
+    http_inject_cors = Flag(
+        doc="Inject 'Access-Control-Allow-Origin: *' header in HTTP ports.")
 
     print_locals = Flag(
         doc="Include values of local variables in tracebacks.")

@@ -140,6 +140,7 @@ cdef class Protocol(http.HttpProtocol):
                 0,              # no implicit limit
                 compiler.CompileStatementMode.SINGLE,
                 compiler.Capability.QUERY,
+                None,           # first_extracted_var
                 True,           # json parameters
             )
             return units[0]
@@ -163,12 +164,16 @@ cdef class Protocol(http.HttpProtocol):
 
         args = []
         if query_unit.in_type_args:
-            for name in query_unit.in_type_args:
-                if variables is None or name not in variables:
+            for param in query_unit.in_type_args:
+                if variables is None or param.name not in variables:
                     raise errors.QueryError(
-                        f'no value for the ${name} query parameter')
+                        f'no value for the ${param.name} query parameter')
                 else:
-                    args.append(variables[name])
+                    value = variables[param.name]
+                    if value is None and param.required:
+                        raise errors.QueryError(
+                            f'parameter ${param.name} is required')
+                    args.append(value)
 
         pgcon = await self.server.pgcons.get()
         try:

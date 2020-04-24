@@ -27,6 +27,7 @@ import subprocess
 import textwrap
 
 import distutils
+from distutils import version
 from distutils import extension as distutils_extension
 from distutils.command import build as distutils_build
 from distutils.command import build_ext as distutils_build_ext
@@ -44,7 +45,7 @@ RUNTIME_DEPS = [
     'asyncpg~=0.20.0',
     'click~=6.7',
     'httptools>=0.0.13',
-    'immutables>=0.9',
+    'immutables>=0.12',
     'parsing~=1.6.1',
     'prompt_toolkit>=2.0.0',
     'psutil~=5.6.1',
@@ -72,6 +73,8 @@ DOCS_DEPS = [
 BUILD_DEPS = [
     CYTHON_DEPENDENCY,
 ]
+
+RUST_VERSION = '1.42.0'  # Also update docs/internal/dev.rst
 
 EDGEDBCLI_REPO = 'https://github.com/edgedb/edgedb-cli'
 
@@ -245,6 +248,19 @@ def _compile_postgres(build_base, *,
         with open(postgres_build_stamp, 'w') as f:
             f.write(source_stamp)
 
+def _check_rust():
+    try:
+        ver = subprocess.check_output(["rustc", '-V']).split()[1]
+        ver = version.LooseVersion(ver.decode())
+        if ver < version.LooseVersion(RUST_VERSION):
+            raise RuntimeError(
+                f'please upgrade Rust to {RUST_VERSION} to compile '
+                f'edgedb from source')
+    except FileNotFoundError:
+        raise RuntimeError(
+            f'please install rustc >= {RUST_VERSION} to compile '
+            f'edgedb from source (see https://rustup.rs/)')
+
 
 class build(distutils_build.build):
 
@@ -280,6 +296,7 @@ class build(distutils_build.build):
 class develop(setuptools_develop.develop):
 
     def run(self, *args, **kwargs):
+        _check_rust()
         build = self.get_finalized_command('build')
         rust_tmp = pathlib.Path(build.build_temp) / 'rust' / 'cli'
         rust_root = pathlib.Path(build.build_base) / 'cli'
@@ -456,6 +473,7 @@ class build_ext(distutils_build_ext.build_ext):
     def run(self):
         if self.distribution.rust_extensions:
             distutils.log.info("running build_rust")
+            _check_rust()
             build_rust = self.get_finalized_command("build_rust")
             build_ext = self.get_finalized_command("build_ext")
             copy_list = []
@@ -583,6 +601,12 @@ setuptools.setup(
         distutils_extension.Extension(
             "edb.server.http_graphql_port.protocol",
             ["edb/server/http_graphql_port/protocol.pyx"],
+            extra_compile_args=EXT_CFLAGS,
+            extra_link_args=EXT_LDFLAGS),
+
+        distutils_extension.Extension(
+            "edb.server.notebook_port.protocol",
+            ["edb/server/notebook_port/protocol.pyx"],
             extra_compile_args=EXT_CFLAGS,
             extra_link_args=EXT_LDFLAGS),
     ],
