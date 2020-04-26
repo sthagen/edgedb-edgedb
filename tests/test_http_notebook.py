@@ -62,7 +62,8 @@ class TestHttpNotebook(tb.BaseHttpTest, tb.server.QueryTestCase):
                         'data': [
                             'AAAAAAAAAAAAAAAAAAABBQ==',
                             'AgAAAAAAAAAAAAAAAAAAAQU=',
-                            'RAAAABIAAQAAAAgAAAAAAAAAAQ=='
+                            'RAAAABIAAQAAAAgAAAAAAAAAAQ==',
+                            'U0VMRUNU'
                         ]
                     },
                     {
@@ -70,7 +71,8 @@ class TestHttpNotebook(tb.BaseHttpTest, tb.server.QueryTestCase):
                         'data': [
                             'AAAAAAAAAAAAAAAAAAABAQ==',
                             'AgAAAAAAAAAAAAAAAAAAAQE=',
-                            'RAAAAA4AAQAAAARBQUFB'
+                            'RAAAAA4AAQAAAARBQUFB',
+                            'U0VMRUNU'
                         ]
                     },
                 ]
@@ -94,7 +96,8 @@ class TestHttpNotebook(tb.BaseHttpTest, tb.server.QueryTestCase):
                         'data': [
                             'AAAAAAAAAAAAAAAAAAABBQ==',
                             'AgAAAAAAAAAAAAAAAAAAAQU=',
-                            'RAAAABIAAQAAAAgAAAAAAAAAAQ=='
+                            'RAAAABIAAQAAAAgAAAAAAAAAAQ==',
+                            'U0VMRUNU'
                         ]
                     },
                     {
@@ -133,6 +136,44 @@ class TestHttpNotebook(tb.BaseHttpTest, tb.server.QueryTestCase):
                             'EdgeQLSyntaxError',
                             'unterminated string, quoted by `"`',
                             {}
+                        ]
+                    }
+                ]
+            }
+        )
+
+    def test_http_notebook_04(self):
+        req = urllib.request.Request(self.http_addr + '/status',
+                                     method='GET')
+        response = urllib.request.urlopen(req)
+        resp_data = json.loads(response.read())
+        self.assertEqual(resp_data, {'kind': 'status', 'status': 'OK'})
+
+    def test_http_notebook_05(self):
+        results = self.run_queries([
+            'SELECT 1',
+            'SELECT [1][2]',
+            'SELECT 2'
+        ])
+
+        self.assertEqual(
+            results,
+            {
+                'kind': 'results',
+                'results': [
+                    {
+                        'kind': 'data',
+                        'data': [
+                            'AAAAAAAAAAAAAAAAAAABBQ==',
+                            'AgAAAAAAAAAAAAAAAAAAAQU=',
+                            'RAAAABIAAQAAAAgAAAAAAAAAAQ==',
+                            'U0VMRUNU'
+                        ]
+                    },
+                    {
+                        'kind': 'error',
+                        'error': [
+                            'Error', 'array index 2 is out of bounds', {}
                         ]
                     }
                 ]
