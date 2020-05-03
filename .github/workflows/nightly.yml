@@ -158,18 +158,17 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
-    continue-on-error: true
 
     strategy:
       max-parallel: 4
       matrix:
         target: [
-          macos-latest,
+          macos-x86_64,
         ]
         include:
-          - target: macos-latest
+          - target: macos-x86_64
             platform: macos
-            platform_version: latest
+            platform_version: x86_64
 
     steps:
     - uses: actions/checkout@v1
@@ -247,7 +246,7 @@ jobs:
         target: "${{ matrix.target }}"
 
     - name: Publish (${{ matrix.target }})
-      uses: edgedb/edgedb-pkg/integration/linux/upload/debian@master
+      uses: edgedb/edgedb-pkg/integration/linux/upload/debian-stretch@master
       if: matrix.target == 'debian-stretch'
       env:
         PKG_SUBDIST: "nightly"
@@ -266,7 +265,7 @@ jobs:
         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 
     - name: Publish (${{ matrix.target }})
-      uses: edgedb/edgedb-pkg/integration/linux/upload/debian@master
+      uses: edgedb/edgedb-pkg/integration/linux/upload/debian-buster@master
       if: matrix.target == 'debian-buster'
       env:
         PKG_SUBDIST: "nightly"
@@ -285,7 +284,7 @@ jobs:
         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 
     - name: Publish (${{ matrix.target }})
-      uses: edgedb/edgedb-pkg/integration/linux/upload/debian@master
+      uses: edgedb/edgedb-pkg/integration/linux/upload/ubuntu-xenial@master
       if: matrix.target == 'ubuntu-xenial'
       env:
         PKG_SUBDIST: "nightly"
@@ -304,7 +303,7 @@ jobs:
         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 
     - name: Publish (${{ matrix.target }})
-      uses: edgedb/edgedb-pkg/integration/linux/upload/debian@master
+      uses: edgedb/edgedb-pkg/integration/linux/upload/ubuntu-bionic@master
       if: matrix.target == 'ubuntu-bionic'
       env:
         PKG_SUBDIST: "nightly"
@@ -323,7 +322,7 @@ jobs:
         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 
     - name: Publish (${{ matrix.target }})
-      uses: edgedb/edgedb-pkg/integration/linux/upload/redhat@master
+      uses: edgedb/edgedb-pkg/integration/linux/upload/centos-7@master
       if: matrix.target == 'centos-7'
       env:
         PKG_SUBDIST: "nightly"
@@ -342,7 +341,7 @@ jobs:
         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 
     - name: Publish (${{ matrix.target }})
-      uses: edgedb/edgedb-pkg/integration/linux/upload/redhat@master
+      uses: edgedb/edgedb-pkg/integration/linux/upload/centos-8@master
       if: matrix.target == 'centos-8'
       env:
         PKG_SUBDIST: "nightly"
@@ -380,17 +379,17 @@ jobs:
 
   publish-macos:
     needs: [build-linux, build-macos]
-    runs-on: macos-10.14
+    runs-on: macos-latest
     strategy:
       max-parallel: 4
       matrix:
         target: [
-          macos-latest,
+          macos-x86_64,
         ]
         include:
-          - target: macos-latest
+          - target: macos-x86_64
             platform: macos
-            platform_version: latest
+            platform_version: x86_64
 
     steps:
     - uses: actions/download-artifact@v1

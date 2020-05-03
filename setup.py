@@ -299,9 +299,11 @@ class develop(setuptools_develop.develop):
         _check_rust()
         build = self.get_finalized_command('build')
         rust_tmp = pathlib.Path(build.build_temp) / 'rust' / 'cli'
-        rust_root = pathlib.Path(build.build_base) / 'cli'
+        build_base = pathlib.Path(build.build_base).resolve()
+        rust_root = build_base / 'cli'
         env = dict(os.environ)
         env['CARGO_TARGET_DIR'] = str(rust_tmp)
+        env['PSQL_DEFAULT_PATH'] = build_base / 'postgres' / 'install' / 'bin'
 
         subprocess.run(
             [
@@ -310,6 +312,7 @@ class develop(setuptools_develop.develop):
                 '--git', EDGEDBCLI_REPO,
                 '--bin', 'edgedb',
                 '--root', rust_root,
+                '--features=dev_mode',
             ],
             env=env,
             check=True,
@@ -331,8 +334,8 @@ class develop(setuptools_develop.develop):
 
         super().run(*args, **kwargs)
 
-        _compile_parsers(pathlib.Path('build/lib'), inplace=True)
-        _compile_postgres(pathlib.Path('build').resolve())
+        _compile_parsers(build_base / 'lib', inplace=True)
+        _compile_postgres(build_base)
 
 
 class gen_build_cache_key(setuptools.Command):
@@ -382,7 +385,7 @@ class build_postgres(setuptools.Command):
 
     def run(self, *args, **kwargs):
         _compile_postgres(
-            pathlib.Path('build').resolve(),
+            pathlib.Path(build.build_base).resolve(),
             force_build=True,
             fresh_build=self.fresh_build,
             run_configure=self.configure,
