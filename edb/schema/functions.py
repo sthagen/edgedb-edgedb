@@ -363,14 +363,18 @@ class Parameter(so.ObjectFragment, ParameterLike):
         else:
             return vn
 
-    def get_shortname(self, schema: s_schema.Schema) -> sn.Name:
+    @classmethod
+    def get_shortname_static(cls, name: str) -> sn.Name:
+        assert isinstance(name, sn.Name)
         return sn.Name(
-            module=self.get_name(schema).module,
-            name=self.get_parameter_name(schema),
+            module='__',
+            name=cls.paramname_from_fullname(name),
         )
 
-    def get_displayname(self, schema: s_schema.Schema) -> str:
-        return self.get_parameter_name(schema)
+    @classmethod
+    def get_displayname_static(cls, name: str) -> str:
+        shortname = cls.get_shortname_static(name)
+        return shortname.name
 
     def get_parameter_name(self, schema: s_schema.Schema) -> str:
         fullname = self.get_name(schema)
@@ -414,9 +418,7 @@ class ParameterCommand(
     pass
 
 
-class CreateParameter(ParameterCommand,
-                      sd.CreateObject[Parameter],
-                      sd.CreateObjectFragment):
+class CreateParameter(ParameterCommand, sd.CreateObject[Parameter]):
 
     @classmethod
     def _cmd_tree_from_ast(
@@ -642,10 +644,12 @@ class CallableObject(
                 p for p in new_params
                 if not param_is_inherited(new_schema, new, p)
             ]
+            add = delta.add_prerequisite
         else:
+            add = delta.add
             newcoll = []
 
-        delta.add(
+        add(
             cls.delta_sets(
                 oldcoll,
                 newcoll,
@@ -796,7 +800,7 @@ class CreateCallableObject(CallableCommand, sd.CreateObject[CallableObject]):
         for param in params:
             # as_create_delta requires the specific type
             assert isinstance(cmd.classname, sn.SchemaName)
-            cmd.add(param.as_create_delta(
+            cmd.add_prerequisite(param.as_create_delta(
                 schema, cmd.classname, context=context))
 
         if hasattr(astnode, 'returning'):
@@ -927,7 +931,7 @@ class Function(CallableObject, VolatilitySubject, s_abc.Function,
     ) -> str:
         params = self.get_params(schema)
         sn = self.get_shortname(schema)
-        return f'function {sn}{params.as_str(schema)}'
+        return f"function '{sn}{params.as_str(schema)}'"
 
 
 class FunctionCommandContext(CallableCommandContext):

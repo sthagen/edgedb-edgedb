@@ -419,6 +419,13 @@ def process_insert_body(
             )
 
             pathctx.put_path_bond(insert_stmt, iterator_set.path_id)
+            pathctx.put_path_rvar(
+                wrapper,
+                path_id=iterator_set.path_id,
+                rvar=insert_rvar,
+                aspect='identity',
+                env=subctx.env,
+            )
 
     toplevel = ctx.toplevel_stmt
     toplevel.ctes.append(insert_cte)
@@ -515,6 +522,15 @@ def process_update_body(
                         val = pgast.TypeCast(
                             arg=dispatch.compile(updvalue, ctx=scopectx),
                             type_name=pgast.TypeName(name=ptr_info.column_type)
+                        )
+
+                    if shape_op is qlast.ShapeOp.SUBTRACT:
+                        val = pgast.FuncCall(
+                            name=('nullif',),
+                            args=[
+                                pgast.ColumnRef(name=(ptr_info.column_name,)),
+                                val,
+                            ],
                         )
 
                     updtarget = pgast.UpdateTarget(
@@ -675,23 +691,77 @@ def process_link_update(
 
     delqry: Optional[pgast.DeleteStmt]
 
-    if not is_insert and shape_op is not qlast.ShapeOp.APPEND:
-        # Drop all previous link records for this source.
-        delqry = pgast.DeleteStmt(
-            relation=target_rvar,
-            where_clause=astutils.new_binop(
-                lexpr=col_data['source'],
-                op='=',
-                rexpr=pgast.ColumnRef(
-                    name=[target_alias, 'source'])
+    data_select = pgast.SelectStmt(
+        target_list=[
+            pgast.ResTarget(
+                val=pgast.ColumnRef(
+                    name=[data_cte.name, pgast.Star()]
+                ),
             ),
-            using_clause=[dml_cte_rvar],
-            returning_list=[
-                pgast.ResTarget(
-                    val=pgast.ColumnRef(
-                        name=[target_alias, pgast.Star()]))
-            ]
-        )
+        ],
+        from_clause=[
+            pgast.RelRangeVar(relation=data_cte),
+        ],
+    )
+
+    if not is_insert and shape_op is not qlast.ShapeOp.APPEND:
+        if shape_op is qlast.ShapeOp.SUBTRACT:
+            data_rvar = relctx.rvar_for_rel(data_select, ctx=ctx)
+
+            # Drop requested link records.
+            delqry = pgast.DeleteStmt(
+                relation=target_rvar,
+                where_clause=astutils.new_binop(
+                    lexpr=astutils.new_binop(
+                        lexpr=col_data['source'],
+                        op='=',
+                        rexpr=pgast.ColumnRef(
+                            name=[target_alias, 'source'],
+                        ),
+                    ),
+                    op='AND',
+                    rexpr=astutils.new_binop(
+                        lexpr=pgast.ColumnRef(
+                            name=[target_alias, 'target'],
+                        ),
+                        op='=',
+                        rexpr=pgast.ColumnRef(
+                            name=[data_rvar.alias.aliasname, 'target'],
+                        ),
+                    ),
+                ),
+                using_clause=[
+                    dml_cte_rvar,
+                    data_rvar,
+                ],
+                returning_list=[
+                    pgast.ResTarget(
+                        val=pgast.ColumnRef(
+                            name=[target_alias, pgast.Star()],
+                        ),
+                    )
+                ]
+            )
+        else:
+            # Drop all previous link records for this source.
+            delqry = pgast.DeleteStmt(
+                relation=target_rvar,
+                where_clause=astutils.new_binop(
+                    lexpr=col_data['source'],
+                    op='=',
+                    rexpr=pgast.ColumnRef(
+                        name=[target_alias, 'source'],
+                    ),
+                ),
+                using_clause=[dml_cte_rvar],
+                returning_list=[
+                    pgast.ResTarget(
+                        val=pgast.ColumnRef(
+                            name=[target_alias, pgast.Star()],
+                        ),
+                    )
+                ]
+            )
 
         delcte = pgast.CommonTableExpr(
             name=ctx.env.aliases.get(hint='d'),
@@ -711,16 +781,8 @@ def process_link_update(
     else:
         delqry = None
 
-    data_select = pgast.SelectStmt(
-        target_list=[
-            pgast.ResTarget(
-                val=pgast.ColumnRef(
-                    name=[data_cte.name, pgast.Star()]))
-        ],
-        from_clause=[
-            pgast.RelRangeVar(relation=data_cte)
-        ]
-    )
+    if shape_op is qlast.ShapeOp.SUBTRACT:
+        return data_cte
 
     cols = [pgast.ColumnRef(name=[col]) for col in specified_cols]
     conflict_cols = ['source', 'target', 'ptr_item_id']
@@ -968,6 +1030,50 @@ def process_link_values(
             input_rel_ctx.volatility_ref = pathctx.get_path_identity_var(
                 row_query, ir_stmt.subject.path_id, env=input_rel_ctx.env)
             dispatch.visit(ir_expr, ctx=input_rel_ctx)
+            if (
+                isinstance(ir_expr.expr, irast.Stmt)
+                and ir_expr.expr.iterator_stmt is not None
+            ):
+                # The link value is computaed by a FOR expression,
+                # check if the statement is a DML statement, and if so,
+                # pull the iterator scope so that link property expressions
+                # have the correct context.
+                inner_iterator_cte = None
+                inner_iterator_path_id = ir_expr.expr.iterator_stmt.path_id
+                for cte in input_rel_ctx.toplevel_stmt.ctes:
+                    if cte.query.path_id == inner_iterator_path_id:
+                        inner_iterator_cte = cte
+                        break
+                if inner_iterator_cte is not None:
+                    target_rvar = pathctx.get_path_rvar(
+                        input_rel,
+                        ir_expr.path_id,
+                        aspect='identity',
+                        env=input_rel_ctx.env,
+                    )
+
+                    pathctx.put_path_rvar(
+                        input_rel,
+                        inner_iterator_path_id,
+                        rvar=target_rvar,
+                        aspect='identity',
+                        env=input_rel_ctx.env,
+                    )
+
+                    inner_iterator_rvar = relctx.rvar_for_rel(
+                        inner_iterator_cte, lateral=True, ctx=subrelctx)
+
+                    relctx.include_rvar(
+                        input_rel,
+                        inner_iterator_rvar,
+                        path_id=inner_iterator_path_id,
+                        ctx=subrelctx,
+                    )
+
+                    input_rel_ctx.path_scope[inner_iterator_path_id] = (
+                        input_rel
+                    )
+
             shape_tuple = None
             if ir_expr.shape:
                 shape_tuple = shapecomp.compile_shape(
