@@ -934,6 +934,40 @@ class TestExpressions(tb.QueryTestCase):
                 variables={'x': None},
             )
 
+    async def test_edgeql_expr_variables_05(self):
+        for typ in {'bigint', 'decimal', 'int64', 'int32', 'int16'}:
+            with self.annotate(type=typ):
+                await self.assert_query_result(
+                    f'''SELECT <{typ}>$x;''',
+                    [123],
+                    variables={'x': 123},
+                )
+
+                await self.assert_query_result(
+                    f'''SELECT <array<{typ}>>$x;''',
+                    [[123]],
+                    variables={'x': [123]},
+                )
+
+    async def test_edgeql_expr_variables_06(self):
+        await self.assert_query_result(
+            f'''SELECT <OPTIONAL int64>$x + <int64>$y;''',
+            [5],
+            variables={'x': 2, 'y': 3},
+        )
+
+        await self.assert_query_result(
+            f'''SELECT <OPTIONAL int64>$x + <int64>$y;''',
+            [],
+            variables={'x': None, 'y': 3},
+        )
+
+        await self.assert_query_result(
+            f'''SELECT len(<OPTIONAL str>$x);''',
+            [],
+            variables={'x': None},
+        )
+
     async def _test_boolop(self, left, right, op, not_op, result):
         if isinstance(result, bool):
             # this operation should be valid and produce opposite
@@ -2633,14 +2667,17 @@ class TestExpressions(tb.QueryTestCase):
                     A := (
                         SELECT ObjectType
                         FILTER ObjectType.name ILIKE 'schema::a%'
+                               AND NOT .is_internal
                     ),
                     D := (
                         SELECT ObjectType
                         FILTER ObjectType.name ILIKE 'schema::d%'
+                               AND NOT .is_internal
                     ),
                     O := (
                         SELECT ObjectType
                         FILTER ObjectType.name ILIKE 'schema::o%'
+                               AND NOT .is_internal
                     )
                 SELECT _ := {A, D, O}.name
                 ORDER BY _;
@@ -2650,7 +2687,6 @@ class TestExpressions(tb.QueryTestCase):
                 'schema::AnnotationSubject',
                 'schema::Array',
                 'schema::Delta',
-                'schema::DerivedLink',
                 'schema::Object',
                 'schema::ObjectType',
                 'schema::Operator',
@@ -4496,3 +4532,40 @@ aa \
             ''',
             [[1, 3], [2, 1], [3, 2]]
         )
+
+    async def test_edgeql_expr_slice_01(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r"scalar type 'std::int64' cannot be sliced"):
+
+            await self.con.execute("""
+                SELECT 1[1:3];
+            """)
+
+    async def test_edgeql_expr_slice_02(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r"scalar type 'std::int64' cannot be sliced"):
+
+            await self.con.execute("""
+                SELECT 1[:3];
+            """)
+
+    async def test_edgeql_expr_slice_03(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r"scalar type 'std::int64' cannot be sliced"):
+
+            await self.con.execute("""
+                SELECT 1[1:];
+            """)
+
+    async def test_edgeql_expr_index_01(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r"index indirection cannot be applied to scalar type "
+                r"'std::int64'"):
+
+            await self.con.execute("""
+                SELECT 1[1];
+            """)

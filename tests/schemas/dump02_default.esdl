@@ -1,7 +1,7 @@
 #
 # This source file is part of the EdgeDB open source project.
 #
-# Copyright 2008-present MagicStack Inc. and the EdgeDB authors.
+# Copyright 2020-present MagicStack Inc. and the EdgeDB authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,19 +16,22 @@
 # limitations under the License.
 #
 
+abstract annotation `🍿`;
 
-from __future__ import annotations
+function `💯`(NAMED ONLY `🙀`: int64) -> int64 {
+    using (
+        SELECT 100 - `🙀`
+    );
 
-from . import annos  # NOQA
-from . import casts  # NOQA
-from . import constraints  # NOQA
-from . import databases  # NOQA
-from . import functions  # NOQA
-from . import indexes  # NOQA
-from . import links  # NOQA
-from . import modules  # NOQA
-from . import objtypes  # NOQA
-from . import operators  # NOQA
-from . import roles  # NOQA
-from . import scalars  # NOQA
-from . import types  # NOQA
+    annotation `🍿` := 'fun!';
+    volatility := 'IMMUTABLE';
+}
+
+type `S p a M` {
+    required property `🚀` -> int32;
+    property c100 := (SELECT `💯`(`🙀` := .`🚀`));
+}
+
+type A {
+    required link `s p A m 🤞` -> `S p a M`;
+}

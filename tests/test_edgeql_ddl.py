@@ -1774,6 +1774,124 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 $$;
             """)
 
+    async def test_edgeql_ddl_function_26(self):
+        await self.con.execute(r"""
+            CREATE ABSTRACT ANNOTATION foo26;
+
+            CREATE FUNCTION test::edgeql_func26(a: std::str) -> std::str {
+                USING EdgeQL $$
+                    SELECT a ++ 'aaa'
+                $$;
+                SET volatility := 'VOLATILE';
+            };
+
+            ALTER FUNCTION test::edgeql_func26(a: std::str) {
+                CREATE ANNOTATION foo26 := 'aaaa';
+            };
+
+            ALTER FUNCTION test::edgeql_func26(a: std::str) {
+                SET volatility := 'IMMUTABLE';
+            };
+        """)
+
+        await self.assert_query_result(
+            r'''
+                SELECT test::edgeql_func26('b')
+            ''',
+            [
+                'baaa'
+            ],
+        )
+
+        await self.assert_query_result(
+            r'''
+                WITH MODULE schema
+                SELECT Function {
+                    name,
+                    annotations: {
+                        name,
+                        @value,
+                    },
+                    vol := <str>.volatility,
+                }
+                FILTER
+                    .name = 'test::edgeql_func26';
+            ''',
+            [
+                {
+                    'name': 'test::edgeql_func26',
+                    'annotations': [
+                        {
+                            'name': 'default::foo26',
+                            '@value': 'aaaa',
+                        },
+                    ],
+                    'vol': 'IMMUTABLE',
+                },
+            ]
+        )
+
+        await self.con.execute(r"""
+            ALTER FUNCTION test::edgeql_func26(a: std::str) {
+                DROP ANNOTATION foo26;
+            };
+        """)
+
+        await self.assert_query_result(
+            r'''
+                WITH MODULE schema
+                SELECT Function {
+                    name,
+                    annotations: {
+                        name,
+                        @value,
+                    },
+                }
+                FILTER
+                    .name = 'test::edgeql_func26';
+            ''',
+            [
+                {
+                    'name': 'test::edgeql_func26',
+                    'annotations': [],
+                },
+            ]
+        )
+
+        await self.con.execute(r"""
+            ALTER FUNCTION test::edgeql_func26(a: std::str) {
+                USING (
+                    SELECT a ++ 'bbb'
+                )
+            };
+        """)
+
+        await self.assert_query_result(
+            r'''
+                SELECT test::edgeql_func26('b')
+            ''',
+            [
+                'bbbb'
+            ],
+        )
+
+        await self.con.execute(r"""
+            ALTER FUNCTION test::edgeql_func26(a: std::str) {
+                USING EdgeQL $$
+                    SELECT a ++ 'zzz'
+                $$
+            };
+        """)
+
+        await self.assert_query_result(
+            r'''
+                SELECT test::edgeql_func26('b')
+            ''',
+            [
+                'bzzz'
+            ],
+        )
+
     async def test_edgeql_ddl_module_01(self):
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -2743,7 +2861,9 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                     annotations: {
                         name,
                         @value,
-                    } FILTER .name LIKE 'test::anno10%'
+                    }
+                    FILTER .name LIKE 'test::anno10%'
+                    ORDER BY .name
                 }
                 FILTER
                     .name LIKE 'test::%Anno10'
@@ -2753,14 +2873,14 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             [
                 {
                     "annotations": [
-                        {"name": "test::anno10_inh", "@value": "B"},
                         {"name": "test::anno10", "@value": "B"},
+                        {"name": "test::anno10_inh", "@value": "B"},
                     ]
                 },
                 {
                     "annotations": [
-                        {"name": "test::anno10_inh", "@value": "A"},
                         {"name": "test::anno10", "@value": "A"},
+                        {"name": "test::anno10_inh", "@value": "A"},
                     ]
                 },
             ]
@@ -2973,8 +3093,10 @@ class TestEdgeQLDDL(tb.DDLTestCase):
 
         await self.assert_query_result(
             r"""
-                SELECT (SELECT schema::ObjectType
-                        FILTER .name = 'test::Ext4Child').properties.name;
+                SELECT (
+                    SELECT schema::ObjectType
+                    FILTER .name = 'test::Ext4Child'
+                ).properties.name;
             """,
             {'id', 'a'}
         )
@@ -2986,8 +3108,10 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         for name in {'Ext4Child', 'Ext4GrandChild', 'Ext4GrandGrandChild'}:
             await self.assert_query_result(
                 f"""
-                    SELECT (SELECT schema::ObjectType
-                            FILTER .name = 'test::{name}').properties.name;
+                    SELECT (
+                        SELECT schema::ObjectType
+                        FILTER .name = 'test::{name}'
+                    ).properties.name;
                 """,
                 {'id', 'a', 'b'}
             )
@@ -3013,8 +3137,10 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         for name in {'Ext4Child', 'Ext4GrandChild', 'Ext4GrandGrandChild'}:
             await self.assert_query_result(
                 f"""
-                    SELECT (SELECT schema::ObjectType
-                            FILTER .name = 'test::{name}').properties.name;
+                    SELECT (
+                        SELECT schema::ObjectType
+                        FILTER .name = 'test::{name}'
+                    ).properties.name;
                 """,
                 {'id', 'a'}
             )
@@ -5105,3 +5231,294 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ''',
             [1],
         )
+
+    async def test_edgeql_ddl_index_01(self):
+        with self.assertRaisesRegex(
+            edgedb.ResultCardinalityMismatchError,
+            r"possibly more than one element returned by the index expression"
+        ):
+            await self.con.execute(r"""
+                CREATE TYPE Foo {
+                    CREATE MULTI PROPERTY a -> int64;
+                    CREATE INDEX ON (.a);
+                }
+            """)
+
+    async def test_edgeql_ddl_index_02(self):
+        with self.assertRaisesRegex(
+            edgedb.ResultCardinalityMismatchError,
+            r"possibly more than one element returned by the index expression"
+        ):
+            await self.con.execute(r"""
+                CREATE TYPE Foo {
+                    CREATE PROPERTY a -> int64;
+                    CREATE PROPERTY b -> int64;
+                    CREATE INDEX ON ({.a, .b});
+                }
+            """)
+
+    async def test_edgeql_ddl_index_03(self):
+        with self.assertRaisesRegex(
+            edgedb.ResultCardinalityMismatchError,
+            r"possibly more than one element returned by the index expression"
+        ):
+            await self.con.execute(r"""
+                CREATE TYPE Foo {
+                    CREATE PROPERTY a -> int64;
+                    CREATE PROPERTY b -> int64;
+                    CREATE INDEX ON (array_unpack([.a, .b]));
+                }
+            """)
+
+    async def test_edgeql_ddl_errors_01(self):
+        await self.con.execute('''
+            WITH MODULE test
+            CREATE TYPE Err1 {
+                CREATE REQUIRED PROPERTY foo -> str;
+            };
+
+            WITH MODULE test
+            ALTER TYPE Err1
+            CREATE REQUIRED LINK bar -> Err1;
+        ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "property 'b' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1 ALTER PROPERTY b
+                    CREATE CONSTRAINT std::regexp(r'b');
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "property 'b' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1 DROP PROPERTY b
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "constraint 'test::a' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1 ALTER PROPERTY foo
+                    DROP CONSTRAINT a;
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "constraint 'test::a' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1 ALTER PROPERTY foo
+                    ALTER CONSTRAINT a ON (foo > 0) {
+                        CREATE ANNOTATION title := 'test'
+                    }
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "annotation 'std::title' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1 ALTER PROPERTY foo
+                    ALTER ANNOTATION title := 'aaa'
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "annotation 'std::title' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1 ALTER PROPERTY foo
+                    DROP ANNOTATION title;
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "annotation 'std::title' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1
+                    ALTER ANNOTATION title := 'aaa'
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "annotation 'std::title' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1
+                    DROP ANNOTATION title
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "index '.foo' does not exist on object type 'test::Err1'"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1
+                    DROP INDEX ON (.foo)
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "index '.zz' does not exist on object type 'test::Err1'"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1
+                    DROP INDEX ON (.zz)
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "object type 'test::Err1' has no link or property 'zz'"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1
+                    CREATE INDEX ON (.zz)
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "object type 'test::Err1' has no link or property 'zz'"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1
+                    CREATE INDEX ON ((.foo, .zz))
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "improperly formed name 'blah': module is not specified"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    CREATE TYPE Err1 EXTENDING blah {
+                        CREATE PROPERTY foo -> str;
+                    };
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "object type 'test::blah' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    CREATE TYPE Err2 EXTENDING test::blah {
+                        CREATE PROPERTY foo -> str;
+                    };
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "link 'b' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1 ALTER LINK b
+                    CREATE CONSTRAINT std::regexp(r'b');
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "link 'b' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1 DROP LINK b;
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "annotation 'std::title' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1 ALTER LINK bar
+                    DROP ANNOTATION title;
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "constraint 'std::min_value' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1 ALTER LINK bar
+                    DROP CONSTRAINT min_value(0);
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "property 'spam' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err1
+                    ALTER LINK bar
+                    DROP PROPERTY spam;
+                ''')
+
+    @test.xfail('''
+        The test currently fails with "property 'spam' does not exist",
+        but it should fail with "link 'foo' does not exist", as
+        `ALTER LINK foo` is the preceeding invalid command.
+    ''')
+    async def test_edgeql_ddl_errors_02(self):
+        await self.con.execute('''
+            WITH MODULE test
+            CREATE TYPE Err2 {
+                CREATE REQUIRED PROPERTY foo -> str;
+            };
+
+            WITH MODULE test
+            ALTER TYPE Err2
+            CREATE REQUIRED LINK bar -> Err2;
+        ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "link 'foo' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER TYPE Err2
+                    ALTER LINK foo
+                    DROP PROPERTY spam;
+                ''')
+
+    async def test_edgeql_ddl_errors_03(self):
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "function 'test::foo___1' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    ALTER FUNCTION foo___1(a: int64)
+                    SET volatility := 'STABLE';
+                ''')
+
+        async with self._run_and_rollback():
+            with self.assertRaisesRegex(
+                    edgedb.errors.InvalidReferenceError,
+                    "function 'test::foo___1' does not exist"):
+                await self.con.execute('''
+                    WITH MODULE test
+                    DROP FUNCTION foo___1(a: int64);
+                ''')

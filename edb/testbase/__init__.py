@@ -1,7 +1,7 @@
 #
 # This source file is part of the EdgeDB open source project.
 #
-# Copyright 2008-present MagicStack Inc. and the EdgeDB authors.
+# Copyright 2020-present MagicStack Inc. and the EdgeDB authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,13 +15,3 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
-
-from __future__ import annotations
-
-from . import domains  # NOQA
-from . import tables  # NOQA
-from . import schemas  # NOQA
-from . import sequences  # NOQA
-from . import types  # NOQA
-from . import constraints  # NOQA

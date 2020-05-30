@@ -704,6 +704,7 @@ cdef class EdgeConnection:
         eql_tokens = tokenize(eql)
         units = await self._compile(eql_tokens, stmt_mode=stmt_mode)
 
+        new_type_ids = frozenset()
         for query_unit in units:
             self.dbview.start(query_unit)
             try:
@@ -739,8 +740,16 @@ cdef class EdgeConnection:
                     await self.get_backend().pgcon.signal_ddl(
                         self.dbview.dbver
                     )
-                if query_unit.new_types and self.dbview.in_tx():
-                    await self._update_type_ids(query_unit)
+                if query_unit.new_types:
+                    new_type_ids |= query_unit.new_types
+
+        if new_type_ids and self.dbview.in_tx():
+            # This is a single script, potentially containing multiple
+            # transactions (each of which would consist of multiple
+            # query units).  In the end, if we're still in transaction
+            # after executing the script and there were new types added
+            # we want to update type IDs in the linked compiler.
+            await self._update_type_ids(new_type_ids)
 
         packet = WriteBuffer.new()
         packet.write_buffer(self.make_command_complete_msg(query_unit))
@@ -1121,21 +1130,30 @@ cdef class EdgeConnection:
                 self.buffer.finish_message()
 
             if query_unit.new_types and self.dbview.in_tx():
-                await self._update_type_ids(query_unit)
+                await self._update_type_ids(query_unit.new_types)
 
-    async def _update_type_ids(self, query_unit):
+    async def _get_backend_tids(self, tids):
+        conn = self.get_backend().pgcon
+        server = self.port.get_server()
+        query = await server.get_sys_query(conn, 'backend_tids')
+        json_data = await conn.parse_execute_json(
+            query, b'__sys_backend_tids',
+            dbver=b'', use_prep_stmt=True, args=(list(tids),),
+        )
+
+        if json_data is not None:
+            return json.loads(json_data.decode('utf-8'))
+        else:
+            return None
+
+    async def _update_type_ids(self, new_types):
         # Inform the compiler process about the newly
         # appearing types, so type descriptors contain
         # the necessary backend data.  We only do this
         # when in a transaction, since otherwise the entire
         # schema will reload anyway due to a bumped dbver.
         try:
-            tids = ','.join(f"'{tid}'" for tid in query_unit.new_types)
-            ret = await self.get_backend().pgcon.simple_query(b'''
-                SELECT id, backend_id
-                FROM edgedb.type
-                WHERE id = any(ARRAY[%b]::uuid[])
-            ''' % (tids.encode(),), ignore_data=False)
+            ret = await self._get_backend_tids(new_types)
         except Exception:
             if self.dbview.in_tx():
                 self.dbview.abort_tx()
@@ -1143,9 +1161,9 @@ cdef class EdgeConnection:
         else:
             typemap = {}
             if ret:
-                for tid, backend_tid in ret:
-                    if backend_tid is not None:
-                        typemap[tid.decode()] = int(backend_tid.decode())
+                for entry in ret:
+                    if entry['backend_id'] is not None:
+                        typemap[entry['id']] = entry['backend_id']
             if typemap:
                 return await self.get_backend().compiler.call(
                     'update_type_ids',
@@ -1274,7 +1292,6 @@ cdef class EdgeConnection:
         cdef:
             char mtype
             bint flush_sync_on_error
-            bint flush_on_error
 
         try:
             await self.auth()
@@ -1312,7 +1329,6 @@ cdef class EdgeConnection:
                 mtype = self.buffer.get_message_type()
 
                 flush_sync_on_error = False
-                flush_on_error = False
 
                 try:
                     if mtype == b'P':
@@ -1345,11 +1361,10 @@ cdef class EdgeConnection:
                         # The restore protocol cannot send SYNC beforehand,
                         # so if an error occurs the server should send an
                         # ERROR message immediately.
-                        flush_on_error = True
                         await self.restore()
 
                     else:
-                        self.fallthrough(False)
+                        self.fallthrough()
 
                 except ConnectionAbortedError:
                     raise
@@ -1370,8 +1385,7 @@ cdef class EdgeConnection:
                     self.buffer.finish_message()
 
                     await self.write_error(ex)
-                    if flush_on_error:
-                        self.flush()
+                    self.flush()
 
                     if self._backend is None:
                         # The connection was aborted while we were
@@ -1560,7 +1574,7 @@ cdef class EdgeConnection:
                 'unknown postgres connection status')
         return buf.end_message()
 
-    cdef fallthrough(self, bint ignore_unhandled):
+    cdef fallthrough(self):
         cdef:
             char mtype = self.buffer.get_message_type()
 
@@ -1568,15 +1582,12 @@ cdef class EdgeConnection:
             # Flush
             self.buffer.discard_message()
             self.flush()
-            return
+
         elif mtype == b'X':
             # Terminate
             self.buffer.discard_message()
             self.abort()
-            return
 
-        if ignore_unhandled:
-            self.buffer.discard_message()
         else:
             raise errors.BinaryProtocolError(
                 f'unexpected message type {chr(mtype)!r}')
@@ -1997,7 +2008,7 @@ cdef class EdgeConnection:
                     break
 
                 else:
-                    self.fallthrough(False)
+                    self.fallthrough()
 
             await pgcon.simple_query(
                 enable_trigger_q.encode() + b'COMMIT;',

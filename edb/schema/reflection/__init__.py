@@ -1,7 +1,7 @@
 #
 # This source file is part of the EdgeDB open source project.
 #
-# Copyright 2008-present MagicStack Inc. and the EdgeDB authors.
+# Copyright 2016-present MagicStack Inc. and the EdgeDB authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,14 @@
 #
 
 
-from __future__ import annotations
+from .reader import parse_into  # NoQA
+from .structure import generate_structure  # NoQA
+from .structure import SchemaTypeLayout  # NoQA
+from .writer import write_meta  # NoQA
 
-from . import introspection  # NOQA
-from . import schema  # NOQA
-from . import deltalog  # NOQA
+__all__ = (
+    'generate_structure',
+    'write_meta',
+    'parse_into',
+    'SchemaTypeLayout',
+)

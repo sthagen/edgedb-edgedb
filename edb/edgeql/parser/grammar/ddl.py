@@ -183,6 +183,9 @@ class InnerDDLStmt(Nonterm):
     def reduce_CreateFunctionStmt(self, *kids):
         self.val = kids[0].val
 
+    def reduce_AlterFunctionStmt(self, *kids):
+        self.val = kids[0].val
+
     def reduce_DropFunctionStmt(self, *kids):
         self.val = kids[0].val
 
@@ -518,12 +521,21 @@ class GetMigrationStmt(Nonterm):
         )
 
 
+commands_block(
+    'CreateDatabase',
+    SetFieldStmt,
+)
+
+
 #
 # CREATE DATABASE
 #
 class CreateDatabaseStmt(Nonterm):
-    def reduce_CREATE_DATABASE_AnyNodeName(self, *kids):
-        self.val = qlast.CreateDatabase(name=kids[2].val)
+    def reduce_CREATE_DATABASE_AnyNodeName_OptCreateRoleCommandsBlock(
+        self,
+        *kids,
+    ):
+        self.val = qlast.CreateDatabase(name=kids[2].val, commands=kids[3].val)
 
 
 #
@@ -1627,6 +1639,34 @@ class DropFunctionStmt(Nonterm):
         self.val = qlast.DropFunction(
             name=kids[2].val,
             params=kids[3].val)
+
+
+#
+# ALTER FUNCTION
+#
+
+commands_block(
+    'AlterFunction',
+    commondl.FromFunction,
+    SetFieldStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
+    DropAnnotationValueStmt,
+    opt=False
+)
+
+
+class AlterFunctionStmt(Nonterm, commondl.ProcessFunctionBlockMixin):
+    def reduce_AlterFunctionStmt(self, *kids):
+        """%reduce
+           ALTER FUNCTION NodeName CreateFunctionArgs
+           AlterFunctionCommandsBlock
+        """
+        self.val = qlast.AlterFunction(
+            name=kids[2].val,
+            params=kids[3].val,
+            **self._process_function_body(kids[4], optional_using=True)
+        )
 
 
 #

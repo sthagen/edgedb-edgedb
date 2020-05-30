@@ -33,11 +33,14 @@ from edb import edgeql
 from edb.edgeql import ast as qlast
 from edb.edgeql import parser as qlparser
 
+from edb.server import buildmeta
 from edb.server import defines
+from edb.server import compiler as edbcompiler
 
 from edb.schema import ddl as s_ddl
 from edb.schema import delta as sd
 from edb.schema import migrations as s_migrations  # noqa
+from edb.schema import reflection as s_refl
 from edb.schema import schema as s_schema
 from edb.schema import std as s_std
 
@@ -217,16 +220,18 @@ class AstValueTest(BaseDocTest):
 
 
 _std_schema = None
+_refl_schema = None
+_schema_class_layout = None
 
 
 def _load_std_schema():
     global _std_schema
     if _std_schema is None:
-        std_dirs_hash = devmode.hash_dirs(s_std.CACHE_SRC_DIRS)
+        std_dirs_hash = buildmeta.hash_dirs(s_std.CACHE_SRC_DIRS)
         schema = None
 
         if devmode.is_in_dev_mode():
-            schema = devmode.read_dev_mode_cache(
+            schema = buildmeta.read_data_cache(
                 std_dirs_hash, 'transient-stdschema.pickle')
 
         if schema is None:
@@ -235,12 +240,57 @@ def _load_std_schema():
                 schema = s_std.load_std_module(schema, modname)
 
         if devmode.is_in_dev_mode():
-            devmode.write_dev_mode_cache(
+            buildmeta.write_data_cache(
                 schema, std_dirs_hash, 'transient-stdschema.pickle')
 
         _std_schema = schema
 
     return _std_schema
+
+
+def _load_reflection_schema():
+    global _refl_schema
+    global _schema_class_layout
+
+    if _refl_schema is None:
+        std_dirs_hash = buildmeta.hash_dirs(s_std.CACHE_SRC_DIRS)
+
+        cache = None
+        if devmode.is_in_dev_mode():
+            cache = buildmeta.read_data_cache(
+                std_dirs_hash, 'transient-reflschema.pickle')
+
+        if cache is not None:
+            reflschema, classlayout = cache
+        else:
+            std_schema = _load_std_schema()
+            refldelta, classlayout, _ = s_refl.generate_structure(std_schema)
+            context = sd.CommandContext()
+            context.stdmode = True
+            reflschema = refldelta.apply(std_schema, context)
+
+            if devmode.is_in_dev_mode():
+                buildmeta.write_data_cache(
+                    (reflschema, classlayout),
+                    std_dirs_hash,
+                    'transient-reflschema.pickle',
+                )
+
+        _refl_schema = reflschema
+        _schema_class_layout = classlayout
+
+    return _refl_schema, _schema_class_layout
+
+
+def new_compiler():
+    std_schema = _load_std_schema()
+    refl_schema, layout = _load_reflection_schema()
+
+    return edbcompiler.new_compiler(
+        std_schema=std_schema,
+        reflection_schema=refl_schema,
+        schema_class_layout=layout,
+    )
 
 
 class BaseSchemaTest(BaseDocTest):

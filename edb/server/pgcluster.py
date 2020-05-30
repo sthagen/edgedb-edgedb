@@ -266,6 +266,9 @@ class Cluster(BaseCluster):
             'max_connections': '500',
         }
 
+        if os.getenv('EDGEDB_DEBUG_PGSERVER'):
+            start_settings['log_statement'] = 'all'
+
         if server_settings:
             start_settings.update(server_settings)
 
@@ -285,7 +288,7 @@ class Cluster(BaseCluster):
             # of postgres daemon under an Administrative account
             # is not permitted and there is no easy way to drop
             # privileges.
-            if os.getenv('ASYNCPG_DEBUG_SERVER'):
+            if os.getenv('EDGEDB_DEBUG_PGSERVER'):
                 stdout = sys.stdout
             else:
                 stdout = subprocess.DEVNULL
@@ -304,7 +307,7 @@ class Cluster(BaseCluster):
                     'pg_ctl start exited with status {:d}{}'.format(
                         process.returncode, stderr))
         else:
-            if os.getenv('ASYNCPG_DEBUG_SERVER'):
+            if os.getenv('EDGEDB_DEBUG_PGSERVER'):
                 stdout = sys.stdout
             else:
                 stdout = subprocess.DEVNULL
@@ -476,6 +479,71 @@ class Cluster(BaseCluster):
         status = self.get_status()
         if status == 'running':
             self.reload()
+
+    def dump_database(self, dbname, *, exclude_schema=None):
+        status = self.get_status()
+        if status != 'running':
+            raise ClusterError('cannot dump: cluster is not running')
+
+        pg_dump = self._find_pg_binary('pg_dump')
+        conn_spec = self.get_connection_spec()
+
+        args = [
+            pg_dump,
+            f'--dbname={dbname}',
+            f'--host={conn_spec["host"]}',
+            f'--port={conn_spec["port"]}',
+            f'--username={conn_spec["user"]}',
+        ]
+
+        if exclude_schema:
+            args.append(f'--exclude-schema={exclude_schema}')
+
+        process = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        if process.returncode != 0:
+            raise ClusterError(
+                'pg_dump exited with status {:d}: {}'.format(
+                    process.returncode, process.stderr.decode()
+                )
+            )
+
+        return process.stdout
+
+    def restore_database(self, dbname, dump):
+        status = self.get_status()
+        if status != 'running':
+            raise ClusterError('cannot restore: cluster is not running')
+
+        psql = self._find_pg_binary('psql')
+        conn_spec = self.get_connection_spec()
+
+        args = [
+            psql,
+            f'--dbname={dbname}',
+            f'--host={conn_spec["host"]}',
+            f'--port={conn_spec["port"]}',
+            f'--username={conn_spec["user"]}',
+            f'--single-transaction',
+        ]
+
+        process = subprocess.run(
+            args,
+            input=dump,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        if process.returncode != 0:
+            raise ClusterError(
+                'psql exited with status {:d}: {}'.format(
+                    process.returncode, process.stderr.decode()
+                )
+            )
 
     def _init_env(self):
         if not self._pg_bin_dir:

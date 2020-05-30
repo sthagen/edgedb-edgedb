@@ -17,27 +17,25 @@
 #
 
 
-CREATE MODULE sys {
-    SET builtin := true;
-};
+CREATE MODULE sys;
 
 
 CREATE SCALAR TYPE sys::TransactionIsolation
     EXTENDING enum<'REPEATABLE READ', 'SERIALIZABLE'>;
 
 
-CREATE ABSTRACT TYPE sys::SystemObject EXTENDING std::BaseObject;
+CREATE ABSTRACT TYPE sys::SystemObject EXTENDING schema::AnnotationSubject;
 
 
 CREATE TYPE sys::Database EXTENDING sys::SystemObject {
-    CREATE REQUIRED PROPERTY name -> std::str {
-        SET readonly := True;
+    ALTER PROPERTY name {
+        CREATE CONSTRAINT std::exclusive;
     };
 };
 
 
 CREATE TYPE sys::Role EXTENDING sys::SystemObject {
-    CREATE REQUIRED PROPERTY name -> std::str {
+    ALTER PROPERTY name {
         CREATE CONSTRAINT std::exclusive;
     };
 
@@ -177,7 +175,8 @@ sys::get_version_as_str() -> std::str
             ++ '.' ++ <str>v.minor
             ++ (('-' ++ <str>v.stage ++ '.' ++ <str>v.stage_no)
                 IF v.stage != <sys::version_stage>'final' ELSE '')
-            ++ (('+' ++ std::to_str(v.local, '.')) IF len(v.local) > 0 ELSE '')
+            ++ (('+' ++ std::array_join(v.local, '.')) IF len(v.local) > 0
+                ELSE '')
     );
 };
 

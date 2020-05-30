@@ -966,6 +966,30 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             [True],
         )
 
+    async def test_edgeql_functions_unix_to_datetime_01(self):
+        dt = await self.con.fetchone(
+            'SELECT <str>to_datetime(1590595184.584);'
+        )
+        self.assertEqual('2020-05-27T15:59:44.584+00:00', dt)
+
+    async def test_edgeql_functions_unix_to_datetime_02(self):
+        dt = await self.con.fetchone(
+            'SELECT <str>to_datetime(1590595184);'
+        )
+        self.assertEqual('2020-05-27T15:59:44+00:00', dt)
+
+    async def test_edgeql_functions_unix_to_datetime_03(self):
+        dt = await self.con.fetchone(
+            'SELECT <str>to_datetime(517795200);'
+        )
+        self.assertEqual('1986-05-30T00:00:00+00:00', dt)
+
+    async def test_edgeql_functions_unix_to_datetime_04(self):
+        dt = await self.con.fetchone(
+            'SELECT <str>to_datetime(517795200.00n);'
+        )
+        self.assertEqual('1986-05-30T00:00:00+00:00', dt)
+
     async def test_edgeql_functions_datetime_current_01(self):
         # make sure that datetime as a str gets serialized to a
         # particular format
@@ -2083,40 +2107,40 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
                 await self.con.fetchall(
                     r'''SELECT to_str(<cal::local_time>'15:01:22', '');''',)
 
-    async def test_edgeql_functions_to_str_08(self):
+    async def test_edgeql_functions_array_join_01(self):
         await self.assert_query_result(
-            r'''SELECT to_str(['one', 'two', 'three'], ', ');''',
+            r'''SELECT array_join(['one', 'two', 'three'], ', ');''',
             ['one, two, three'],
         )
 
         await self.assert_query_result(
-            r'''SELECT to_str(['one', 'two', 'three'], '');''',
+            r'''SELECT array_join(['one', 'two', 'three'], '');''',
             ['onetwothree'],
         )
 
         await self.assert_query_result(
-            r'''SELECT to_str(<array<str>>[], ', ');''',
+            r'''SELECT array_join(<array<str>>[], ', ');''',
             [''],
         )
 
-    async def test_edgeql_functions_to_array_01(self):
+    async def test_edgeql_functions_str_split_01(self):
         await self.assert_query_result(
-            r'''SELECT to_array('one, two, three', ', ');''',
+            r'''SELECT str_split('one, two, three', ', ');''',
             [['one', 'two', 'three']],
         )
 
         await self.assert_query_result(
-            r'''SELECT to_array('', ', ');''',
+            r'''SELECT str_split('', ', ');''',
             [[]],
         )
 
         await self.assert_query_result(
-            r'''SELECT to_array('foo', ', ');''',
+            r'''SELECT str_split('foo', ', ');''',
             [['foo']],
         )
 
         await self.assert_query_result(
-            r'''SELECT to_array('foo', '');''',
+            r'''SELECT str_split('foo', '');''',
             [['f', 'o', 'o']],
         )
 

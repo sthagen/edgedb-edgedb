@@ -54,6 +54,7 @@ class TestServerOps(tb.TestCase):
         cmd = [
             sys.executable, '-m', 'edb.server.main',
             '--port', 'auto',
+            '--testmode',
             '--temp-dir',
             '--auto-shutdown',
             '--echo-runtime-info'
@@ -69,7 +70,7 @@ class TestServerOps(tb.TestCase):
         try:
             data = await asyncio.wait_for(
                 read_runtime_info(proc.stdout),
-                timeout=100)
+                timeout=1000)
 
             runstate_dir = data['runstate_dir']
             port = data['port']

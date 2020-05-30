@@ -18,6 +18,7 @@
 
 
 from __future__ import annotations
+from typing import *
 
 import asyncio
 import atexit
@@ -31,8 +32,11 @@ import math
 import os
 import pprint
 import re
+import subprocess
+import sys
 import unittest
 import uuid
+
 from datetime import timedelta
 
 import click.testing
@@ -250,6 +254,20 @@ class ClusterTestCase(TestCase):
         super().setUpClass()
         cls.cluster = _start_cluster(cleanup_atexit=True)
 
+    @classmethod
+    def get_connect_args(cls, *,
+                         cluster=None,
+                         database=edgedb_defines.EDGEDB_SUPERUSER_DB,
+                         user=edgedb_defines.EDGEDB_SUPERUSER,
+                         password='test'):
+        if cluster is None:
+            cluster = cls.cluster
+        conargs = cluster.get_connect_args().copy()
+        conargs.update(dict(user=user,
+                            password=password,
+                            database=database))
+        return conargs
+
 
 class RollbackChanges:
     def __init__(self, test):
@@ -275,19 +293,35 @@ class ConnectedTestCaseMixin:
             cluster=cluster, database=database, user=user, password=password)
         return await edgedb.async_connect(**conargs)
 
-    @classmethod
-    def get_connect_args(cls, *,
-                         cluster=None,
-                         database=edgedb_defines.EDGEDB_SUPERUSER_DB,
-                         user=edgedb_defines.EDGEDB_SUPERUSER,
-                         password='test'):
-        if cluster is None:
-            cluster = cls.cluster
-        conargs = cluster.get_connect_args().copy()
-        conargs.update(dict(user=user,
-                            password=password,
-                            database=database))
-        return conargs
+    def repl(self):
+        """Open interactive EdgeQL REPL right in the test.
+
+        This is obviously only for debugging purposes.  Just add
+        `self.repl()` at any point in your test.
+        """
+
+        conargs = self.get_connect_args()
+
+        cmd = [
+            # TODO: switch to 'edgedb' when it understands EDGEDB_PASSWORD
+            'python', '-m', 'edb.cli',
+            '--host', conargs['host'],
+            '--port', str(conargs['port']),
+            '--database', self.con.dbname,
+            '--user', conargs['user'],
+        ]
+
+        env = os.environ.copy()
+        if password := conargs.get('password'):
+            env['EDGEDB_PASSWORD'] = password
+
+        proc = subprocess.Popen(
+            cmd, stdin=sys.stdin, stdout=sys.stdout, env=env)
+        while proc.returncode is None:
+            try:
+                proc.wait()
+            except KeyboardInterrupt:
+                pass
 
     def _run_and_rollback(self):
         return RollbackChanges(self)
@@ -510,9 +544,9 @@ class ConnectedTestCaseMixin:
         return _assert_generic_shape((), data, shape)
 
 
-class CLITestCaseMixin:
+class OldCLITestCaseMixin:
 
-    def run_cli(self, *args, input=None):
+    def run_cli(self, *args, input: Optional[str]=None):
         conn_args = self.get_connect_args()
 
         cmd_args = (
@@ -532,6 +566,32 @@ class CLITestCaseMixin:
         return runner.invoke(
             cli.cli, args=cmd_args, input=input,
             catch_exceptions=False)
+
+
+class CLITestCaseMixin:
+
+    def run_cli(self, *args, input: Optional[str]=None):
+        conn_args = self.get_connect_args()
+
+        cmd_args = (
+            '--host', conn_args['host'],
+            '--port', str(conn_args['port']),
+            '--user', conn_args['user'],
+        ) + args
+
+        if conn_args['password']:
+            cmd_args = ('--password-from-stdin',) + cmd_args
+            if input is not None:
+                input = f"{conn_args['password']}\n{input}"
+            else:
+                input = f"{conn_args['password']}\n"
+
+        subprocess.run(
+            ('edgedb',) + cmd_args,
+            input=input.encode() if input else None,
+            check=True,
+            capture_output=True,
+        )
 
 
 class ConnectedTestCase(ClusterTestCase, ConnectedTestCaseMixin):
@@ -659,16 +719,18 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
         # Look at all SCHEMA entries and potentially create multiple
         # modules, but always create the 'test' module.
         schema = ['\nmodule test {}']
-        for name, val in cls.__dict__.items():
+        for name in dir(cls):
             m = re.match(r'^SCHEMA(?:_(\w+))?', name)
             if m:
                 module_name = (m.group(1) or 'test').lower().replace(
                     '__', '.')
 
-                with open(val, 'r') as sf:
-                    module = sf.read()
+                schema_fn = getattr(cls, name)
+                if schema_fn is not None:
+                    with open(schema_fn, 'r') as sf:
+                        module = sf.read()
 
-                schema.append(f'\nmodule {module_name} {{ {module} }}')
+                    schema.append(f'\nmodule {module_name} {{ {module} }}')
 
         script += f'\nCREATE MIGRATION test_migration'
         script += f' TO {{ {"".join(schema)} }};'
