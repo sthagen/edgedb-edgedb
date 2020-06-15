@@ -55,6 +55,7 @@ RUNTIME_DEPS = [
     'setuptools_scm~=3.2.0',
     'typing_inspect~=0.5.0',
     'uvloop~=0.14.0',
+    'wcwidth~=0.1.8',
 
     'graphql-core~=3.0.3',
     'promise~=2.2.0',
@@ -390,6 +391,7 @@ class build_postgres(setuptools.Command):
         pass
 
     def run(self, *args, **kwargs):
+        build = self.get_finalized_command('build')
         _compile_postgres(
             pathlib.Path(build.build_base).resolve(),
             force_build=True,
