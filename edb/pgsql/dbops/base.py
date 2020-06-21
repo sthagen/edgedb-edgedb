@@ -18,11 +18,12 @@
 
 
 from __future__ import annotations
+from typing import *
 
 import collections
+import enum
 import numbers
 import textwrap
-from typing import *
 
 from edb.common import markup
 from edb.common import struct
@@ -32,6 +33,13 @@ from ..common import quote_ident as qi
 from ..common import quote_literal as ql
 from ..common import quote_type as qt
 from ..common import qname as qn
+
+
+class NotSpecifiedT(enum.Enum):
+    NotSpecified = 0
+
+
+NotSpecified: Final = NotSpecifiedT.NotSpecified
 
 
 def encode_value(val: Any) -> str:
@@ -66,7 +74,6 @@ class PLExpression(str):
 class SQLBlock:
     def __init__(self):
         self.commands = []
-        self.disable_ddl_triggers = True
         self._transactional = True
 
     def add_block(self):
@@ -112,10 +119,6 @@ class PLBlock(SQLBlock):
         self.shared_vars = set()
         self.declarations = []
         self.level = level
-        if top_block is not None:
-            self.disable_ddl_triggers = self.top_block.disable_ddl_triggers
-        else:
-            self.disable_ddl_triggers = True
         self.conditions = set()
         self.neg_conditions = set()
 
@@ -241,9 +244,8 @@ class PLBlock(SQLBlock):
 
 
 class PLTopBlock(PLBlock):
-    def __init__(self, *, disable_ddl_triggers: bool=True):
+    def __init__(self):
         super().__init__(top_block=None, level=0)
-        self.disable_ddl_triggers = disable_ddl_triggers
 
     def add_block(self):
         block = PLBlock(top_block=self, level=self.level + 1)

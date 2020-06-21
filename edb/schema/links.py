@@ -169,10 +169,6 @@ class Link(sources.Source, pointers.Pointer, s_abc.Link,
         return sn.Name('std::link')
 
 
-class DerivedLink(pointers.Pointer, sources.Source):
-    pass
-
-
 class LinkSourceCommandContext(sources.SourceCommandContext):
     pass
 
@@ -347,6 +343,12 @@ class CreateLink(
         context: sd.CommandContext,
         refdict: so.RefDict,
     ) -> sd.CommandGroup:
+        if self.scls.get_computable(schema) and refdict.attr != 'pointers':
+            # If the link is a computable, the inheritance would only
+            # happen in the case of aliasing, and in that case we only
+            # need to inherit the link properties and nothing else.
+            return sd.CommandGroup()
+
         cmd = super().inherit_classref_dict(schema, context, refdict)
 
         if refdict.attr != 'pointers':

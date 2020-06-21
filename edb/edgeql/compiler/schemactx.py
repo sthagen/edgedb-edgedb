@@ -140,17 +140,20 @@ def resolve_schema_name(
 
 
 def derive_view(
-        stype: s_types.Type, *,
-        derived_name: Optional[sn.SchemaName]=None,
-        derived_name_quals: Optional[Sequence[str]]=(),
-        derived_name_base: Optional[str]=None,
-        preserve_shape: bool=False,
-        preserve_path_id: bool=False,
-        is_insert: bool=False,
-        is_update: bool=False,
-        inheritance_merge: bool=True,
-        attrs: Optional[Dict[str, Any]]=None,
-        ctx: context.ContextLevel) -> s_types.Type:
+    stype: s_types.Type,
+    *,
+    derived_name: Optional[sn.SchemaName] = None,
+    derived_name_quals: Optional[Sequence[str]] = (),
+    derived_name_base: Optional[str] = None,
+    preserve_shape: bool = False,
+    preserve_path_id: bool = False,
+    is_insert: bool = False,
+    is_update: bool = False,
+    is_delete: bool = False,
+    inheritance_merge: bool = True,
+    attrs: Optional[Dict[str, Any]] = None,
+    ctx: context.ContextLevel,
+) -> s_types.Type:
 
     if derived_name is None:
         assert isinstance(stype, s_obj.DerivableObject)
@@ -162,6 +165,8 @@ def derive_view(
         exprtype = s_types.ExprType.Insert
     elif is_update:
         exprtype = s_types.ExprType.Update
+    elif is_delete:
+        exprtype = s_types.ExprType.Delete
     else:
         exprtype = s_types.ExprType.Select
 
@@ -185,6 +190,7 @@ def derive_view(
             inheritance_merge=inheritance_merge,
             refdict_whitelist={'pointers'},
             mark_derived=True,
+            transient=True,
             preserve_path_id=preserve_path_id,
             attrs=attrs,
         )
@@ -250,6 +256,7 @@ def derive_ptr(
         inheritance_merge=inheritance_merge,
         refdict_whitelist={'pointers'},
         mark_derived=True,
+        transient=True,
         preserve_path_id=preserve_path_id,
         attrs=attrs)
 
@@ -455,7 +462,9 @@ def derive_dummy_ptr(
                 'cardinality': qltypes.SchemaCardinality.MANY,
             },
             name=derived_name,
-            mark_derived=True)
+            mark_derived=True,
+            transient=True,
+        )
         ctx.env.created_schema_objects.add(derived)
 
     return derived

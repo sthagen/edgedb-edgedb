@@ -587,6 +587,7 @@ class CommandContextToken(Generic[Command_T]):
     mark_derived: Optional[bool]
     preserve_path_id: Optional[bool]
     enable_recursion: Optional[bool]
+    transient_derivation: Optional[bool]
 
     def __init__(
         self,
@@ -603,6 +604,7 @@ class CommandContextToken(Generic[Command_T]):
         self.mark_derived = None
         self.preserve_path_id = None
         self.enable_recursion = None
+        self.transient_derivation = None
 
 
 class CommandContextWrapper(Generic[Command_T]):
@@ -640,7 +642,8 @@ class CommandContext:
         descriptive_mode: bool = False,
         schema_object_ids: Optional[
             Mapping[Tuple[str, Optional[str]], uuid.UUID]
-        ] = None
+        ] = None,
+        backend_superuser_role: Optional[str] = None,
     ) -> None:
         self.stack: List[CommandContextToken[Command]] = []
         self._cache: Dict[Hashable, Any] = {}
@@ -656,6 +659,7 @@ class CommandContext:
         self.renamed_objs: Set[so.Object] = set()
         self.altered_targets: Set[so.Object] = set()
         self.schema_object_ids = schema_object_ids
+        self.backend_superuser_role = backend_superuser_role
 
     @property
     def modaliases(self) -> Mapping[Optional[str], str]:
@@ -698,6 +702,14 @@ class CommandContext:
                 return ctx.enable_recursion
 
         return True
+
+    @property
+    def transient_derivation(self) -> bool:
+        for ctx in reversed(self.stack):
+            if ctx.transient_derivation is not None:
+                return ctx.transient_derivation
+
+        return False
 
     @property
     def canonical(self) -> bool:
@@ -1138,6 +1150,10 @@ class ObjectCommand(
                     f'module {modname} is read-only',
                     context=self.source_context)
 
+    def get_verbosename(self) -> str:
+        mcls = self.get_schema_metaclass()
+        return mcls.get_verbosename_static(self.classname)
+
     @overload
     def get_object(
         self,
@@ -1437,6 +1453,13 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
 
         return cmd
 
+    def validate_create(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> None:
+        pass
+
     def _create_begin(
         self,
         schema: s_schema.Schema,
@@ -1445,9 +1468,6 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         self._validate_legal_command(schema, context)
 
         for op in self.get_prerequisites():
-            schema = op.apply(schema, context)
-
-        for op in self.get_subcommands(type=CreateObjectFragment):
             schema = op.apply(schema, context)
 
         if context.schema_object_ids is not None:
@@ -1465,6 +1485,7 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         if not context.canonical:
             self.set_attribute_value('builtin', context.stdmode)
             schema = self.resolve_refs(schema, context)
+            self.validate_create(schema, context)
 
         props = self.get_resolved_attributes(schema, context)
         metaclass = self.get_schema_metaclass()
@@ -1494,9 +1515,7 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         context: CommandContext,
     ) -> s_schema.Schema:
         for op in self.get_subcommands(include_prerequisites=False):
-            if not isinstance(op, CreateObjectFragment):
-                schema = op.apply(schema, context=context)
-
+            schema = op.apply(schema, context=context)
         return schema
 
     def _create_finalize(
@@ -1536,10 +1555,6 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         return '<%s.%s "%s">' % (self.__class__.__module__,
                                  self.__class__.__name__,
                                  self.classname)
-
-
-class CreateObjectFragment(ObjectCommand[so.Object]):
-    pass
 
 
 class AlterObjectFragment(ObjectCommand[so.Object]):
@@ -1829,6 +1844,10 @@ class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         for op in self.get_subcommands(type=AlterObjectFragment):
             schema = op.apply(schema, context)
 
+        if not context.canonical:
+            schema = self.resolve_refs(schema, context)
+            self.validate_alter(schema, context)
+
         props = self.get_resolved_attributes(schema, context)
         schema = self.scls.update(schema, props)
         return schema
@@ -1850,6 +1869,13 @@ class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         context: CommandContext,
     ) -> s_schema.Schema:
         return schema
+
+    def validate_alter(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> None:
+        pass
 
     def apply(
         self,

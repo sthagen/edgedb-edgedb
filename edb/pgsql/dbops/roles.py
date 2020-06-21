@@ -34,11 +34,11 @@ class Role(base.DBObject):
         self,
         name: str,
         *,
-        allow_login: bool = False,
-        allow_createdb: bool = False,
-        allow_createrole: bool = False,
-        password: Optional[str] = None,
-        is_superuser: bool = False,
+        allow_login: Union[bool, base.NotSpecifiedT] = base.NotSpecified,
+        allow_createdb: Union[bool, base.NotSpecifiedT] = base.NotSpecified,
+        allow_createrole: Union[bool, base.NotSpecifiedT] = base.NotSpecified,
+        password: Union[None, str, base.NotSpecifiedT] = base.NotSpecified,
+        is_superuser: Union[bool, base.NotSpecifiedT] = base.NotSpecified,
         membership: Optional[Iterable[str]] = None,
         metadata: Optional[Mapping[str, Any]] = None,
     ) -> None:
@@ -87,26 +87,23 @@ class RoleCommand:
         }
 
         for objattr, stmtattr in attrmap.items():
-            if getattr(self.object, objattr):
+            attr = getattr(self.object, objattr)
+            if attr is base.NotSpecified:
+                continue
+            elif attr:
                 attrs.append(stmtattr)
             else:
                 attrs.append(f'NO{stmtattr}')
 
-        if self.object.password:
-            attrs.append(f'PASSWORD {ql(self.object.password)}')
-        else:
+        if self.object.password is None:
             attrs.append('PASSWORD NULL')
+        elif self.object.password is not base.NotSpecified:
+            attrs.append(f'PASSWORD {ql(self.object.password)}')
 
         return f'ROLE {self.object.get_id()} {" ".join(attrs)}'
 
 
 class CreateRole(ddl.CreateObject, RoleCommand):
-    def __init__(
-            self, role, *, conditions=None, neg_conditions=None, priority=0):
-        super().__init__(
-            role.name, conditions=conditions, neg_conditions=neg_conditions,
-            priority=priority)
-        self.object = role
 
     def code(self, block: base.PLBlock) -> str:
         if self.object.membership:
@@ -118,12 +115,6 @@ class CreateRole(ddl.CreateObject, RoleCommand):
 
 
 class AlterRole(ddl.AlterObject, RoleCommand):
-    def __init__(
-            self, role, *, conditions=None, neg_conditions=None, priority=0):
-        super().__init__(
-            role.name, conditions=conditions, neg_conditions=neg_conditions,
-            priority=priority)
-        self.object = role
 
     def code(self, block: base.PLBlock) -> str:
         return f'ALTER {self._render()}'
@@ -159,3 +150,17 @@ class AlterRoleDropMember(ddl.SchemaObjectOperation):
 
     def code(self, block: base.PLBlock) -> str:
         return f'REVOKE {qi(self.name)} FROM {qi(self.member)}'
+
+
+class AlterRoleAddMembership(ddl.SchemaObjectOperation):
+
+    def __init__(
+            self, name, membership, *, conditions=None,
+            neg_conditions=None, priority=0):
+        super().__init__(name, conditions=conditions,
+                         neg_conditions=neg_conditions, priority=priority)
+        self.membership = membership
+
+    def code(self, block: base.PLBlock) -> str:
+        roles = ', '.join(qi(m) for m in self.membership)
+        return f'GRANT {roles} TO {qi(self.name)}'
