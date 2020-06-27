@@ -18,16 +18,18 @@
 
 import asyncio
 import collections
+import contextlib
 import hashlib
 import json
 import logging
 import time
+import statistics
 import traceback
 
 cimport cython
 cimport cpython
 
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence
 from . cimport cpythonx
 
 from libc.stdint cimport int8_t, uint8_t, int16_t, uint16_t, \
@@ -93,6 +95,7 @@ cdef tuple DUMP_VER_MIN = (0, 7)
 cdef tuple DUMP_VER_MAX = (0, 8)
 
 cdef object logger = logging.getLogger('edb.server')
+cdef object log_metrics = logging.getLogger('edb.server.metrics')
 
 DEF QUERY_OPT_IMPLICIT_LIMIT = 0xFF01
 
@@ -147,6 +150,7 @@ cdef class EdgeConnection:
 
         self.protocol_version = max_protocol
         self.max_protocol = max_protocol
+        self.timer = Timer()
 
     def on_remote_ddl(self, dbver):
         if not self.dbview:
@@ -195,6 +199,7 @@ cdef class EdgeConnection:
         if self._backend is not None:
             self.loop.create_task(self._backend.close())
             self._backend = None
+        self.timer.log_all_stats()
 
     cdef close(self):
         self.flush()
@@ -205,6 +210,7 @@ cdef class EdgeConnection:
         if self._backend is not None:
             self.loop.create_task(self._backend.close())
             self._backend = None
+        self.timer.log_all_stats()
 
     cdef flush(self):
         if self._transport is None:
@@ -701,8 +707,10 @@ cdef class EdgeConnection:
                 self.flush()
                 return
 
-        eql_tokens = tokenize(eql)
-        units = await self._compile(eql_tokens, stmt_mode=stmt_mode)
+        with self.timer.timed("Query tokenization"):
+            eql_tokens = tokenize(eql)
+        with self.timer.timed("Query compilation"):
+            units = await self._compile(eql_tokens, stmt_mode=stmt_mode)
 
         new_type_ids = frozenset()
         for query_unit in units:
@@ -767,7 +775,8 @@ cdef class EdgeConnection:
         if self.debug:
             self.debug_print('PARSE', eql)
 
-        normalized = normalize(eql)
+        with self.timer.timed("Query normalization"):
+            normalized = normalize(eql)
 
         if self.debug:
             self.debug_print('Cache key', normalized.key())
@@ -791,14 +800,15 @@ cdef class EdgeConnection:
                     # ROLLBACK in that 'eql' string.
                     self.dbview.raise_in_tx_error()
             else:
-                query_unit = await self._compile(
-                    normalized.tokens(),
-                    io_format=io_format,
-                    expect_one=expect_one,
-                    stmt_mode='single',
-                    implicit_limit=implicit_limit,
-                    first_extracted_var=normalized.first_extra(),
-                )
+                with self.timer.timed("Query compilation"):
+                    query_unit = await self._compile(
+                        normalized.tokens(),
+                        io_format=io_format,
+                        expect_one=expect_one,
+                        stmt_mode='single',
+                        implicit_limit=implicit_limit,
+                        first_extracted_var=normalized.first_extra(),
+                    )
                 query_unit = query_unit[0]
         elif self.dbview.in_tx_error():
             # We have a cached QueryUnit for this 'eql', but the current
@@ -2023,3 +2033,56 @@ cdef class EdgeConnection:
         msg.write_len_prefixed_bytes(b'RESTORE')
         self.write(msg.end_message())
         self.flush()
+
+
+@cython.final
+cdef class Timer:
+    def __init__(self) -> None:
+        self._durations: Dict[str, List[float]] = {}
+        self._last_report_timestamp: Dict[str, float] = {}
+        self._threshold_seconds = 300
+
+    @contextlib.contextmanager
+    def timed(self, operation: str):
+        ts_start = time.monotonic()
+        try:
+            yield
+        finally:
+            ts_end = time.monotonic()
+            duration = ts_end - ts_start
+            series = self._durations.setdefault(operation, [])
+            series.append(duration)
+            self.maybe_log_stats(operation, series=series)
+
+    def maybe_log_stats(
+        self, operation: str, *, series: Sequence[float] = ()
+    ) -> None:
+        since_last_report = time.monotonic() - self._last_report_timestamp.get(operation, 0)
+        if since_last_report < self._threshold_seconds:
+            return
+
+        self.log_operation_stats(operation, series=series)
+
+    def log_all_stats(self) -> None:
+        for operation in self._durations:
+            self.log_operation_stats(operation)
+
+    def log_operation_stats(
+        self, operation: str, *, series: Sequence[float] = ()
+    ) -> None:
+        if not series:
+            series = self._durations[operation]
+        if len(series) < 2:
+            return
+
+        p = [0] + statistics.quantiles(series, n=100, method="inclusive")
+        log_metrics.info(
+            "%s stats: count=%d, p99=%.4f; p90=%.4f; p50=%.4f; max=%.4f",
+            operation,
+            len(series),
+            p[99],
+            p[90],
+            p[50],  # median
+            max(series),
+        )
+        self._last_report_timestamp[operation] = time.monotonic()

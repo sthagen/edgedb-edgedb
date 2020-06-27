@@ -35,6 +35,7 @@ from . import edgecon
 
 
 logger = logging.getLogger('edb.server')
+log_metrics = logging.getLogger('edb.server.metrics')
 
 
 class Backend:
@@ -114,9 +115,11 @@ class ManagementPort(baseport.Port):
 
     def on_client_authed(self):
         self._num_connections += 1
+        self._report_connections()
 
     def on_client_disconnected(self):
         self._num_connections -= 1
+        self._report_connections(action="close")
         if not self._num_connections and self._auto_shutdown:
             self._accepting = False
             raise SystemExit
@@ -184,3 +187,15 @@ class ManagementPort(baseport.Port):
                     self._backends.clear()
             finally:
                 await super().stop()
+
+    def _report_connections(self, *, action: str = "open"):
+        action = action.capitalize()
+        if not action.endswith("e"):
+            action += "e"
+        action += "d"
+        log_metrics.info(
+            "%s a connection with ID %d; open_count=%d",
+            action,
+            self._edgecon_id,
+            self._num_connections,
+        )

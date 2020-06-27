@@ -30,6 +30,7 @@ from . import annos as s_anno
 from . import delta as sd
 from . import inheriting
 from . import objects as so
+from . import utils
 
 if TYPE_CHECKING:
     from edb.schema import schema as s_schema
@@ -47,6 +48,13 @@ class Role(so.GlobalObject, so.InheritingObject,
         str,
         default=None,
         allow_ddl_set=True,
+        inheritable=False)
+
+    password_hash = so.SchemaField(
+        str,
+        default=None,
+        allow_ddl_set=True,
+        ephemeral=True,
         inheritable=False)
 
 
@@ -72,8 +80,24 @@ class RoleCommand(sd.GlobalObjectCommand,
     ) -> None:
         password = cmd.get_attribute_value('password')
         if password is not None:
+            if cmd.get_attribute_value('password_hash') is not None:
+                raise errors.EdgeQLSyntaxError(
+                    'cannot specify both `password` and `password_hash` in'
+                    ' the same statement',
+                    context=astnode.context,
+                )
             salted_password = scram.build_verifier(password)
             cmd.set_attribute_value('password', salted_password)
+
+        password_hash = cmd.get_attribute_value('password_hash')
+        if password_hash is not None:
+            try:
+                scram.parse_verifier(password_hash)
+            except ValueError as e:
+                raise errors.InvalidValueError(
+                    e.args[0],
+                    context=astnode.context)
+            cmd.set_attribute_value('password', password_hash)
 
     @classmethod
     def _classbases_from_ast(
@@ -81,12 +105,17 @@ class RoleCommand(sd.GlobalObjectCommand,
         schema: s_schema.Schema,
         astnode: qlast.ObjectDDL,
         context: sd.CommandContext,
-    ) -> so.ObjectList[Role]:
+    ) -> List[so.ObjectShell]:
         result = []
         for b in getattr(astnode, 'bases', None) or []:
-            result.append(schema.get_global(Role, b.maintype.name))
+            result.append(utils.ast_objref_to_object_shell(
+                b.maintype,
+                metaclass=Role,
+                schema=schema,
+                modaliases=context.modaliases,
+            ))
 
-        return so.ObjectList.create(schema, result)
+        return result
 
 
 class CreateRole(RoleCommand, inheriting.CreateInheritingObject[Role]):
