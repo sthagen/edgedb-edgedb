@@ -202,10 +202,12 @@ def _init_cluster(data_dir=None, *, cleanup_atexit=True, init_settings=None):
         _env = {}
 
     if data_dir is None:
-        cluster = edgedb_cluster.TempCluster(env=_env, testmode=True)
+        cluster = edgedb_cluster.TempCluster(
+            env=_env, testmode=True, log_level='s')
         destroy = True
     else:
-        cluster = edgedb_cluster.Cluster(data_dir=data_dir, env=_env)
+        cluster = edgedb_cluster.Cluster(
+            data_dir=data_dir, env=_env, log_level='s')
         destroy = False
 
     if cluster.get_status() == 'not-initialized':
@@ -732,9 +734,10 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
 
                     schema.append(f'\nmodule {module_name} {{ {module} }}')
 
-        script += f'\nCREATE MIGRATION test_migration'
+        script += f'\nSTART MIGRATION'
         script += f' TO {{ {"".join(schema)} }};'
-        script += f'\nCOMMIT MIGRATION test_migration;'
+        script += f'\nPOPULATE MIGRATION;'
+        script += f'\nCOMMIT MIGRATION;'
 
         if cls.SETUP:
             if not isinstance(cls.SETUP, (list, tuple)):
@@ -811,6 +814,18 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
                 raise
             finally:
                 await tx.rollback()
+
+    async def migrate(self, migration, *, module: str = 'test'):
+        async with self.con.transaction():
+            await self.con.execute(f"""
+                START MIGRATION TO {{
+                    module {module} {{
+                        {migration}
+                    }}
+                }};
+                POPULATE MIGRATION;
+                COMMIT MIGRATION;
+            """)
 
 
 class nullable:

@@ -44,6 +44,7 @@ from edb.schema import functions as s_funcs
 from edb.schema import indexes as s_indexes
 from edb.schema import links as s_links
 from edb.schema import lproperties as s_props
+from edb.schema import migrations as s_migrations
 from edb.schema import modules as s_mod
 from edb.schema import name as sn
 from edb.schema import operators as s_opers
@@ -3403,7 +3404,8 @@ class UpdateEndpointDeleteActions(MetaCommand):
         for link_op, link, orig_schema in self.link_ops:
             if isinstance(link_op, DeleteLink):
                 if (link.generic(orig_schema)
-                        or not link.get_is_local(orig_schema)):
+                        or not link.get_is_local(orig_schema)
+                        or link.is_pure_computable(orig_schema)):
                     continue
                 source = link.get_source(orig_schema)
                 current_source = orig_schema.get_by_id(source.id, None)
@@ -3416,7 +3418,11 @@ class UpdateEndpointDeleteActions(MetaCommand):
                     affected_targets.add(current_target)
                 deletions = True
             else:
-                if link.generic(schema) or not link.get_is_local(schema):
+                if (
+                    link.generic(schema)
+                    or not link.get_is_local(schema)
+                    or link.is_pure_computable(schema)
+                ):
                     continue
                 source = link.get_source(schema)
                 if source.is_view(schema):
@@ -3468,6 +3474,9 @@ class UpdateEndpointDeleteActions(MetaCommand):
                                              field_name='target'):
                 if (not link.get_is_local(schema)
                         or link.is_pure_computable(schema)):
+                    continue
+                source = link.get_source(schema)
+                if source.is_view(schema):
                     continue
                 ptr_stor_info = types.get_pointer_storage_info(
                     link, schema=schema)
@@ -4004,3 +4013,31 @@ class DeltaRoot(MetaCommand, adapts=sd.DeltaRoot):
                 if not queue:
                     queues[op.priority] = queue = []
                 queue.append(op)
+
+
+class MigrationCommand(ObjectMetaCommand):
+    pass
+
+
+class CreateMigration(
+    MigrationCommand,
+    CreateObject,
+    adapts=s_migrations.CreateMigration,
+):
+    pass
+
+
+class AlterMigration(
+    MigrationCommand,
+    AlterObject,
+    adapts=s_migrations.AlterMigration,
+):
+    pass
+
+
+class DeleteMigration(
+    MigrationCommand,
+    DeleteObject,
+    adapts=s_migrations.DeleteMigration,
+):
+    pass

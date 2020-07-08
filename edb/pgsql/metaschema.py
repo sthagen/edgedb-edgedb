@@ -31,6 +31,7 @@ from edb.common import exceptions
 from edb.common import uuidgen
 
 from edb.edgeql import qltypes
+from edb.edgeql import quote as qlquote
 
 from edb.schema import migrations  # NoQA
 from edb.schema import modules as s_mod
@@ -38,6 +39,8 @@ from edb.schema import name as sn
 from edb.schema import objtypes as s_objtypes
 
 from edb.server import defines
+from edb.server import compiler as edbcompiler
+from edb.server import bootstrap as edbbootstrap
 
 from . import common
 from . import dbops
@@ -471,7 +474,6 @@ class ExtractJSONScalarFunction(dbops.Function):
             args=[('val', ('jsonb',)), ('json_typename', ('text',)),
                   ('msg', ('text',), 'NULL'), ('det', ('text',), "''")],
             returns=('text',),
-            # Same volatility as jsonb_assert_type
             volatility='stable',
             text=self.text)
 
@@ -1836,6 +1838,196 @@ class StrToBool(dbops.Function):
             text=self.text)
 
 
+class QuoteLiteralFunction(dbops.Function):
+    """Encode string as edgeql literal quoted string"""
+    text = r'''
+        SELECT concat('\'',
+            replace(
+                replace(val, '\\', '\\\\'),
+                '\'', '\\\''),
+            '\'')
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', 'quote_literal'),
+            args=[('val', ('text',))],
+            returns=('str',),
+            volatility='immutable',
+            text=self.text)
+
+
+class ConfigObjectAsDDLFunction(dbops.Function):
+    """Describe single configuration object as DDL"""
+
+    def __init__(self, compiler, schema, name: str, plural: str) -> None:
+
+        cfg = schema.get('cfg::' + name)
+        items = []
+        for pn, p in cfg.get_pointers(schema).items(schema):
+            if pn in ('id', '__type__'):
+                continue
+            if p.get_annotation(schema, 'cfg::internal') == 'true':
+                continue
+            ptype = p.get_target(schema)
+            mult = p.get_cardinality(schema) is qltypes.SchemaCardinality.MANY
+            if isinstance(ptype, s_objtypes.ObjectType):
+                items.append(
+                    f"'  { qlquote.quote_ident(pn) } := (INSERT ' ++ "
+                    f" cfg::{ name }.{ qlquote.quote_ident(pn) }.__type__.name"
+                    f" ++ '),\\n'"
+                )
+            elif mult:
+                items.append(
+                    f"'  ' ++ cfg::_name_value({ ql(pn) },"
+                    f" array_agg(cfg::{ name }.{ qlquote.quote_ident(pn) }))"
+                    f" ++ ',\\n'")
+            else:
+                items.append(
+                    f"'  ' ++ cfg::_name_value({ ql(pn) },"
+                    f" cfg::{ name }.{ qlquote.quote_ident(pn) })"
+                    f" ++ ',\\n'")
+
+        script = (
+            f"SELECT array_join(array_agg(("
+            f"SELECT 'CONFIGURE SYSTEM INSERT {name} {{\\n'"
+            f" ++ {' ++ '.join(items)} ++ '}};\n'"
+            f")), '')"
+        )
+        _, text = edbbootstrap.compile_bootstrap_script(
+            compiler, schema, script,
+            output_format=edbcompiler.IoFormat.BINARY)
+        super().__init__(
+            name=('edgedb', '_config_insert_all_' + plural),
+            args=[],
+            returns=('text'),
+            # Stable because it's raising exceptions.
+            volatility='stable',
+            text=text)
+
+
+class DescribeSystemConfigAsDDLFunction(dbops.Function):
+    """Describe server configuration as DDL"""
+
+    def __init__(self, compiler, schema) -> None:
+
+        cfg = schema.get('cfg::Config')
+        items = []
+        for pn, p in cfg.get_pointers(schema).items(schema):
+            if pn in ('id', '__type__'):
+                continue
+            ptype = p.get_target(schema)
+            mult = p.get_cardinality(schema) is qltypes.SchemaCardinality.MANY
+            if isinstance(ptype, s_objtypes.ObjectType):
+                if pn not in {'sessobj', 'sysobj'}:
+                    items.append(f"cfg::_config_insert_all_{pn}()")
+            elif mult:
+                items.append(
+                    f"'CONFIGURE SYSTEM SET ' ++"
+                    f" cfg::_name_value({ ql(pn) },"
+                    f" array_agg(cfg::Config.{ qlquote.quote_ident(pn) }))"
+                    f" ++ ';\n'")
+            else:
+                items.append(
+                    f"'CONFIGURE SYSTEM SET ' ++"
+                    f" cfg::_name_value({ ql(pn) },"
+                    f" cfg::Config.{ qlquote.quote_ident(pn) })"
+                    f" ++ ';\n'")
+
+        script = f"SELECT {' ++ '.join(items)}"
+        _, text = edbbootstrap.compile_bootstrap_script(
+            compiler, schema, script,
+            output_format=edbcompiler.IoFormat.BINARY)
+        super().__init__(
+            name=('edgedb', '_describe_system_config_as_ddl'),
+            args=[],
+            returns=('text'),
+            # Stable because it's raising exceptions.
+            volatility='stable',
+            text=text)
+
+
+class QuoteIdentFunction(dbops.Function):
+    """Quote ident function."""
+    # TODO do not quote valid identifiers unless they are reserved
+    text = r'''
+        SELECT concat('`', replace(val, '`', '``'), '`')
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', 'quote_ident'),
+            args=[('val', ('text',))],
+            returns=('text',),
+            # Stable because it's raising exceptions.
+            volatility='stable',
+            text=self.text,
+        )
+
+
+class DescribeRolesAsDDLFunction(dbops.Function):
+    """Describe roles as DDL"""
+
+    def __init__(self, compiler, schema) -> None:
+        role_obj = schema.get("sys::Role")
+        roles = inhviewname(schema, role_obj)
+        member_of = role_obj.get_pointers(schema).get(schema, 'member_of')
+        members = inhviewname(schema, member_of)
+        text = f"""
+            WITH RECURSIVE
+            dependencies AS (
+                SELECT r.id AS id, m.target AS parent
+                    FROM {q(*roles)} r
+                        LEFT OUTER JOIN {q(*members)} m ON r.id = m.source
+            ),
+            roles_with_depths(id, depth) AS (
+                SELECT id, 0 FROM dependencies WHERE parent IS NULL
+                UNION ALL
+                SELECT dependencies.id, roles_with_depths.depth + 1
+                FROM dependencies
+                INNER JOIN roles_with_depths
+                    ON dependencies.parent = roles_with_depths.id
+            ),
+            ordered_roles AS (
+                SELECT id, max(depth) FROM roles_with_depths
+                GROUP BY id
+                ORDER BY max(depth) ASC
+            )
+            SELECT
+            string_agg(
+                concat(
+                    'CREATE SUPERUSER ROLE ',
+                    edgedb.quote_ident(role.name),
+                    NULLIF((SELECT
+                        concat(' EXTENDING ',
+                            string_agg(edgedb.quote_ident(parent.name), ', '))
+                        FROM {q(*members)} member
+                            INNER JOIN {q(*roles)} parent
+                            ON parent.id = member.target
+                        WHERE member.source = role.id
+                    ), ' EXTENDING '),
+                    CASE WHEN role.password IS NOT NULL THEN
+                        concat(' {{ SET password_hash := ',
+                               quote_literal(role.password),
+                               '}};')
+                    ELSE ';' END
+                ),
+                '\n'
+            ) str
+            FROM ordered_roles
+                JOIN {q(*roles)} role
+                ON role.id = ordered_roles.id
+        """
+
+        super().__init__(
+            name=('edgedb', '_describe_roles_as_ddl'),
+            args=[],
+            returns=('text'),
+            # Stable because it's raising exceptions.
+            volatility='stable',
+            text=text)
+
+
 class SysConfigValueType(dbops.CompositeType):
     """Type of values returned by _read_sys_config."""
     def __init__(self) -> None:
@@ -1857,10 +2049,6 @@ class SysConfigFunction(dbops.Function):
         BEGIN
         RETURN QUERY EXECUTE $$
             WITH
-                data_dir AS
-                    (SELECT setting AS dir FROM pg_settings
-                     WHERE name = 'data_directory'),
-
                 config_spec AS
                     (SELECT
                         s.key AS name,
@@ -2482,6 +2670,26 @@ async def generate_support_functions(conn, schema):
         dbops.CreateFunction(IssubclassFunction2()),
         dbops.CreateFunction(IsinstanceFunction()),
         dbops.CreateFunction(GetSchemaObjectNameFunction()),
+        dbops.CreateFunction(QuoteIdentFunction()),
+    ])
+
+    block = dbops.PLTopBlock()
+    commands.generate(block)
+    await _execute_block(conn, block)
+
+
+async def generate_more_support_functions(conn, compiler, schema):
+    commands = dbops.CommandGroup()
+
+    commands.add_commands([
+        dbops.CreateFunction(
+            ConfigObjectAsDDLFunction(compiler, schema, 'Port', 'ports')),
+        dbops.CreateFunction(
+            ConfigObjectAsDDLFunction(compiler, schema, 'Auth', 'auth')),
+        dbops.CreateFunction(
+            DescribeSystemConfigAsDDLFunction(compiler, schema)),
+        dbops.CreateFunction(
+            DescribeRolesAsDDLFunction(compiler, schema)),
     ])
 
     block = dbops.PLTopBlock()
@@ -2871,8 +3079,6 @@ async def _execute_block(conn, block):
     try:
         await conn.execute(sql_text)
     except Exception as e:
-        import edb.common.debug
-        edb.common.debug.dump(e.__dict__)
         position = getattr(e, 'position', None)
         internal_position = getattr(e, 'internal_position', None)
         context = getattr(e, 'context', '')

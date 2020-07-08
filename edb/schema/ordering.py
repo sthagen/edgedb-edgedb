@@ -68,10 +68,7 @@ def linearize_delta(
     ordered = list(topological.sort(depgraph, allow_unresolved=True,
                                     return_record=True))
 
-    parents: Dict[Tuple[Type[sd.ObjectCommand[so.Object]], str],
-                  sd.ObjectCommand[so.Object]]
     dependencies: Dict[sd.Command, Set[sd.Command]]
-    parents = {}
     dependencies = collections.defaultdict(set)
     max_offset = len(ordered)
     offsets: Dict[sd.Command, int] = {}
@@ -91,11 +88,15 @@ def linearize_delta(
             assert isinstance(dep_parent, sd.ObjectCommand)
             dependencies[op].add(dep_op)
 
+    parents: Dict[
+        Tuple[Type[sd.ObjectCommand[so.Object]], str],
+        sd.ObjectCommand[so.Object]
+    ] = {}
+
     for _key, info in ordered:
         op = info['op']
         # Elide empty ALTER statements from output.
-        if (isinstance(op, sd.AlterObject)
-                and not len(op.get_subcommands())):
+        if isinstance(op, sd.AlterObject) and not op.get_subcommands():
             continue
 
         opstack = opmap[op]
@@ -186,6 +187,7 @@ def _break_down(
             if field.weak_ref:
                 _break_down(opmap, strongrefs, new_opstack + [sub_op])
         elif isinstance(sub_op, referencing.StronglyReferencedObjectCommand):
+            assert isinstance(op, sd.ObjectCommand)
             strongrefs[sub_op.classname] = op.classname
 
     opmap[op] = new_opstack
@@ -420,7 +422,10 @@ def _extract_op(stack: Sequence[sd.Command]) -> List[sd.Command]:
         alter_class = sd.ObjectCommandMeta.get_command_class_or_die(
             sd.AlterObject, stack_op.get_schema_metaclass())
 
-        alter_delta = alter_class(classname=stack_op.classname)
+        alter_delta = alter_class(
+            classname=stack_op.classname,
+            ddl_identity=stack_op.ddl_identity,
+        )
         parent_op.add(alter_delta)
         parent_op = alter_delta
         new_stack.append(parent_op)

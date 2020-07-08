@@ -95,7 +95,7 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         mcls = self.get_schema_metaclass()
         for op in self.get_subcommands(type=sd.AlterObjectProperty):
             field = mcls.get_field(op.property)
-            if field.inheritable:
+            if field.inheritable and not field.ephemeral:
                 result[op.property] = op.source == 'inheritance'
 
         return result
@@ -332,10 +332,10 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
                 group.add(cmd)
                 schema = cmd.apply(schema, context)
 
-        for fqname, delete_cmd in deleted_refs.items():
-            cmd = delete_cmd(classname=fqname)
-            group.add(cmd)
-            schema = cmd.apply(schema, context)
+        for fqname, delete_cmd_cls in deleted_refs.items():
+            delete_cmd = delete_cmd_cls(classname=fqname)
+            group.add(delete_cmd)
+            schema = delete_cmd.apply(schema, context)
 
         self.add(group)
 
@@ -358,9 +358,8 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         rebase = sd.ObjectCommandMeta.get_command_class(
             RebaseInheritingObject, type(scls))
 
-        alter = sd.ObjectCommandMeta.get_command_class_or_die(
-            sd.AlterObject, type(scls))
-        assert issubclass(alter, AlterInheritingObject)
+        alter_cmd = scls.init_delta_command(schema, sd.AlterObject)
+        assert isinstance(alter_cmd, AlterInheritingObject)
 
         new_bases_coll = so.ObjectList[so.InheritingObjectT].create(
             schema, new_bases)
@@ -368,11 +367,6 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         ancestors = so.compute_ancestors(schema, scls)
         ancestors_coll = so.ObjectList[so.InheritingObjectT].create(
             schema, ancestors)
-
-        alter_cmd = alter(
-            classname=scls.get_name(schema),
-            metaclass=type(scls),
-        )
 
         if rebase is not None:
             rebase_cmd = rebase(
@@ -442,53 +436,6 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
 
         return base_refs
 
-    def _apply_rebase_ast(
-        self,
-        context: sd.CommandContext,
-        node: qlast.ObjectDDL,
-        op: Any
-    ) -> Any:
-        rebase = next(iter(self.get_subcommands(type=RebaseInheritingObject)))
-
-        dropped = rebase.removed_bases
-        added = rebase.added_bases
-
-        if dropped:
-            node.commands.append(
-                qlast.AlterDropInherit(
-                    bases=[
-                        qlast.ObjectRef(
-                            module=b.classname.module,
-                            name=b.classname.name
-                        )
-                        for b in dropped
-                    ]
-                )
-            )
-
-        for bases, pos in added:
-            if isinstance(pos, tuple):
-                pos_node = qlast.Position(
-                    position=pos[0],
-                    ref=qlast.ObjectRef(
-                        module=pos[1].classname.module,
-                        name=pos[1].classname.name))
-            else:
-                pos_node = qlast.Position(position=pos)
-
-            node.commands.append(
-                qlast.AlterAddInherit(
-                    bases=[
-                        qlast.ObjectRef(
-                            module=b.classname.module,
-                            name=b.classname.name
-                        )
-                        for b in bases
-                    ],
-                    position=pos_node
-                )
-            )
-
     def _apply_field_ast(
         self,
         schema: s_schema.Schema,
@@ -497,15 +444,16 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         op: sd.AlterObjectProperty,
     ) -> None:
         assert isinstance(node, qlast.ObjectDDL)
-        if op.property in {'is_abstract', 'is_final'}:
+        if (
+            op.property in {'is_abstract', 'is_final'}
+            and not isinstance(self, sd.DeleteObject)
+        ):
             node.commands.append(
                 qlast.SetSpecialField(
                     name=op.property,
                     value=op.new_value
                 )
             )
-        elif op.property == 'bases':
-            self._apply_rebase_ast(context, node, op)
         else:
             super()._apply_field_ast(schema, context, node, op)
 
@@ -828,12 +776,12 @@ class AlterInheritingObject(
         scls: so.InheritingObject,
         props: Tuple[str, ...],
     ) -> None:
-        alter_cmd = sd.ObjectCommandMeta.get_command_class_or_die(
-            sd.AlterObject, type(scls))
-        assert issubclass(alter_cmd, AlterInheritingObject)
-
         for descendant in scls.ordered_descendants(schema):
-            descendant_alter = alter_cmd(classname=descendant.get_name(schema))
+            descendant_alter = descendant.init_delta_command(
+                schema,
+                sd.AlterObject,
+            )
+            assert isinstance(descendant_alter, AlterInheritingObject)
             descendant_alter.scls = descendant
             with descendant_alter.new_context(schema, context, descendant):
                 d_bases = descendant.get_bases(schema).objects(schema)
@@ -851,7 +799,7 @@ class AlterInheritingObject(
 
 class AlterInheritingObjectFragment(
     InheritingObjectCommand[so.InheritingObjectT],
-    sd.AlterObjectFragment,
+    sd.AlterObjectFragment[so.InheritingObjectT],
 ):
     pass
 
@@ -963,3 +911,53 @@ class RebaseInheritingObject(
             bases = [default_base]
 
         return so.ObjectList[so.InheritingObjectT].create(schema, bases)
+
+    def _get_ast(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        *,
+        parent_node: Optional[qlast.DDLOperation] = None,
+    ) -> Optional[qlast.DDLOperation]:
+        assert parent_node is not None
+
+        dropped = self._get_bases_for_ast(schema, context, self.removed_bases)
+
+        if dropped:
+            parent_node.commands.append(
+                qlast.AlterDropInherit(
+                    bases=[utils.typeref_to_ast(schema, b) for b in dropped],
+                )
+            )
+
+        for bases, pos in self.added_bases:
+            bases = self._get_bases_for_ast(schema, context, bases)
+            if not bases:
+                continue
+
+            if isinstance(pos, tuple):
+                pos_node = qlast.Position(
+                    position=pos[0],
+                    ref=utils.typeref_to_ast(schema, pos[1]),
+                )
+            else:
+                pos_node = qlast.Position(position=pos)
+
+            parent_node.commands.append(
+                qlast.AlterAddInherit(
+                    bases=[utils.typeref_to_ast(schema, b) for b in bases],
+                    position=pos_node,
+                )
+            )
+
+        return None
+
+    def _get_bases_for_ast(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        bases: Tuple[so.ObjectShell, ...],
+    ) -> Tuple[so.ObjectShell, ...]:
+        mcls = self.get_schema_metaclass()
+        roots = set(mcls.get_root_classes())
+        return tuple(b for b in bases if b.name not in roots)

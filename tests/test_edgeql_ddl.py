@@ -875,23 +875,19 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             """)
 
     async def test_edgeql_ddl_link_target_alter_03(self):
-        with self.assertRaisesRegex(
-                edgedb.SchemaDefinitionError,
-                "cannot alter the type of property 'bar' "
-                "because it is used in an expression"):
-            await self.con.execute("""
-                CREATE TYPE test::Foo {
-                    CREATE PROPERTY bar -> int64;
-                };
+        await self.con.execute("""
+            CREATE TYPE test::Foo {
+                CREATE PROPERTY bar -> int64;
+            };
 
-                CREATE TYPE test::Bar {
-                    CREATE MULTI PROPERTY foo -> int64 {
-                        SET default := (SELECT test::Foo.bar);
-                    }
-                };
+            CREATE TYPE test::Bar {
+                CREATE MULTI PROPERTY foo -> int64 {
+                    SET default := (SELECT test::Foo.bar);
+                }
+            };
 
-                ALTER TYPE test::Foo ALTER PROPERTY bar SET TYPE int32;
-            """)
+            ALTER TYPE test::Foo ALTER PROPERTY bar SET TYPE int32;
+        """)
 
     async def test_edgeql_ddl_link_target_alter_04(self):
         await self.con.execute('''
@@ -2382,18 +2378,12 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             [{"annotations": [{"name": "test::attr1", "@value": "aaaa"}]}]
         )
 
-        await self.con.execute("""
-            CREATE MIGRATION mig1 TO {
-                module test {
-                    abstract annotation attr2;
+        await self.migrate("""
+            abstract annotation attr2;
 
-                    scalar type TestAttrType1 extending std::str {
-                        annotation attr2 := 'aaaa';
-                    };
-                };
+            scalar type TestAttrType1 extending std::str {
+                annotation attr2 := 'aaaa';
             };
-
-            COMMIT MIGRATION mig1;
         """)
 
         await self.assert_query_result(
@@ -2420,18 +2410,12 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             };
         """)
 
-        await self.con.execute("""
-            CREATE MIGRATION mig1 TO {
-                module test {
-                    abstract annotation attr2;
+        await self.migrate("""
+            abstract annotation attr2;
 
-                    type TestAttrType2 {
-                        annotation attr2 := 'aaaa';
-                    };
-                };
+            type TestAttrType2 {
+                annotation attr2 := 'aaaa';
             };
-
-            COMMIT MIGRATION mig1;
         """)
 
         await self.assert_query_result(
@@ -2681,16 +2665,11 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             }]
         )
 
-        await self.con.execute(r'''
-            CREATE MIGRATION m TO {
-                module test {
-                    type BaseAnno07 {
-                        property name -> str;
-                        index ON (.name);
-                    }
-                }
-            };
-            COMMIT MIGRATION m;
+        await self.migrate(r'''
+            type BaseAnno07 {
+                property name -> str;
+                index ON (.name);
+            }
         ''')
 
         await self.assert_query_result(
@@ -2748,18 +2727,13 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             }]
         )
 
-        await self.con.execute(r'''
-            CREATE MIGRATION m TO {
-                module test {
-                    type BaseAnno08 {
-                        property name -> str;
-                        index ON (.name) {
-                            annotation title := 'name index';
-                        }
-                    }
+        await self.migrate(r'''
+            type BaseAnno08 {
+                property name -> str;
+                index ON (.name) {
+                    annotation title := 'name index';
                 }
-            };
-            COMMIT MIGRATION m;
+            }
         ''')
 
         await self.assert_query_result(
@@ -3352,10 +3326,11 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         try:
             async with self.con.transaction():
                 await self.con.execute(r"""
-                    CREATE MIGRATION d1 TO {
+                    START MIGRATION TO {
                         type test::Status extending test_other::UniquelyNamed;
                     };
-                    COMMIT MIGRATION d1;
+                    POPULATE MIGRATION;
+                    COMMIT MIGRATION;
                 """)
 
             await self.con.execute("""
@@ -3644,21 +3619,17 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             """)
 
     async def test_edgeql_ddl_rename_07(self):
-        with self.assertRaisesRegex(
-                edgedb.SchemaDefinitionError,
-                "cannot rename object type 'test::Foo' "
-                "because it is used in an expression"):
-            await self.con.execute("""
-                CREATE TYPE test::Foo;
+        await self.con.execute("""
+            CREATE TYPE test::Foo;
 
-                CREATE TYPE test::Bar {
-                    CREATE MULTI LINK foo -> test::Foo {
-                        SET default := (SELECT test::Foo);
-                    }
-                };
+            CREATE TYPE test::Bar {
+                CREATE MULTI LINK foo -> test::Foo {
+                    SET default := (SELECT test::Foo);
+                }
+            };
 
-                ALTER TYPE test::Foo RENAME TO test::FooRenamed;
-            """)
+            ALTER TYPE test::Foo RENAME TO test::FooRenamed;
+        """)
 
     @test.xfail('''
         Fails with the below on "CREATE ALIAS Alias2":
@@ -4177,15 +4148,10 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             }]
         )
 
-        await self.con.execute(r'''
-            CREATE MIGRATION m TO {
-                module test {
-                    scalar type contest3_t extending int64 {
-                        constraint expression on (__subject__ > 0);
-                    };
-                };
+        await self.migrate(r'''
+            scalar type contest3_t extending int64 {
+                constraint expression on (__subject__ > 0);
             };
-            COMMIT MIGRATION m;
         ''')
 
         await self.assert_query_result(
@@ -4244,17 +4210,12 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             }]
         )
 
-        await self.con.execute(r'''
-            CREATE MIGRATION m TO {
-                module test {
-                    scalar type contest4_t extending int64 {
-                        constraint expression on (__subject__ > 0) {
-                            annotation title := 'my constraint 5';
-                        }
-                    };
-                };
+        await self.migrate(r'''
+            scalar type contest4_t extending int64 {
+                constraint expression on (__subject__ > 0) {
+                    annotation title := 'my constraint 5';
+                }
             };
-            COMMIT MIGRATION m;
         ''')
 
         await self.assert_query_result(
@@ -4437,14 +4398,15 @@ class TestEdgeQLDDL(tb.DDLTestCase):
     async def test_edgeql_ddl_unicode_01(self):
         await self.con.execute(r"""
             # setup delta
-            CREATE MIGRATION u1 TO {
+            START MIGRATION TO {
                 module test {
                     type Пример {
                         required property номер -> int16;
                     };
                 };
             };
-            COMMIT MIGRATION u1;
+            POPULATE MIGRATION;
+            COMMIT MIGRATION;
             SET MODULE test;
 
             INSERT Пример {
@@ -5463,8 +5425,10 @@ class TestEdgeQLDDL(tb.DDLTestCase):
 
         async with self._run_and_rollback():
             with self.assertRaisesRegex(
-                    edgedb.errors.InvalidReferenceError,
-                    "index '.foo' does not exist on object type 'test::Err1'"):
+                edgedb.errors.InvalidReferenceError,
+                r"index on \(.foo\) does not exist on"
+                r" object type 'test::Err1'",
+            ):
                 await self.con.execute('''
                     WITH MODULE test
                     ALTER TYPE Err1
@@ -5473,8 +5437,9 @@ class TestEdgeQLDDL(tb.DDLTestCase):
 
         async with self._run_and_rollback():
             with self.assertRaisesRegex(
-                    edgedb.errors.InvalidReferenceError,
-                    "index '.zz' does not exist on object type 'test::Err1'"):
+                edgedb.errors.InvalidReferenceError,
+                r"index on \(.zz\) does not exist on object type 'test::Err1'",
+            ):
                 await self.con.execute('''
                     WITH MODULE test
                     ALTER TYPE Err1

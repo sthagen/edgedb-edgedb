@@ -193,6 +193,14 @@ class Pointer(referencing.ReferencedInheritingObject,
     computable = so.SchemaField(
         bool,
         default=None,
+        compcoef=0.99,
+    )
+
+    # True, if this pointer is defined in an Alias.
+    is_from_alias = so.SchemaField(
+        bool,
+        default=None,
+        compcoef=0.99,
     )
 
     # Computable pointers have this set to an expression
@@ -423,7 +431,7 @@ class Pointer(referencing.ReferencedInheritingObject,
             dctx=dctx, attrs=attrs, **kwargs)
 
     def is_pure_computable(self, schema: s_schema.Schema) -> bool:
-        return bool(self.get_expr(schema))
+        return bool(self.get_expr(schema)) or bool(self.get_computable(schema))
 
     def is_id_pointer(self, schema: s_schema.Schema) -> bool:
         from edb.schema import sources as s_sources
@@ -890,6 +898,21 @@ class PointerCommandOrFragment(
 
         return schema, target, base
 
+    def _deparse_name(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        name: str,
+    ) -> qlast.ObjectRef:
+
+        ref = super()._deparse_name(schema, context, name)
+        referrer_ctx = self.get_referrer_context(context)
+        if referrer_ctx is None:
+            return ref
+        else:
+            ref.module = ''
+            return ref
+
 
 class PointerCommand(
     referencing.ReferencedInheritingObjectCommand[Pointer],
@@ -1145,6 +1168,7 @@ class PointerCommand(
                     self
                 )
                 assert parent_ctx is not None
+                assert isinstance(parent_ctx.op, sd.ObjectCommand)
                 source_name = parent_ctx.op.classname
                 source = schema.get(source_name, default=None)
                 anchors[qlast.Source().name] = source
@@ -1217,7 +1241,7 @@ class SetPointerType(
         # alter to the type that is compatible (i.e. does not change)
         # with all expressions it is used in.
         vn = scls.get_verbosename(schema)
-        self._prohibit_if_expr_refs(
+        schema, finalize_ast = self._propagate_if_expr_refs(
             schema, context, action=f'alter the type of {vn}')
 
         if not context.canonical:
@@ -1255,12 +1279,10 @@ class SetPointerType(
                 tgt = self.get_attribute_value('target')
 
                 def _set_type(
-                    alter_cmd: sd.Command,
-                    refname: Any
+                    alter_cmd: sd.ObjectCommand[so.Object],
+                    refname: str,
                 ) -> None:
-                    s_t = type(self)(
-                        classname=alter_cmd.classname,
-                    )
+                    s_t = type(self)(classname=alter_cmd.classname)
                     s_t.set_attribute_value('target', tgt)
                     alter_cmd.add(s_t)
 
@@ -1280,7 +1302,9 @@ class SetPointerType(
         astnode: qlast.DDLOperation,
         context: sd.CommandContext,
     ) -> sd.ObjectCommand[Pointer]:
-        return cls(classname=context.current().op.classname)
+        this_op = context.current().op
+        assert isinstance(this_op, sd.ObjectCommand)
+        return cls(classname=this_op.classname)
 
     @classmethod
     def _cmd_tree_from_ast(
@@ -1316,6 +1340,25 @@ class SetPointerType(
                 modaliases=context.modaliases,
                 schema=schema,
             )
+
+        if isinstance(target_ref, s_types.CollectionTypeShell):
+            s_types.ensure_schema_collection(
+                schema,
+                target_ref,
+                parent_cmd=cmd,
+                src_context=astnode.type.context,
+                context=context,
+            )
+
+        ctx = context.current()
+        assert isinstance(ctx, sd.ObjectCommandContext)
+        ptr = ctx.op.get_object(schema, context, default=None)  # type: ignore
+        if ptr is not None:
+            orig_type = ptr.get_target(schema)
+            if orig_type.is_collection():
+                s_types.cleanup_schema_collection(
+                    schema, orig_type, ptr, cmd, context=context,
+                    src_context=astnode.context)
 
         cmd.set_attribute_value('target', target_ref)
 

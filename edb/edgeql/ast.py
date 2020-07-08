@@ -66,6 +66,15 @@ class CardinalityModifier(s_enum.StrEnum):
     Required = 'REQUIRED'
 
 
+class DescribeGlobal(s_enum.StrEnum):
+    Schema = 'SCHEMA'
+    SystemConfig = 'SYSTEM CONFIG'
+    Roles = 'ROLES'
+
+    def to_edgeql(self) -> str:
+        return self.value
+
+
 class Base(ast.AST):
     __abstract_node__ = True
     __ast_hidden__ = {'context'}
@@ -662,28 +671,46 @@ class Rename(NamedDDL):
         return self.new_name
 
 
-class Delta:
+class Migration:
     __abstract_node__ = True
 
 
-class CreateMigration(CreateObject, Delta):
-    parents: typing.List[ObjectRef]
-    target: typing.Any
+class CreateMigration(CreateObject, Migration):
+
+    parent: typing.Optional[ObjectRef] = None
+    message: typing.Optional[str] = None
+    # XXX: due to unresolved issues in DDL IR decompilation
+    # we have to carry the IR produced by schema diff for now.
+    auto_diff: typing.Optional[typing.Any] = None
 
 
-class GetMigration(ObjectDDL, Delta):
+class StartMigration(DDLCommand, Migration):
+
+    target: Schema
+
+
+class AbortMigration(DDLCommand, Migration):
     pass
 
 
-class AlterMigration(AlterObject, Delta):
+class PopulateMigration(DDLCommand, Migration):
     pass
 
 
-class DropMigration(DropObject, Delta):
+class DescribeCurrentMigration(DDLCommand, Migration):
+
+    language: qltypes.DescribeLanguage
+
+
+class CommitMigration(DDLCommand, Migration):
     pass
 
 
-class CommitMigration(ObjectDDL, Delta):
+class AlterMigration(AlterObject, Migration):
+    pass
+
+
+class DropMigration(DropObject, Migration):
     pass
 
 
@@ -1017,7 +1044,7 @@ class ConfigReset(ConfigOp, FilterMixin):
 class DescribeStmt(Statement):
 
     language: qltypes.DescribeLanguage
-    object: ObjectRef
+    object: typing.Union[ObjectRef, DescribeGlobal]
     options: Options
 
 
@@ -1039,7 +1066,7 @@ class ModuleDeclaration(SDL):
 
 
 class Schema(SDL):
-    declarations: typing.List[typing.Union[DDL, ModuleDeclaration]]
+    declarations: typing.List[typing.Union[NamedDDL, ModuleDeclaration]]
 
 
 #

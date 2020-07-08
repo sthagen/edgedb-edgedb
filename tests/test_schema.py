@@ -17,6 +17,9 @@
 #
 
 
+from __future__ import annotations
+from typing import *
+
 import re
 
 from edb import errors
@@ -24,17 +27,16 @@ from edb import errors
 from edb.common import markup
 from edb.testbase import lang as tb
 
-from edb import edgeql
 from edb.edgeql import compiler as qlcompiler
 from edb.edgeql import parser as qlparser
 from edb.edgeql import qltypes
 
-from edb.schema import delta as s_delta
 from edb.schema import ddl as s_ddl
 from edb.schema import links as s_links
 from edb.schema import objtypes as s_objtypes
 
-from edb.tools import test
+if TYPE_CHECKING:
+    from edb.schema import schema as s_schema
 
 
 class TestSchema(tb.BaseSchemaLoadTest):
@@ -1019,14 +1021,15 @@ _123456789_123456789_123456789 -> str
         )
 
         schema = self.run_ddl(schema, """
-            CREATE MIGRATION ancestor_propagation TO {
+            START MIGRATION TO {
                 module test {
                     type A;
                     type B;
                     type C extending B;
                 }
             };
-            COMMIT MIGRATION ancestor_propagation;
+            POPULATE MIGRATION;
+            COMMIT MIGRATION;
         """)
 
         self.assertEqual(
@@ -1080,49 +1083,44 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         super().setUpClass()
         cls.std_schema = tb._load_std_schema()
 
-    def _assert_migration_consistency(self, schema_text, multi_module=False):
+    def _assert_migration_consistency(
+        self,
+        schema_text: str,
+        multi_module: bool = False,
+        *,
+        base_schema: Optional[s_schema.Schema] = None,
+    ) -> s_schema.Schema:
+
+        if base_schema is None:
+            base_schema = self.schema
 
         if multi_module:
             migration_text = f'''
-                CREATE MIGRATION m TO {{
+                START MIGRATION TO {{
                     {schema_text}
                 }};
+                POPULATE MIGRATION;
+                COMMIT MIGRATION;
             '''
         else:
             migration_text = f'''
-                CREATE MIGRATION m TO {{
+                START MIGRATION TO {{
                     module default {{
                         {schema_text}
                     }}
                 }};
+                POPULATE MIGRATION;
+                COMMIT MIGRATION;
             '''
 
-        migration_ql = edgeql.parse_block(migration_text)
+        baseline_schema = self.run_ddl(self.schema, migration_text)
+        migration = baseline_schema.get_last_migration()
+        assert migration is not None
 
-        migration_cmd = s_ddl.cmd_from_ddl(
-            migration_ql[0],
-            schema=self.schema,
-            modaliases={
-                None: 'default'
-            },
-        )
-
-        migration_cmd = s_ddl.compile_migration(
-            migration_cmd,
-            self.std_schema,
-            self.schema,
-        )
-
-        context = s_delta.CommandContext()
-        schema = migration_cmd.apply(self.schema, context)
-        migration = migration_cmd.scls
-
-        ddl_plan = migration.get_delta(schema)
-        baseline_schema = ddl_plan.apply(schema, context)
-        ddl_text = s_ddl.ddl_text_from_delta(baseline_schema, ddl_plan)
+        ddl_text = migration.get_script(baseline_schema)
 
         try:
-            test_schema = self.run_ddl(schema, ddl_text)
+            test_schema = self.run_ddl(self.schema, ddl_text)
         except errors.EdgeDBError as e:
             self.fail(markup.dumps(e))
 
@@ -1147,8 +1145,9 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             sdl_schema = self.run_ddl(
                 self.std_schema,
                 f'''
-                CREATE MIGRATION m TO {{ {sdl_text} }};
-                COMMIT MIGRATION m;
+                START MIGRATION TO {{ {sdl_text} }};
+                POPULATE MIGRATION;
+                COMMIT MIGRATION;
                 ''',
             )
         except errors.EdgeDBError as e:
@@ -1174,28 +1173,36 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 f'SDL text was:\n{sdl_text}'
             )
 
+        return baseline_schema
+
     def _assert_migration_equivalence(self, migrations):
         # Compare 2 schemas obtained by multiple-step migration to a
         # single-step migration.
-
-        # Validate that the final schema state has consistent migration.
-        self._assert_migration_consistency(migrations[-1])
 
         # Generate a base schema with 'test' module already created to
         # avoid having two different instances of 'test' module in
         # different evolution branches.
         base_schema = self.load_schema('')
 
+        cur_schema = base_schema
+        for migration in migrations:
+            # Validate that each migration step is self-consistent.
+            cur_schema = self._assert_migration_consistency(
+                migration,
+                base_schema=cur_schema,
+            )
+
         # Evolve a schema in a series of migrations.
         multi_migration = base_schema
         for i, state in enumerate(migrations):
             mig_text = f'''
-                CREATE MIGRATION m{i} TO {{
+                START MIGRATION TO {{
                     module default {{
                         {state}
                     }}
                 }};
-                COMMIT MIGRATION m{i};
+                POPULATE MIGRATION;
+                COMMIT MIGRATION;
             '''
 
             # Jump to the current schema state directly from base.
@@ -2983,6 +2990,20 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             )
         """])
 
+    def test_migrations_equivalence_43(self):
+        # change a prop used in a computable
+        self._assert_migration_equivalence([r"""
+            type Foo {
+                property val -> int64;
+                property comp := .val + 2;
+            };
+        """, r"""
+            type Foo {
+                property val -> float64;
+                property comp := .val + 2;
+            };
+        """])
+
     def test_migrations_equivalence_function_01(self):
         self._assert_migration_equivalence([r"""
             function hello01(a: int64) -> str
@@ -3131,6 +3152,58 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             function hello15(a: tuple<str, str>) -> str
                 using (
                     SELECT a.0 ++ a.1
+                )
+        """])
+
+    def test_migrations_equivalence_function_16(self):
+        # change prop type without changing the affected function.
+        self._assert_migration_equivalence([r"""
+            type Foo {
+                property bar -> array<int64>;
+            };
+
+            function hello16() -> int64
+                using (
+                    SELECT len((SELECT Foo LIMIT 1).bar)
+                )
+        """, r"""
+            type Foo {
+                property bar -> str;
+            };
+
+            function hello16() -> int64
+                using (
+                    SELECT len((SELECT Foo LIMIT 1).bar)
+                )
+        """])
+
+    def test_migrations_equivalence_function_17(self):
+        # change prop type without changing the affected function.
+        self._assert_migration_equivalence([r"""
+            type Foo {
+                property bar -> array<int64>;
+            };
+
+            type Bar;
+
+            function hello17() -> Bar
+                using (
+                    SELECT Bar
+                    OFFSET len((SELECT Foo.bar LIMIT 1)) ?? 0
+                    LIMIT 1
+                )
+        """, r"""
+            type Foo {
+                property bar -> str;
+            };
+
+            type Bar;
+
+            function hello17() -> Bar
+                using (
+                    SELECT Bar
+                    OFFSET len((SELECT Foo.bar LIMIT 1)) ?? 0
+                    LIMIT 1
                 )
         """])
 
@@ -3395,14 +3468,6 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             type Derived extending Base;
         """])
 
-    @test.xfail('''
-        Fails on the last migration that attempts to rename the
-        property being indexed.
-
-        This is an example of a general problem that any renaming
-        needs to be done in such a way so that the existing
-        expressions are still valid.
-    ''')
     def test_migrations_equivalence_index_01(self):
         self._assert_migration_equivalence([r"""
             type Base {
@@ -3468,6 +3533,50 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 property name := .first_name ++ ' ' ++ .last_name;
                 # an index on a computable
                 index on (.name);
+            }
+        """])
+
+    def test_migrations_equivalence_index_05(self):
+        self._assert_migration_equivalence([r"""
+            type Base {
+                property first_name -> str;
+                index on (.first_name);
+            }
+        """, r"""
+            type Base {
+                property first_name -> str;
+                index on (.first_name) {
+                    # add annotation
+                    annotation title := 'index on first name';
+                }
+            }
+        """, r"""
+            type Base {
+                property first_name -> str;
+                # drop index
+            }
+        """])
+
+    def test_migrations_equivalence_constraint_01(self):
+        self._assert_migration_equivalence([r"""
+            type Base {
+                property first_name -> str {
+                    constraint max_len_value(10)
+                }
+            }
+        """, r"""
+            type Base {
+                property first_name -> str {
+                    constraint max_len_value(10) {
+                        # add annotation
+                        annotation title := 'constraint on first name';
+                    }
+                }
+            }
+        """, r"""
+            type Base {
+                property first_name -> str;
+                # drop constraint
             }
         """])
 
@@ -3839,6 +3948,30 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             alias CollAlias := (a := Base.name, b := Base.foo);
         """])
 
+    def test_migrations_equivalence_collections_22(self):
+        # change prop type without changing the affected expression.
+        self._assert_migration_equivalence([r"""
+            type Foo {
+                property bar -> array<int64>;
+            };
+
+            type Bar {
+                property val -> int64 {
+                    default := len((SELECT Foo LIMIT 1).bar)
+                };
+            };
+        """, r"""
+            type Foo {
+                property bar -> str;
+            };
+
+            type Bar {
+                property val -> int64 {
+                    default := len((SELECT Foo LIMIT 1).bar)
+                };
+            };
+        """])
+
 
 class TestDescribe(tb.BaseSchemaLoadTest):
     """Test the DESCRIBE command."""
@@ -4013,11 +4146,6 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             r"""
             function stdgraphql::short_name(name: std::str) -> std::str {
-                orig_nativecode :=
-                    r"SELECT (((name)[5:] IF (name LIKE 'std::%') ELSE
-                      ((name)[9:] IF (name LIKE 'default::%') ELSE
-                      re_replace('(.+?)::(.+$)', r'\1__\2', name)))
-                      ++ '_Type')";
                 volatility := 'IMMUTABLE';
                 using (
                     SELECT (
@@ -4067,11 +4195,9 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             }
             """,
 
-            'DESCRIBE SCHEMA',
+            'DESCRIBE MODULE test',
 
             """
-            CREATE MODULE test IF NOT EXISTS;
-
             CREATE SCALAR TYPE test::custom_str_t EXTENDING std::str {
                 CREATE CONSTRAINT std::regexp('[A-Z]+');
             };
@@ -4086,11 +4212,9 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             }
             """,
 
-            'DESCRIBE SCHEMA',
+            'DESCRIBE MODULE test',
 
             """
-            CREATE MODULE test IF NOT EXISTS;
-
             CREATE ABSTRACT CONSTRAINT test::my_one_of(one_of: array<anytype>){
                 SET orig_expr := 'contains(one_of, __subject__)';
                 USING (WITH
@@ -4507,10 +4631,9 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             alias Bar := (SELECT Foo {name, calc := 1});
             """,
 
-            'DESCRIBE SCHEMA',
+            'DESCRIBE MODULE test',
 
             """
-            CREATE MODULE test IF NOT EXISTS;
             CREATE TYPE test::Foo {
                 CREATE OPTIONAL SINGLE PROPERTY name -> std::str;
             };
@@ -4539,10 +4662,9 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             };
             """,
 
-            'DESCRIBE SCHEMA',
+            'DESCRIBE MODULE test',
 
             """
-            CREATE MODULE test IF NOT EXISTS;
             CREATE TYPE test::Foo {
                 CREATE OPTIONAL SINGLE PROPERTY name -> std::str;
             };
@@ -4566,10 +4688,9 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             alias scalar_alias := {1, 2, 3};
             """,
 
-            'DESCRIBE SCHEMA',
+            'DESCRIBE MODULE test',
 
             """
-            CREATE MODULE test IF NOT EXISTS;
             CREATE ALIAS test::scalar_alias :=
                 (WITH
                     MODULE test
@@ -4586,10 +4707,9 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             alias array_alias := [1, 2, 3];
             """,
 
-            'DESCRIBE SCHEMA',
+            'DESCRIBE MODULE test',
 
             """
-            CREATE MODULE test IF NOT EXISTS;
             CREATE ALIAS test::array_alias :=
                 ([1, 2, 3]);
             CREATE ALIAS test::tuple_alias :=
@@ -4618,10 +4738,9 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             };
             """,
 
-            'DESCRIBE SCHEMA',
+            'DESCRIBE MODULE test',
 
             """
-            CREATE MODULE test IF NOT EXISTS;
             CREATE TYPE test::Foo {
                 CREATE OPTIONAL SINGLE PROPERTY annotated_compprop {
                     USING ('foo');

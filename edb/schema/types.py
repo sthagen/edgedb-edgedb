@@ -138,10 +138,12 @@ class Type(
         derived_attrs['name'] = name
         derived_attrs['bases'] = so.ObjectList.create(schema, [self])
 
-        cmdcls = sd.ObjectCommandMeta.get_command_class_or_die(
-            sd.CreateObject, type(self))
-
-        cmd = cmdcls(classname=name)
+        cmd = sd.get_object_delta_command(
+            objtype=type(self),
+            cmdtype=sd.CreateObject,
+            schema=schema,
+            name=name,
+        )
 
         for k, v in derived_attrs.items():
             cmd.set_attribute_value(k, v)
@@ -371,11 +373,30 @@ class Type(
         return not self.is_view(schema)
 
     def as_shell(self, schema: s_schema.Schema) -> TypeShell:
-        return TypeShell(
-            name=self.get_name(schema),
-            schemaclass=type(self),
-            is_abstract=self.get_is_abstract(schema),
-        )
+        name = typing.cast(s_name.Name, self.get_name(schema))
+
+        if union_of := self.get_union_of(schema):
+            assert isinstance(self, so.QualifiedObject)
+            return UnionTypeShell(
+                components=[
+                    o.as_shell(schema) for o in union_of.objects(schema)
+                ],
+                module=name.module,
+            )
+        elif intersection_of := self.get_intersection_of(schema):
+            assert isinstance(self, so.QualifiedObject)
+            return IntersectionTypeShell(
+                components=[
+                    o.as_shell(schema) for o in intersection_of.objects(schema)
+                ],
+                module=name.module,
+            )
+        else:
+            return TypeShell(
+                name=name,
+                schemaclass=type(self),
+                is_abstract=self.get_is_abstract(schema),
+            )
 
 
 class InheritingType(so.DerivableInheritingObject, Type):
@@ -497,6 +518,12 @@ class TypeExprShell(TypeShell):
             for c in self.components
         )
 
+    def get_components(
+        self,
+        schema: s_schema.Schema,
+    ) -> typing.Tuple[TypeShell, ...]:
+        return self.components
+
 
 class UnionTypeShell(TypeExprShell):
 
@@ -557,11 +584,8 @@ class CreateUnionType(sd.CreateObject[InheritingType], CompoundTypeCommand):
                 module=self.classname.module,
             )
 
-            delta = type(union_type).delta(
-                None,
-                union_type,
-                old_schema=schema,
-                new_schema=new_schema,
+            delta = union_type.as_create_delta(
+                schema=new_schema,
                 context=so.ComparisonContext(),
             )
 
@@ -766,7 +790,7 @@ class Collection(Type, s_abc.Collection):
     def get_schema_class_displayname(cls) -> str:
         return 'collection'
 
-    def as_delete_delta(
+    def as_colltype_delete_delta(
         self,
         schema: s_schema.Schema,
         *,
@@ -1059,7 +1083,7 @@ class Array(
         else:
             return (schema, self)
 
-    def as_delete_delta(
+    def as_colltype_delete_delta(
         self, schema: s_schema.Schema, *, view_name: str = None
     ) -> Union[DeleteArray, DeleteArrayExprAlias]:
         cmd: Union[DeleteArray, DeleteArrayExprAlias]
@@ -1071,7 +1095,7 @@ class Array(
         el = self.get_element_type(schema)
         if (isinstance(el, Collection)
                 and list(schema.get_referrers(el))[0].id == self.id):
-            cmd.add(el.as_delete_delta(schema))
+            cmd.add(el.as_colltype_delete_delta(schema))
 
         return cmd
 
@@ -1575,7 +1599,7 @@ class Tuple(
         else:
             return schema, self
 
-    def as_delete_delta(
+    def as_colltype_delete_delta(
         self, schema: s_schema.Schema, *, view_name: str = None
     ) -> Union[DeleteTuple, DeleteTupleExprAlias]:
         cmd: Union[DeleteTuple, DeleteTupleExprAlias]
@@ -1592,7 +1616,7 @@ class Tuple(
             if isinstance(el, Collection):
                 refs = schema.get_referrers(el)
                 if len(refs) == 1 and list(refs)[0].id == self.id:
-                    cmd.add(el.as_delete_delta(schema))
+                    cmd.add(el.as_colltype_delete_delta(schema))
 
         return cmd
 
@@ -1622,12 +1646,21 @@ class TupleTypeShell(CollectionTypeShell):
     ) -> typing.Tuple[TypeShell, ...]:
         return tuple(self.subtypes.values())
 
+    def iter_subtypes(
+        self,
+        schema: s_schema.Schema,
+    ) -> Iterator[typing.Tuple[str, TypeShell]]:
+        return iter(self.subtypes.items())
+
+    def is_named(self) -> bool:
+        return self.typemods is not None and self.typemods.get('named', False)
+
     def get_id(self, schema: s_schema.Schema) -> uuid.UUID:
         stable_type_id = type_id_from_name(self.name)
         if stable_type_id is not None:
             return stable_type_id
 
-        named = self.typemods is not None and self.typemods.get('named', False)
+        named = self.is_named()
 
         quals = [self.name]
         if self.expr is not None:
@@ -1663,7 +1696,7 @@ class TupleTypeShell(CollectionTypeShell):
                     and schema.get_by_id(el.get_id(schema), None) is None):
                 cmd.add(el.as_create_delta(schema))
 
-        named = self.typemods is not None and self.typemods.get('named', False)
+        named = self.is_named()
         ct.set_attribute_value('id', type_id)
         ct.set_attribute_value('name', ct.classname)
         ct.set_attribute_value('named', named)
@@ -1782,7 +1815,7 @@ def ensure_schema_type_expr_type(
             module=module,
         )
     elif isinstance(type_shell, IntersectionTypeShell):
-        type_id, type_name = get_union_type_id(
+        type_id, type_name = get_intersection_type_id(
             schema,
             components,
             module=module,
@@ -1893,7 +1926,17 @@ class CollectionExprAliasCommand(
     TypeCommand[CollectionExprAliasT],
     context_class=CollectionTypeCommandContext,
 ):
-    pass
+
+    def get_ast(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        *,
+        parent_node: Optional[qlast.DDLOperation] = None,
+    ) -> Optional[qlast.DDLOperation]:
+        # CollectionTypeCommand cannot have its own AST because it is a
+        # side-effect of some other command.
+        return None
 
 
 class CreateCollectionType(
@@ -1939,7 +1982,7 @@ class CreateTupleExprAlias(CreateCollectionExprAlias[TupleExprAlias],
 
 
 class RenameTupleExprAlias(CollectionExprAliasCommand[TupleExprAlias],
-                           sd.RenameObject,
+                           sd.RenameObject[TupleExprAlias],
                            schema_metaclass=TupleExprAlias):
     pass
 
@@ -1965,7 +2008,7 @@ class CreateArrayExprAlias(CreateCollectionExprAlias[TupleExprAlias],
 
 
 class RenameArrayExprAlias(CollectionExprAliasCommand[ArrayExprAlias],
-                           sd.RenameObject,
+                           sd.RenameObject[ArrayExprAlias],
                            schema_metaclass=ArrayExprAlias):
     pass
 
@@ -2038,6 +2081,9 @@ def cleanup_schema_collection(
     src_context: Optional[parsing.ParserContext] = None,
     context: sd.CommandContext,
 ) -> None:
+    if context.canonical:
+        return
+
     if not isinstance(coll_type, Collection):
         raise ValueError(
             f'{coll_type.get_displayname(schema)} is not a collection')
@@ -2050,10 +2096,13 @@ def cleanup_schema_collection(
     delta_root = context.top().op
     assert isinstance(delta_root, sd.DeltaRoot)
 
+    if coll_type.id in delta_root.deleted_types:
+        return
+
     refs = schema.get_referrers(coll_type)
     if (len(refs) == 1 and list(refs)[0].id == parent.id
             and coll_type.id not in delta_root.deleted_types):
         # The parent is the last user of this collection, drop it.
-        del_cmd = coll_type.as_delete_delta(schema)
+        del_cmd = coll_type.as_colltype_delete_delta(schema)
         delta_root.deleted_types[coll_type.id] = del_cmd
         delta_root.add(del_cmd)

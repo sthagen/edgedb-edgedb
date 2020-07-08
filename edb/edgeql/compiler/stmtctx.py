@@ -153,6 +153,11 @@ def fini_expression(
             view_own_pointers = view.get_pointers(ctx.env.schema)
             for vptr in view_own_pointers.objects(ctx.env.schema):
                 _elide_derived_ancestors(vptr, ctx=ctx)
+                ctx.env.schema = vptr.set_field_value(
+                    ctx.env.schema,
+                    'is_from_alias',
+                    True,
+                )
 
                 tgt = vptr.get_target(ctx.env.schema)
                 assert tgt is not None
@@ -175,6 +180,11 @@ def fini_expression(
                 )
                 for vlprop in vptr_own_pointers.objects(ctx.env.schema):
                     _elide_derived_ancestors(vlprop, ctx=ctx)
+                    ctx.env.schema = vlprop.set_field_value(
+                        ctx.env.schema,
+                        'is_from_alias',
+                        True,
+                    )
 
     expr_type = inference.infer_type(ir, ctx.env)
 
@@ -593,11 +603,13 @@ def pend_pointer_cardinality_inference(
         callbacks = []
 
     # Convert the SchemaCardinality into Cardinality used for inference.
-    if specified_card is None:
+    if not specified_required and specified_card is None:
         sc = None
     else:
         sc = qltypes.Cardinality.from_schema_value(
-            specified_required, specified_card)
+            specified_required,
+            specified_card or qltypes.SchemaCardinality.ONE
+        )
 
     ctx.pending_cardinality[ptrcls] = context.PendingCardinality(
         specified_cardinality=sc,

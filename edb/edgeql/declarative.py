@@ -174,10 +174,10 @@ def sdl_to_ddl(schema, documents):
 
     ctx = LayoutTraceContext(
         schema,
-        local_modules=frozenset(mod for mod, schema_decl in documents),
+        local_modules=frozenset(mod for mod, schema_decl in documents.items()),
     )
 
-    for module_name, declarations in documents:
+    for module_name, declarations in documents.items():
         ctx.set_module(module_name)
         for decl_ast in declarations:
             if isinstance(decl_ast, qlast.CreateObject):
@@ -203,7 +203,7 @@ def sdl_to_ddl(schema, documents):
                     raise AssertionError(
                         f'unexpected SDL declaration: {decl_ast}')
 
-    for module_name, declarations in documents:
+    for module_name, declarations in documents.items():
         ctx.set_module(module_name)
         for decl_ast in declarations:
             trace_layout(decl_ast, ctx=ctx)
@@ -219,7 +219,7 @@ def sdl_to_ddl(schema, documents):
         schema, ddlgraph, ctx.objects, ctx.parents, ctx.ancestors,
         ctx.defdeps, ctx.constraints
     )
-    for module_name, declarations in documents:
+    for module_name, declarations in documents.items():
         ctx.set_module(module_name)
         # module needs to be created regardless of whether its
         # contents are empty or not
@@ -493,6 +493,13 @@ def trace_default(node: qlast.CreateObject, *, ctx: DepTraceContext):
     _register_item(node, ctx=ctx)
 
 
+def _clear_nonessential_subcommands(node):
+    node.commands = [
+        cmd for cmd in node.commands
+        if isinstance(cmd, qlast.SetField) and cmd.name.startswith('orig_')
+    ]
+
+
 def _register_item(
     decl, *, deps=None, hard_dep_exprs=None, loop_control=None,
     source=None, subject=None, ctx: DepTraceContext
@@ -510,12 +517,12 @@ def _register_item(
     if ctx.depstack:
         op.sdl_alter_if_exists = True
         top_parent = parent = copy.copy(ctx.depstack[0][0])
-        parent.commands = []
+        _clear_nonessential_subcommands(parent)
         for entry, _entry_name in ctx.depstack[1:]:
             entry_op = copy.copy(entry)
-            entry_op.commands = []
             parent.commands.append(entry_op)
             parent = entry_op
+            _clear_nonessential_subcommands(parent)
 
         parent.commands.append(op)
         op = top_parent
@@ -579,17 +586,24 @@ def _register_item(
 
             # indexes need to preserve their "on" expression
             if alter_name == 'AlterIndex':
-                # find the original expr, which will be in non-normalized form
-                for sub in op.commands:
-                    if isinstance(sub, qlast.CreateIndex):
-                        alter_cmd.expr = sub.expr
+                alter_cmd.expr = orig_op.expr
+                for sub in orig_op.commands:
+                    if (
+                        isinstance(sub, qlast.SetField)
+                        and sub.name == 'orig_expr'
+                    ):
+                        alter_cmd.commands.append(sub)
                         break
             # constraints need to preserve their "on" expression
             elif alter_name == 'AlterConcreteConstraint':
-                # find the original expr, which will be in non-normalized form
-                for sub in op.commands:
-                    if isinstance(sub, qlast.CreateConcreteConstraint):
-                        alter_cmd.subjectexpr = sub.subjectexpr
+                alter_cmd.subjectexpr = orig_op.subjectexpr
+                alter_cmd.args = orig_op.args
+                for sub in orig_op.commands:
+                    if (
+                        isinstance(sub, qlast.SetField)
+                        and sub.name == 'orig_subjectexpr'
+                    ):
+                        alter_cmd.commands.append(sub)
                         break
 
             if not ctx.depstack:

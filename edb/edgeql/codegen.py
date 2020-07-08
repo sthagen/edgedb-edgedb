@@ -759,7 +759,8 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
     def _ddl_visit_body(
         self,
         commands: Sequence[qlast.DDLOperation],
-        group_by_system_comment: bool, *,
+        group_by_system_comment: bool = False,
+        *,
         allow_short: bool = False
     ) -> None:
         if self.limit_ref_classes:
@@ -768,6 +769,18 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 if (
                     not isinstance(c, qlast.ObjectDDL)
                     or c.name.itemclass in self.limit_ref_classes
+                )
+            ]
+
+        if self.descmode:
+            # Omit orig_expr fields from output since we are
+            # using the original expression in TEXT output
+            # already.
+            commands = [
+                c for c in commands
+                if (
+                    not isinstance(c, qlast.SetField)
+                    or not c.name.startswith('orig_')
                 )
             ]
 
@@ -997,33 +1010,21 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         self._visit_DropObject(node, 'ROLE')
 
     def visit_CreateMigration(self, node: qlast.CreateMigration) -> None:
-        def after_name() -> None:
-            if node.parents:
-                self.write(' FROM ')
-                self.visit(node.parents)
+        self.write('CREATE MIGRATION')
+        if node.commands:
+            self._ddl_visit_body(node.commands)
 
-            if node.target:
-                self.write(' TO {')
-                self._block_ws(1)
-                self.visit(node.target)
-                self.indentation -= 1
-                self.write('}')
-
-        self._visit_CreateObject(node, 'MIGRATION', after_name=after_name)
+    def visit_StartMigration(self, node: qlast.StartMigration) -> None:
+        self.write('START MIGRATION TO {')
+        self.new_lines = 1
+        self.indentation += 1
+        self.visit(node.target)
+        self.indentation -= 1
+        self.new_lines = 1
+        self.write('}')
 
     def visit_CommitMigration(self, node: qlast.CommitMigration) -> None:
-        self._visit_aliases(node)
         self.write('COMMIT MIGRATION')
-        self.write(' ')
-        self.visit(node.name)
-        self.new_lines = 1
-
-    def visit_GetMigration(self, node: qlast.GetMigration) -> None:
-        self._visit_aliases(node)
-        self.write('GET MIGRATION')
-        self.write(' ')
-        self.visit(node.name)
-        self.new_lines = 1
 
     def visit_AlterMigration(self, node: qlast.AlterMigration) -> None:
         self._visit_AlterObject(node, 'MIGRATION')
@@ -1545,7 +1546,11 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         self._visit_AlterObject(node, 'FUNCTION', after_name=after_name)
 
     def visit_DropFunction(self, node: qlast.DropFunction) -> None:
-        self._visit_DropObject(node, 'FUNCTION')
+        def after_name() -> None:
+            self.write('(')
+            self.visit_list(node.params, newlines=False)
+            self.write(')')
+        self._visit_DropObject(node, 'FUNCTION', after_name=after_name)
 
     def visit_FuncParam(self, node: qlast.FuncParam) -> None:
         kind = node.kind.to_edgeql()
@@ -1659,10 +1664,10 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
 
     def visit_DescribeStmt(self, node: qlast.DescribeStmt) -> None:
         self.write(f'DESCRIBE ')
-        if node.object:
-            self.visit(node.object)
+        if isinstance(node.object, qlast.DescribeGlobal):
+            self.write(node.object.to_edgeql())
         else:
-            self.write('SCHEMA')
+            self.visit(node.object)
         if node.language:
             self.write(' AS ', node.language)
         if node.options:

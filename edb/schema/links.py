@@ -211,6 +211,7 @@ class LinkCommand(lproperties.PropertySourceCommand,
     ) -> None:
         if issubclass(refdict.ref_cls, pointers.Pointer):
             for op in self.get_subcommands(metaclass=refdict.ref_cls):
+                assert isinstance(op, pointers.PointerCommand)
                 pname = sn.shortname_from_fullname(op.classname)
                 if pname.name not in {'source', 'target'}:
                     self._append_subcmd_ast(schema, node, op, context)
@@ -426,7 +427,7 @@ class CreateLink(
         return cmd
 
 
-class RenameLink(LinkCommand, sd.RenameObject):
+class RenameLink(LinkCommand, sd.RenameObject[Link]):
     pass
 
 
@@ -517,10 +518,8 @@ class DeleteLink(
                 and target.is_view(schema)
                 and target.get_alias_is_persistent(schema)):
 
-            Cmd = sd.ObjectCommandMeta.get_command_class_or_die(
-                sd.DeleteObject, type(target))
-
-            del_cmd = Cmd(classname=target.get_name(schema))
+            del_cmd = target.init_delta_command(schema, sd.DeleteObject)
+            assert isinstance(del_cmd, sd.DeleteObject)
             subcmds = del_cmd._canonicalize(schema, context, target)
             del_cmd.update(subcmds)
             commands.append(del_cmd)

@@ -398,12 +398,12 @@ class AlterProperty(
     ) -> None:
         if op.property == 'target':
             if op.new_value:
-                node.commands.append(qlast.SetLinkType(
-                    type=qlast.ObjectRef(
-                        name=op.new_value.classname.name,  # type: ignore
-                        module=op.new_value.classname.module  # type: ignore
-                    )
-                ))
+                assert isinstance(op.new_value, so.ObjectShell)
+                node.commands.append(
+                    qlast.SetPropertyType(
+                        type=utils.typeref_to_ast(schema, op.new_value),
+                    ),
+                )
         else:
             super()._apply_field_ast(schema, context, node, op)
 
@@ -425,6 +425,7 @@ class DeleteProperty(
         context: sd.CommandContext,
     ) -> sd.Command:
         cmd = super()._cmd_tree_from_ast(schema, astnode, context)
+        assert isinstance(cmd, DeleteProperty)
 
         if isinstance(astnode, qlast.DropConcreteProperty):
             prop = schema.get(cmd.classname, type=Property)
