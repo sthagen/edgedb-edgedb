@@ -1879,14 +1879,15 @@ class ConfigObjectAsDDLFunction(dbops.Function):
                 )
             elif mult:
                 items.append(
-                    f"'  ' ++ cfg::_name_value({ ql(pn) },"
+                    f"cfg::_name_value_array('  ', ',\\n', { ql(pn) },"
                     f" array_agg(cfg::{ name }.{ qlquote.quote_ident(pn) }))"
-                    f" ++ ',\\n'")
+                )
             else:
                 items.append(
-                    f"'  ' ++ cfg::_name_value({ ql(pn) },"
-                    f" cfg::{ name }.{ qlquote.quote_ident(pn) })"
-                    f" ++ ',\\n'")
+                    f"cfg::_name_value('  ', ',\\n', { ql(pn) },"
+                    f" cfg::{ name }.{ qlquote.quote_ident(pn) },"
+                    f" <{ ptype.get_name(schema) }>{{}})"
+                )
 
         script = (
             f"SELECT array_join(array_agg(("
@@ -1923,16 +1924,22 @@ class DescribeSystemConfigAsDDLFunction(dbops.Function):
                     items.append(f"cfg::_config_insert_all_{pn}()")
             elif mult:
                 items.append(
-                    f"'CONFIGURE SYSTEM SET ' ++"
-                    f" cfg::_name_value({ ql(pn) },"
+                    f" cfg::_name_value_array('CONFIGURE SYSTEM SET ', ';\n',"
+                    f" { ql(pn) },"
                     f" array_agg(cfg::Config.{ qlquote.quote_ident(pn) }))"
-                    f" ++ ';\n'")
+                )
             else:
+                default = p.get_default(schema)
+                if default is not None:
+                    def_expr = default.text
+                else:
+                    def_expr = f"<{ ptype.get_name(schema) }>{{}}"
                 items.append(
-                    f"'CONFIGURE SYSTEM SET ' ++"
-                    f" cfg::_name_value({ ql(pn) },"
-                    f" cfg::Config.{ qlquote.quote_ident(pn) })"
-                    f" ++ ';\n'")
+                    f" cfg::_name_value('CONFIGURE SYSTEM SET ', ';\\n', "
+                    f" { ql(pn) },"
+                    f" cfg::Config.{ qlquote.quote_ident(pn) },"
+                    f" { def_expr })"
+                )
 
         script = f"SELECT {' ++ '.join(items)}"
         _, text = edbbootstrap.compile_bootstrap_script(
@@ -1973,6 +1980,7 @@ class DescribeRolesAsDDLFunction(dbops.Function):
         roles = inhviewname(schema, role_obj)
         member_of = role_obj.get_pointers(schema).get(schema, 'member_of')
         members = inhviewname(schema, member_of)
+        qi_superuser = qlquote.quote_ident(defines.EDGEDB_SUPERUSER)
         text = f"""
             WITH RECURSIVE
             dependencies AS (
@@ -1994,26 +2002,48 @@ class DescribeRolesAsDDLFunction(dbops.Function):
                 ORDER BY max(depth) ASC
             )
             SELECT
-            string_agg(
-                concat(
-                    'CREATE SUPERUSER ROLE ',
-                    edgedb.quote_ident(role.name),
-                    NULLIF((SELECT
-                        concat(' EXTENDING ',
-                            string_agg(edgedb.quote_ident(parent.name), ', '))
-                        FROM {q(*members)} member
-                            INNER JOIN {q(*roles)} parent
-                            ON parent.id = member.target
-                        WHERE member.source = role.id
-                    ), ' EXTENDING '),
-                    CASE WHEN role.password IS NOT NULL THEN
-                        concat(' {{ SET password_hash := ',
-                               quote_literal(role.password),
-                               '}};')
-                    ELSE ';' END
-                ),
+            coalesce(string_agg(
+                CASE WHEN role.name = { ql(defines.EDGEDB_SUPERUSER) } THEN
+                    NULLIF(concat(
+                        'ALTER ROLE { qi_superuser } {{',
+                        NULLIF((SELECT
+                            concat(' EXTENDING ',
+                                string_agg(edgedb.quote_ident(parent.name),
+                                           ', '), ';')
+                            FROM {q(*members)} member
+                                INNER JOIN {q(*roles)} parent
+                                ON parent.id = member.target
+                            WHERE member.source = role.id
+                        ), ' EXTENDING ;'),
+                        CASE WHEN role.password IS NOT NULL THEN
+                            concat(' SET password_hash := ',
+                                   quote_literal(role.password),
+                                   ';')
+                        ELSE '' END,
+                        '}};'
+                    ), 'ALTER ROLE { qi_superuser } {{}};')
+                ELSE
+                    concat(
+                        'CREATE SUPERUSER ROLE ',
+                        edgedb.quote_ident(role.name),
+                        NULLIF((SELECT
+                            concat(' EXTENDING ',
+                                string_agg(edgedb.quote_ident(parent.name),
+                                           ', '))
+                            FROM {q(*members)} member
+                                INNER JOIN {q(*roles)} parent
+                                ON parent.id = member.target
+                            WHERE member.source = role.id
+                        ), ' EXTENDING '),
+                        CASE WHEN role.password IS NOT NULL THEN
+                            concat(' {{ SET password_hash := ',
+                                   quote_literal(role.password),
+                                   '}};')
+                        ELSE ';' END
+                    )
+                END,
                 '\n'
-            ) str
+            ), '') str
             FROM ordered_roles
                 JOIN {q(*roles)} role
                 ON role.id = ordered_roles.id
@@ -2056,7 +2086,8 @@ class SysConfigFunction(dbops.Function):
                         (s.value->>'internal')::bool AS internal,
                         (s.value->>'system')::bool AS system,
                         (s.value->>'typeid')::uuid AS typeid,
-                        (s.value->>'typemod') AS typemod
+                        (s.value->>'typemod') AS typemod,
+                        (s.value->>'backend_setting') AS backend_setting
                     FROM
                         jsonb_each(edgedbinstdata.__syscache_configspec()) AS s
                     ),
@@ -2103,7 +2134,7 @@ class SysConfigFunction(dbops.Function):
 
                 config_backend AS
                     (SELECT
-                        name,
+                        spec.name,
                         to_jsonb(CASE WHEN u.v[1] IS NOT NULL
                          THEN (setting::int * (u.v[1])::int)::text || u.v[2]
                          ELSE setting || COALESCE(unit, '')
@@ -2116,14 +2147,12 @@ class SysConfigFunction(dbops.Function):
                         LATERAL
                         (SELECT
                             regexp_match(pg_settings.unit, '(\\d+)(\\w+)') AS v
-                        ) AS u
-                     WHERE name = any(ARRAY[
-                         'shared_buffers',
-                         'work_mem',
-                         'effective_cache_size',
-                         'effective_io_concurrency',
-                         'default_statistics_target'
-                     ])
+                        ) AS u,
+                        LATERAL
+                        (SELECT config_spec.name
+                         FROM config_spec
+                         WHERE pg_settings.name = config_spec.backend_setting
+                        ) AS spec
                     )
 
             SELECT
@@ -2395,7 +2424,7 @@ def _generate_database_views(schema):
             ((d.description)->>'id')::uuid              AS source,
             (annotations->>'id')::uuid                  AS target,
             (annotations->>'value')::text               AS value,
-            (annotations->>'is_local')::bool            AS is_local
+            (annotations->>'is_owned')::bool            AS is_owned
         FROM
             pg_database dat
             CROSS JOIN LATERAL (
@@ -2414,7 +2443,7 @@ def _generate_database_views(schema):
             ((d.description)->>'id')::uuid              AS source,
             (annotations->>'id')::uuid                  AS target,
             (annotations->>'value')::text               AS value,
-            (annotations->>'is_local')::bool            AS is_local
+            (annotations->>'is_owned')::bool            AS is_owned
         FROM
             pg_database dat
             CROSS JOIN LATERAL (
@@ -2518,7 +2547,7 @@ def _generate_role_views(schema, *, superuser_role):
             ((d.description)->>'id')::uuid              AS source,
             (annotations->>'id')::uuid                  AS target,
             (annotations->>'value')::text               AS value,
-            (annotations->>'is_local')::bool            AS is_local
+            (annotations->>'is_owned')::bool            AS is_owned
         FROM
             pg_catalog.pg_roles AS a
             CROSS JOIN LATERAL (
@@ -2539,7 +2568,7 @@ def _generate_role_views(schema, *, superuser_role):
             ((d.description)->>'id')::uuid              AS source,
             (annotations->>'id')::uuid                  AS target,
             (annotations->>'value')::text               AS value,
-            (annotations->>'is_local')::bool            AS is_local
+            (annotations->>'is_owned')::bool            AS is_owned
         FROM
             pg_catalog.pg_roles AS a
             CROSS JOIN LATERAL (

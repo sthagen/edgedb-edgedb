@@ -402,10 +402,6 @@ class Set(Base):
         return f'<ir.Set \'{self.path_id}\' at 0x{id(self):x}>'
 
 
-class EmptySet(Set):
-    pass
-
-
 class Command(Base):
     __abstract_node__ = True
 
@@ -453,12 +449,16 @@ class TypeIntrospection(ImmutableExpr):
     typeref: TypeRef
 
 
-class ConstExpr(ImmutableExpr):
+class ConstExpr(Expr):
     __abstract_node__ = True
     typeref: TypeRef
 
 
-class BaseConstant(ConstExpr):
+class EmptySet(Set, ConstExpr):
+    pass
+
+
+class BaseConstant(ConstExpr, ImmutableExpr):
     __abstract_node__ = True
     value: typing.Any
 
@@ -509,7 +509,7 @@ class BytesConstant(BaseConstant):
     value: bytes
 
 
-class ConstantSet(ConstExpr):
+class ConstantSet(ConstExpr, ImmutableExpr):
 
     elements: typing.Tuple[BaseConstant, ...]
 
@@ -672,6 +672,7 @@ class TypeCast(ImmutableExpr):
     cast_name: str
     from_type: TypeRef
     to_type: TypeRef
+    cardinality_mod: typing.Optional[qlast.CardinalityModifier]
     sql_function: str
     sql_cast: bool
     sql_expr: bool

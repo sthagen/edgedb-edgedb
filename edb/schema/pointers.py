@@ -57,12 +57,23 @@ class PointerDirection(enum.StrEnum):
     Inbound = '<'
 
 
-def merge_cardinality(target: Pointer, sources: List[Pointer],
-                      field_name: str, *, schema: s_schema.Schema) -> Any:
+def merge_cardinality(
+    target: Pointer,
+    sources: List[Pointer],
+    field_name: str,
+    *,
+    ignore_local: bool,
+    schema: s_schema.Schema,
+) -> Any:
     current = None
     current_from = None
 
-    for source in [target] + list(sources):
+    if ignore_local:
+        pointers = list(sources)
+    else:
+        pointers = [target] + list(sources)
+
+    for source in pointers:
         nextval = source.get_explicit_field_value(schema, field_name, None)
         if nextval is not None:
             if current is None:
@@ -86,17 +97,24 @@ def merge_cardinality(target: Pointer, sources: List[Pointer],
     return current
 
 
-def merge_readonly(target: Pointer, sources: List[Pointer],
-                   field_name: str, *, schema: s_schema.Schema) -> Any:
+def merge_readonly(
+    target: Pointer,
+    sources: List[Pointer],
+    field_name: str,
+    *,
+    ignore_local: bool,
+    schema: s_schema.Schema,
+) -> Any:
 
     current = None
     current_from = None
 
     # The target field value is only relevant if it is explicit,
     # otherwise it should be based on the inherited value.
-    current = target.get_explicit_field_value(schema, field_name, None)
-    if current is not None:
-        current_from = target
+    if not ignore_local:
+        current = target.get_explicit_field_value(schema, field_name, None)
+        if current is not None:
+            current_from = target
 
     for source in list(sources):
         # ignore abstract pointers
@@ -135,6 +153,7 @@ def merge_target(
     bases: List[Pointer],
     field_name: str,
     *,
+    ignore_local: bool = False,
     schema: s_schema.Schema,
 ) -> Optional[s_types.Type]:
 
@@ -151,12 +170,13 @@ def merge_target(
             schema, target = Pointer.merge_targets(
                 schema, ptr, target, base_target, allow_contravariant=True)
 
-    local_target = ptr.get_target(schema)
-    if target is None:
-        target = local_target
-    elif local_target is not None:
-        schema, target = Pointer.merge_targets(
-            schema, ptr, target, local_target)
+    if not ignore_local:
+        local_target = ptr.get_target(schema)
+        if target is None:
+            target = local_target
+        elif local_target is not None:
+            schema, target = Pointer.merge_targets(
+                schema, ptr, target, local_target)
 
     return target
 
@@ -632,7 +652,7 @@ class PseudoPointer(s_abc.Pointer):
     def get_is_derived(self, schema: s_schema.Schema) -> bool:
         return False
 
-    def get_is_local(self, schema: s_schema.Schema) -> bool:
+    def get_is_owned(self, schema: s_schema.Schema) -> bool:
         return True
 
     def get_union_of(
@@ -964,7 +984,7 @@ class PointerCommand(
             return
 
         scls = self.scls
-        if not scls.get_is_local(schema):
+        if not scls.get_is_owned(schema):
             return
 
         default_expr = scls.get_default(schema)
@@ -1240,7 +1260,7 @@ class SetPointerType(
         # Eventually we may be able to relax this by allowing to
         # alter to the type that is compatible (i.e. does not change)
         # with all expressions it is used in.
-        vn = scls.get_verbosename(schema)
+        vn = scls.get_verbosename(schema, with_parent=True)
         schema, finalize_ast = self._propagate_if_expr_refs(
             schema, context, action=f'alter the type of {vn}')
 
@@ -1264,7 +1284,7 @@ class SetPointerType(
                     for b in non_altered_bases
                 )
 
-                vn = scls.get_verbosename(schema)
+                vn = scls.get_verbosename(schema, with_parent=True)
 
                 raise errors.SchemaDefinitionError(
                     f'cannot change the target type of inherited {vn}',
@@ -1275,23 +1295,18 @@ class SetPointerType(
                     context=self.source_context,
                 )
 
-            if context.enable_recursion:
-                tgt = self.get_attribute_value('target')
+            tgt = self.get_attribute_value('target')
 
-                def _set_type(
-                    alter_cmd: sd.ObjectCommand[so.Object],
-                    refname: str,
-                ) -> None:
-                    s_t = type(self)(classname=alter_cmd.classname)
-                    s_t.set_attribute_value('target', tgt)
-                    alter_cmd.add(s_t)
+            def _set_type(
+                alter_cmd: sd.ObjectCommand[so.Object],
+                refname: str,
+            ) -> None:
+                s_t = type(self)(classname=alter_cmd.classname)
+                s_t.set_attribute_value('target', tgt)
+                alter_cmd.add(s_t)
 
-                schema = self._propagate_ref_op(
-                    schema, context, self.scls, cb=_set_type)
-
-        else:
-            for op in self.get_subcommands(type=sd.ObjectCommand):
-                schema = op.apply(schema, context)
+            schema = self._propagate_ref_op(
+                schema, context, self.scls, cb=_set_type)
 
         return schema
 

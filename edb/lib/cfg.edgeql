@@ -150,52 +150,98 @@ cfg::_quote(text: std::str) -> std::str
 };
 
 CREATE FUNCTION
-cfg::_name_value(name: std::str, value: OPTIONAL std::int16) -> std::str
+cfg::_name_value(
+    prefix: std::str,
+    suffix: std::str,
+    name: std::str,
+    value: OPTIONAL std::int16,
+    default: OPTIONAL std::int16
+) -> std::str
 {
     USING (
-        SELECT name ++ ' := ' ++ <str>value ?? '{}'
+        SELECT '' IF EXISTS default AND default = value
+            ELSE prefix ++ name ++ ' := ' ++ <str>value ?? '{}' ++ suffix
     )
 };
 
 CREATE FUNCTION
-cfg::_name_value(name: std::str, value: OPTIONAL std::bool) -> std::str
+cfg::_name_value(
+    prefix: std::str,
+    suffix: std::str,
+    name: std::str,
+    value: OPTIONAL std::int32,
+    default: OPTIONAL std::int32
+) -> std::str
 {
     USING (
-        SELECT name ++ ' := ' ++ <str>value ?? '{}'
+        SELECT '' IF EXISTS default AND default = value
+            ELSE prefix ++ name ++ ' := ' ++ <str>value ?? '{}' ++ suffix
     )
 };
 
 CREATE FUNCTION
-cfg::_name_value(name: std::str, value: OPTIONAL std::int32) -> std::str
+cfg::_name_value(
+    prefix: std::str,
+    suffix: std::str,
+    name: std::str,
+    value: OPTIONAL std::int64,
+    default: OPTIONAL std::int64
+) -> std::str
 {
     USING (
-        SELECT name ++ ' := ' ++ <str>value ?? '{}'
+        SELECT '' IF EXISTS default AND default = value
+            ELSE prefix ++ name ++ ' := ' ++ <str>value ?? '{}' ++ suffix
     )
 };
 
 CREATE FUNCTION
-cfg::_name_value(name: std::str, value: OPTIONAL std::int64) -> std::str
+cfg::_name_value(
+    prefix: std::str,
+    suffix: std::str,
+    name: std::str,
+    value: OPTIONAL std::bool,
+    default: OPTIONAL std::bool
+) -> std::str
 {
     USING (
-        SELECT name ++ ' := ' ++ <str>value ?? '{}'
+        SELECT '' IF EXISTS default AND default = value
+            ELSE prefix ++ name ++ ' := ' ++ <str>value ?? '{}' ++ suffix
     )
 };
 
 CREATE FUNCTION
-cfg::_name_value(name: std::str, value: OPTIONAL std::str) -> std::str
+cfg::_name_value(
+    prefix: std::str,
+    suffix: std::str,
+    name: std::str,
+    value: OPTIONAL std::str,
+    default: OPTIONAL std::str
+) -> std::str
 {
     USING (
-        SELECT name ++ ' := ' ++ cfg::_quote(value) ?? '{}'
+        SELECT '' IF EXISTS default AND default = value
+            ELSE prefix ++
+                name ++ ' := ' ++ cfg::_quote(value) ?? '{}'
+                ++ suffix
     )
 };
 
 CREATE FUNCTION
-cfg::_name_value(name: std::str, value: array<std::str>) -> std::str
+cfg::_name_value_array(
+    prefix: std::str,
+    suffix: std::str,
+    name: std::str,
+    value: array<std::str>
+) -> std::str
 {
     USING SQL $$
-        SELECT concat(name, ' := {',
-            string_agg(quote_literal(item), ', '), '}')
-        FROM unnest(value) as item
+        SELECT
+            CASE WHEN array_length(value, 1) > 0 THEN
+                (SELECT concat(prefix, name, ' := {',
+                    string_agg(quote_literal(item), ', '), '}', suffix)
+                 FROM unnest(value) as item)
+            ELSE ''
+            END
     $$
 };
 

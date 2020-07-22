@@ -1080,6 +1080,9 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             tag = 'ABSTRACT ANNOTATION'
         self._visit_CreateObject(node, tag, after_name=after_name)
 
+    def visit_AlterAnnotation(self, node: qlast.AlterAnnotation) -> None:
+        self._visit_AlterObject(node, 'ABSTRACT ANNOTATION')
+
     def visit_DropAnnotation(self, node: qlast.DropAnnotation) -> None:
         self._visit_DropObject(node, 'ABSTRACT ANNOTATION')
 
@@ -1434,6 +1437,21 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
     def visit_SetLinkType(self, node: qlast.SetLinkType) -> None:
         self.write('SET TYPE ')
         self.visit(node.type)
+
+    def visit_AlterPropertyOwned(self, node: qlast.AlterPropertyOwned) -> None:
+        self.write('SET OWNED' if node.owned else 'DROP OWNED')
+
+    def visit_AlterLinkOwned(self, node: qlast.AlterLinkOwned) -> None:
+        self.write('SET OWNED' if node.owned else 'DROP OWNED')
+
+    def visit_AlterConstraintOwned(
+        self,
+        node: qlast.AlterConstraintOwned,
+    ) -> None:
+        self.write('SET OWNED' if node.owned else 'DROP OWNED')
+
+    def visit_AlterIndexOwned(self, node: qlast.AlterIndexOwned) -> None:
+        self.write('SET OWNED' if node.owned else 'DROP OWNED')
 
     def visit_OnTargetDelete(self, node: qlast.OnTargetDelete) -> None:
         self._write_keywords('ON TARGET DELETE ', node.cascade)

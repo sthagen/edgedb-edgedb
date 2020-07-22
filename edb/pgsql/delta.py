@@ -962,6 +962,12 @@ class CreateAnnotation(
     op_priority = 1
 
 
+class RenameAnnotation(
+        AnnotationCommand, RenameObject,
+        adapts=s_anno.RenameAnnotation):
+    pass
+
+
 class AlterAnnotation(
         AnnotationCommand, AlterObject, adapts=s_anno.AlterAnnotation):
     pass
@@ -1068,6 +1074,14 @@ class RenameConstraint(
         adapts=s_constr.RenameConstraint):
     # Constraints are created using the ID in the backend,
     # so there is nothing special we need to do here.
+    pass
+
+
+class AlterConstraintOwned(
+    ConstraintCommand,
+    AlterObject,
+    adapts=s_constr.AlterConstraintOwned,
+):
     pass
 
 
@@ -1767,6 +1781,14 @@ class RenameIndex(IndexCommand, RenameObject, adapts=s_indexes.RenameIndex):
         self.pgops.add(rename)
 
         return schema
+
+
+class AlterIndexOwned(
+    IndexCommand,
+    AlterObject,
+    adapts=s_indexes.AlterIndexOwned,
+):
+    pass
 
 
 class AlterIndex(IndexCommand, AlterObject, adapts=s_indexes.AlterIndex):
@@ -2617,6 +2639,14 @@ class SetLinkType(LinkMetaCommand, adapts=s_links.SetLinkType):
         return LinkMetaCommand.apply(self, schema, context)
 
 
+class AlterLinkOwned(
+    LinkMetaCommand,
+    AlterObject,
+    adapts=s_links.AlterLinkOwned,
+):
+    pass
+
+
 class AlterLink(LinkMetaCommand, adapts=s_links.AlterLink):
     def apply(
         self,
@@ -2722,7 +2752,7 @@ class DeleteLink(LinkMetaCommand, adapts=s_links.DeleteLink):
                         update_descendants=True,
                     )
 
-            if link.get_is_local(orig_schema):
+            if link.get_is_owned(orig_schema):
                 self.schedule_endpoint_delete_action_update(
                     link, orig_schema, schema, context)
 
@@ -2946,6 +2976,14 @@ class SetPropertyType(
     ) -> s_schema.Schema:
         schema = s_props.SetPropertyType.apply(self, schema, context)
         return PropertyMetaCommand.apply(self, schema, context)
+
+
+class AlterPropertyOwned(
+    PropertyMetaCommand,
+    AlterObject,
+    adapts=s_props.AlterPropertyOwned,
+):
+    pass
 
 
 class AlterProperty(
@@ -3404,7 +3442,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
         for link_op, link, orig_schema in self.link_ops:
             if isinstance(link_op, DeleteLink):
                 if (link.generic(orig_schema)
-                        or not link.get_is_local(orig_schema)
+                        or not link.get_is_owned(orig_schema)
                         or link.is_pure_computable(orig_schema)):
                     continue
                 source = link.get_source(orig_schema)
@@ -3420,7 +3458,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
             else:
                 if (
                     link.generic(schema)
-                    or not link.get_is_local(schema)
+                    or not link.get_is_owned(schema)
                     or link.is_pure_computable(schema)
                 ):
                     continue
@@ -3446,7 +3484,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
 
             for link in source.get_pointers(src_schema).objects(src_schema):
                 if (not isinstance(link, s_links.Link)
-                        or not link.get_is_local(src_schema)
+                        or not link.get_is_owned(src_schema)
                         or link.is_pure_computable(src_schema)):
                     continue
                 ptr_stor_info = types.get_pointer_storage_info(
@@ -3472,7 +3510,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
 
             for link in schema.get_referrers(target, scls_type=s_links.Link,
                                              field_name='target'):
-                if (not link.get_is_local(schema)
+                if (not link.get_is_owned(schema)
                         or link.is_pure_computable(schema)):
                     continue
                 source = link.get_source(schema)

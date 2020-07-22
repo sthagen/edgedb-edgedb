@@ -225,7 +225,7 @@ class PropertyCommand(pointers.PointerCommand,
         super()._validate_pointer_def(schema, context)
 
         scls = self.scls
-        if not scls.get_is_local(schema):
+        if not scls.get_is_owned(schema):
             return
 
         if scls.is_special_pointer(schema):
@@ -362,6 +362,14 @@ class SetPropertyType(pointers.SetPointerType,
                       referrer_context_class=PropertySourceContext):
 
     astnode = qlast.SetPropertyType
+
+
+class AlterPropertyOwned(
+    referencing.AlterOwned[Property],
+    schema_metaclass=Property,
+    referrer_context_class=PropertySourceContext,
+):
+    astnode = qlast.AlterPropertyOwned
 
 
 class AlterProperty(

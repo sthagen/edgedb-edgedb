@@ -52,9 +52,13 @@ def merge_actions(
     sources: List[so.Object],
     field_name: str,
     *,
+    ignore_local: bool = False,
     schema: s_schema.Schema,
 ) -> Any:
-    ours = target.get_explicit_local_field_value(schema, field_name, None)
+    if not ignore_local:
+        ours = target.get_explicit_local_field_value(schema, field_name, None)
+    else:
+        ours = None
     if ours is None:
         current = None
         current_from = None
@@ -229,7 +233,7 @@ class LinkCommand(lproperties.PropertySourceCommand,
         scls = self.scls
         assert isinstance(scls, Link)
 
-        if not scls.get_is_local(schema):
+        if not scls.get_is_owned(schema):
             return
 
         target = scls.get_target(schema)
@@ -385,7 +389,7 @@ class CreateLink(
         src_prop.set_attribute_value('required', True)
         src_prop.set_attribute_value('readonly', True)
         src_prop.set_attribute_value('is_final', True)
-        src_prop.set_attribute_value('is_local', True)
+        src_prop.set_attribute_value('is_owned', True)
         src_prop.set_attribute_value('cardinality',
                                      qltypes.SchemaCardinality.ONE)
 
@@ -418,7 +422,7 @@ class CreateLink(
         tgt_prop.set_attribute_value('required', False)
         tgt_prop.set_attribute_value('readonly', True)
         tgt_prop.set_attribute_value('is_final', True)
-        tgt_prop.set_attribute_value('is_local', True)
+        tgt_prop.set_attribute_value('is_owned', True)
         tgt_prop.set_attribute_value('cardinality',
                                      qltypes.SchemaCardinality.ONE)
 
@@ -443,6 +447,14 @@ class SetLinkType(pointers.SetPointerType,
                   referrer_context_class=LinkSourceCommandContext):
 
     astnode = qlast.SetLinkType
+
+
+class AlterLinkOwned(
+    referencing.AlterOwned[Link],
+    schema_metaclass=Link,
+    referrer_context_class=LinkSourceCommandContext,
+):
+    astnode = qlast.AlterLinkOwned
 
 
 class SetTargetDeletePolicy(sd.Command):

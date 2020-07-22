@@ -109,6 +109,9 @@ class InnerDDLStmt(Nonterm):
     def reduce_CreateAnnotationStmt(self, *kids):
         self.val = kids[0].val
 
+    def reduce_AlterAnnotationStmt(self, *kids):
+        self.val = kids[0].val
+
     def reduce_DropAnnotationStmt(self, *kids):
         self.val = kids[0].val
 
@@ -600,11 +603,20 @@ class SetDelegatedStmt(Nonterm):
         )
 
 
+class AlterConstraintOwned(Nonterm):
+    def reduce_DROP_OWNED(self, *kids):
+        self.val = qlast.AlterConstraintOwned(owned=False)
+
+    def reduce_SET_OWNED(self, *kids):
+        self.val = qlast.AlterConstraintOwned(owned=True)
+
+
 commands_block(
     'AlterConcreteConstraint',
     RenameStmt,
     SetFieldStmt,
     SetDelegatedStmt,
+    AlterConstraintOwned,
     CreateAnnotationValueStmt,
     AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
@@ -751,25 +763,52 @@ class DropScalarTypeStmt(Nonterm):
 #
 # CREATE ANNOTATION
 #
+commands_block(
+    'CreateAnnotation',
+    CreateAnnotationValueStmt,
+)
+
+
 class CreateAnnotationStmt(Nonterm):
     def reduce_CreateAnnotation(self, *kids):
-        r"""%reduce CREATE ABSTRACT ANNOTATION NodeName OptExtendingSimple \
-                    OptCreateCommandsBlock"""
+        r"""%reduce CREATE ABSTRACT ANNOTATION NodeName \
+                    OptCreateAnnotationCommandsBlock"""
         self.val = qlast.CreateAnnotation(
             name=kids[3].val,
-            bases=kids[4].val,
-            commands=kids[5].val,
+            commands=kids[4].val,
             inheritable=False,
         )
 
     def reduce_CreateInheritableAnnotation(self, *kids):
         r"""%reduce CREATE ABSTRACT INHERITABLE ANNOTATION
-                    NodeName OptExtendingSimple OptCreateCommandsBlock"""
+                    NodeName OptCreateCommandsBlock"""
         self.val = qlast.CreateAnnotation(
             name=kids[4].val,
-            bases=kids[5].val,
-            commands=kids[6].val,
+            commands=kids[5].val,
             inheritable=True,
+        )
+
+
+#
+# ALTER ANNOTATION
+#
+commands_block(
+    'AlterAnnotation',
+    RenameStmt,
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
+    DropAnnotationValueStmt,
+    opt=False,
+)
+
+
+class AlterAnnotationStmt(Nonterm):
+    def reduce_AlterAnnotation(self, *kids):
+        r"""%reduce ALTER ABSTRACT ANNOTATION NodeName \
+                    AlterAnnotationCommandsBlock"""
+        self.val = qlast.AlterAnnotation(
+            name=kids[3].val,
+            commands=kids[4].val
         )
 
 
@@ -784,9 +823,18 @@ class DropAnnotationStmt(Nonterm):
         )
 
 
+class AlterIndexOwned(Nonterm):
+    def reduce_DROP_OWNED(self, *kids):
+        self.val = qlast.AlterIndexOwned(owned=False)
+
+    def reduce_SET_OWNED(self, *kids):
+        self.val = qlast.AlterIndexOwned(owned=True)
+
+
 commands_block(
     'AlterIndex',
     SetFieldStmt,
+    AlterIndexOwned,
     CreateAnnotationValueStmt,
     AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
@@ -1007,11 +1055,20 @@ class SetRequiredStmt(Nonterm):
         )
 
 
+class AlterPropertyOwned(Nonterm):
+    def reduce_DROP_OWNED(self, *kids):
+        self.val = qlast.AlterPropertyOwned(owned=False)
+
+    def reduce_SET_OWNED(self, *kids):
+        self.val = qlast.AlterPropertyOwned(owned=True)
+
+
 commands_block(
     'AlterConcreteProperty',
     UsingStmt,
     RenameStmt,
     SetFieldStmt,
+    AlterPropertyOwned,
     CreateAnnotationValueStmt,
     AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
@@ -1217,11 +1274,20 @@ class CreateConcreteLinkStmt(Nonterm):
         )
 
 
+class AlterLinkOwned(Nonterm):
+    def reduce_DROP_OWNED(self, *kids):
+        self.val = qlast.AlterLinkOwned(owned=False)
+
+    def reduce_SET_OWNED(self, *kids):
+        self.val = qlast.AlterLinkOwned(owned=True)
+
+
 commands_block(
     'AlterConcreteLink',
     UsingStmt,
     RenameStmt,
     SetFieldStmt,
+    AlterLinkOwned,
     CreateAnnotationValueStmt,
     AlterAnnotationValueStmt,
     DropAnnotationValueStmt,

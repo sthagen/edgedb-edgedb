@@ -19,13 +19,11 @@
 
 from __future__ import annotations
 from typing import *
-from typing_extensions import Final
 
 import builtins
 import collections
 import collections.abc
 import enum
-import sys
 import uuid
 
 from edb import errors
@@ -45,12 +43,8 @@ from . import _types
 
 
 if TYPE_CHECKING:
-    from edb.schema import objtypes
     from edb.schema import delta as sd
     from edb.schema import schema as s_schema
-
-    if sys.version_info <= (3, 7):
-        from typing_extensions import Protocol  # type: ignore
 
     CovT = TypeVar("CovT", covariant=True)
 
@@ -61,6 +55,7 @@ if TYPE_CHECKING:
             sources: Iterable[Object],
             field_name: str,
             *,
+            ignore_local: bool = False,
             schema: s_schema.Schema,
         ) -> Any:
             ...
@@ -122,12 +117,14 @@ def default_field_merge(
     sources: Iterable[Object],
     field_name: str,
     *,
+    ignore_local: bool = False,
     schema: s_schema.Schema,
 ) -> Any:
     """The default `MergeFunction`."""
-    ours = target.get_explicit_local_field_value(schema, field_name, None)
-    if ours is not None:
-        return ours
+    if not ignore_local:
+        ours = target.get_explicit_local_field_value(schema, field_name, None)
+        if ours is not None:
+            return ours
 
     for source in sources:
         theirs = source.get_explicit_field_value(schema, field_name, None)
@@ -1227,6 +1224,8 @@ class Object(s_abc.Object, s_abc.ObjectContainer, metaclass=ObjectMeta):
         self: Object_T,
         schema: s_schema.Schema,
         cmdtype: Type[sd.ObjectCommand[Object]],
+        *,
+        classname: Optional[str] = None,
         **kwargs: Any,
     ) -> sd.ObjectCommand[Object_T]:
         from . import delta as sd
@@ -1235,7 +1234,7 @@ class Object(s_abc.Object, s_abc.ObjectContainer, metaclass=ObjectMeta):
             objtype=type(self),
             cmdtype=cmdtype,
             schema=schema,
-            name=self.get_name(schema),
+            name=classname or self.get_name(schema),
             ddl_identity=self.get_ddl_identity(schema),
             **kwargs,
         )
@@ -1642,7 +1641,6 @@ class ObjectShell(Shell):
             return schema.get(
                 self.name,
                 type=self.schemaclass,
-                refname=self.origname,
                 sourcectx=self.sourcectx,
             )
         else:
@@ -2207,9 +2205,13 @@ class ObjectSet(
         sources: Iterable[Object],
         field_name: str,
         *,
+        ignore_local: bool = False,
         schema: s_schema.Schema,
     ) -> ObjectSet[Object_T]:
-        result = target.get_explicit_field_value(schema, field_name, None)
+        if not ignore_local:
+            result = target.get_explicit_field_value(schema, field_name, None)
+        else:
+            result = None
         for source in sources:
             if source.__class__.get_field(field_name) is None:
                 continue
@@ -2391,8 +2393,8 @@ class InheritingObject(SubclassableObject):
         return schema.get_descendants(self)
 
     def ordered_descendants(
-        self, schema: s_schema.Schema
-    ) -> List[objtypes.ObjectType]:
+        self: InheritingObjectT, schema: s_schema.Schema
+    ) -> List[InheritingObjectT]:
         """Return class descendants in ancestral order."""
         graph = {}
         for descendant in self.descendants(schema):

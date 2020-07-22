@@ -398,7 +398,7 @@ class Path(Expr):
 class TypeCast(Expr):
     expr: Expr
     type: TypeExpr
-    modifier: typing.Optional[CardinalityModifier]
+    cardinality_mod: typing.Optional[CardinalityModifier]
 
 
 class Introspect(Expr):
@@ -618,6 +618,26 @@ class AlterDropInherit(DDLOperation, BasesMixin):
     pass
 
 
+class AlterOwned(DDLOperation):
+    owned: bool
+
+
+class AlterPropertyOwned(AlterOwned):
+    pass
+
+
+class AlterLinkOwned(AlterOwned):
+    pass
+
+
+class AlterConstraintOwned(AlterOwned):
+    pass
+
+
+class AlterIndexOwned(AlterOwned):
+    pass
+
+
 class OnTargetDelete(DDLOperation):
     cascade: qltypes.LinkTargetDeleteAction
 
@@ -757,6 +777,10 @@ class DropRole(DropObject):
 class CreateAnnotation(CreateExtendingObject):
     type: typing.Optional[TypeExpr]
     inheritable: bool
+
+
+class AlterAnnotation(AlterObject):
+    pass
 
 
 class DropAnnotation(DropObject):
@@ -1092,3 +1116,14 @@ def get_ddl_field_value(
             return cmd.value
 
     return None
+
+
+def has_ddl_subcommand(
+    ddlcmd: DDLOperation,
+    cmdtype: typing.Type[DDLOperation],
+) -> bool:
+    for cmd in ddlcmd.commands:
+        if isinstance(cmd, cmdtype):
+            return True
+    else:
+        return False

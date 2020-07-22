@@ -17,7 +17,6 @@
 #
 
 
-import decimal
 import re
 import unittest  # NOQA
 
@@ -102,6 +101,14 @@ class TestEdgeQLParser(EdgeQLSyntaxTest):
     @tb.must_fail(errors.EdgeQLSyntaxError, line=1, col=1)
     def test_edgeql_syntax_nonstatement_02(self):
         """1 + 2;"""
+
+    @tb.must_fail(errors.EdgeQLSyntaxError, line=1, col=8)
+    def test_edgeql_syntax_number_too_large(self):
+        """SELECT 111111111111111111111111111111111111111111111111111111;"""
+
+    @tb.must_fail(errors.EdgeQLSyntaxError, line=1, col=10)
+    def test_edgeql_syntax_float_number_too_large(self):
+        """SELECT 2+1e999;"""
 
     def test_edgeql_syntax_constants_01(self):
         """
@@ -2958,25 +2965,25 @@ aa';
         CREATE SCALAR TYPE myenum EXTENDING enum<'foo', 'bar'>;
         """
 
-    def test_edgeql_syntax_ddl_attribute_01(self):
+    def test_edgeql_syntax_ddl_annotation_01(self):
         """
         CREATE ABSTRACT ANNOTATION std::paramtypes;
         """
 
-    def test_edgeql_syntax_ddl_attribute_02(self):
-        """
-        CREATE ABSTRACT ANNOTATION std::paramtypes EXTENDING std::baseattr;
-        """
-
-    def test_edgeql_syntax_ddl_attribute_03(self):
+    def test_edgeql_syntax_ddl_annotation_02(self):
         """
         CREATE ABSTRACT INHERITABLE ANNOTATION std::paramtypes;
         """
 
-    def test_edgeql_syntax_ddl_attribute_04(self):
+    def test_edgeql_syntax_ddl_annotation_03(self):
         """
-        CREATE ABSTRACT INHERITABLE ANNOTATION std::paramtypes
-            EXTENDING std::foo;
+        DROP ABSTRACT ANNOTATION foo::my_annotation;
+        """
+
+    def test_edgeql_syntax_ddl_annotation_04(self):
+        """
+        ALTER ABSTRACT ANNOTATION foo::my_annotation
+            RENAME TO foo::renamed_annotation;
         """
 
     def test_edgeql_syntax_ddl_constraint_01(self):
@@ -3461,54 +3468,6 @@ aa';
             std::int64 USING SQL FUNCTION 'aaa';
         """
 
-    async def test_edgeql_syntax_ddl_function_49(self):
-        # This test checks constants, but we have to do DDLs to test them
-        # with constant extraction disabled
-        await self.con.execute('''
-            CREATE FUNCTION test::constant_int() -> std::int64 {
-                USING (SELECT 1_024);
-            };
-            CREATE FUNCTION test::constant_bigint() -> std::bigint {
-                USING (SELECT 1_024n);
-            };
-            CREATE FUNCTION test::constant_float() -> std::float64 {
-                USING (SELECT 1_024.1_250);
-            };
-            CREATE FUNCTION test::constant_decimal() -> std::decimal {
-                USING (SELECT 1_024.1_024n);
-            };
-        ''')
-        try:
-            await self.assert_query_result(
-                r'''
-                    SELECT (
-                        int := test::constant_int(),
-                        bigint := test::constant_bigint(),
-                        float := test::constant_float(),
-                        decimal := test::constant_decimal(),
-                    )
-                ''',
-                [{
-                    "int": 1024,
-                    "bigint": 1024,
-                    "float": 1024.125,
-                    "decimal": 1024.1024,
-                }],
-                [{
-                    "int": 1024,
-                    "bigint": 1024,
-                    "float": 1024.125,
-                    "decimal": decimal.Decimal('1024.1024'),
-                }],
-            )
-        finally:
-            await self.con.execute("""
-                DROP FUNCTION test::constant_int();
-                DROP FUNCTION test::constant_float();
-                DROP FUNCTION test::constant_bigint();
-                DROP FUNCTION test::constant_decimal();
-            """)
-
     def test_edgeql_syntax_ddl_property_01(self):
         """
         CREATE ABSTRACT PROPERTY std::property {
@@ -3700,6 +3659,24 @@ aa';
             ALTER LINK foo {
                 SET MULTI;
                 DROP REQUIRED;
+            };
+        };
+        """
+
+    def test_edgeql_syntax_ddl_type_10(self):
+        """
+        ALTER TYPE mymod::Foo {
+            ALTER PROPERTY foo {
+                SET OWNED;
+            };
+        };
+        """
+
+    def test_edgeql_syntax_ddl_type_11(self):
+        """
+        ALTER TYPE mymod::Foo {
+            ALTER PROPERTY foo {
+                DROP OWNED;
             };
         };
         """

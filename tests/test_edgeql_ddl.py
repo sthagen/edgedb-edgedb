@@ -17,6 +17,7 @@
 #
 
 import edgedb
+import decimal
 
 from edb.testbase import server as tb
 from edb.tools import test
@@ -355,7 +356,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
     async def test_edgeql_ddl_13(self):
         with self.assertRaisesRegex(
                 edgedb.InvalidReferenceError,
-                "object type or alias 'self' does not exist"):
+                "object type or alias 'default::self' does not exist"):
             await self.con.execute(r"""
                 CREATE TYPE test::TestBadContainerLinkObjectType {
                     CREATE PROPERTY foo -> std::str {
@@ -677,6 +678,204 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 },
             ],
         )
+
+    async def test_edgeql_ddl_24(self):
+        # Test transition of property from inherited to owned.
+        await self.con.execute("""
+            SET MODULE test;
+            CREATE TYPE Desc;
+            CREATE TYPE Named {
+                CREATE PROPERTY name -> str;
+                CREATE LINK desc -> Desc;
+            };
+            CREATE TYPE User EXTENDING Named;
+        """)
+
+        await self.assert_query_result(
+            r"""
+                WITH
+                    C := (SELECT schema::ObjectType
+                          FILTER .name = 'test::User')
+                SELECT
+                    C {
+                        pointers: { @is_owned }
+                        FILTER .name IN {'name', 'desc'}
+                    };
+            """,
+            [
+                {
+                    'pointers': [{
+                        '@is_owned': False,
+                    }, {
+                        '@is_owned': False,
+                    }],
+                },
+            ],
+        )
+
+        await self.con.execute("""
+            ALTER TYPE User {
+                ALTER PROPERTY name SET OWNED;
+                ALTER LINK desc SET OWNED;
+            };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                WITH
+                    C := (SELECT schema::ObjectType
+                          FILTER .name = 'test::User')
+                SELECT
+                    C {
+                        pointers: { @is_owned }
+                        FILTER .name IN {'name', 'desc'}
+                    };
+            """,
+            [
+                {
+                    'pointers': [{
+                        '@is_owned': True,
+                    }, {
+                        '@is_owned': True,
+                    }],
+                },
+            ],
+        )
+
+        await self.con.execute("""
+            ALTER TYPE User {
+                ALTER PROPERTY name {
+                    SET REQUIRED;
+                    CREATE CONSTRAINT exclusive;
+                };
+
+                ALTER LINK desc {
+                    SET REQUIRED;
+                    CREATE CONSTRAINT exclusive;
+                };
+            };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                WITH
+                    C := (SELECT schema::ObjectType
+                          FILTER .name = 'test::User')
+                SELECT
+                    C {
+                        pointers: {
+                            @is_owned,
+                            required,
+                            constraints: {
+                                name,
+                            }
+                        }
+                        FILTER .name IN {'name', 'desc'}
+                    };
+            """,
+            [
+                {
+                    'pointers': [{
+                        '@is_owned': True,
+                        'required': True,
+                        'constraints': [{
+                            'name': 'std::exclusive',
+                        }],
+                    }, {
+                        '@is_owned': True,
+                        'required': True,
+                        'constraints': [{
+                            'name': 'std::exclusive',
+                        }],
+                    }],
+                },
+            ],
+        )
+
+        # and drop it again
+        await self.con.execute("""
+            ALTER TYPE User {
+                ALTER PROPERTY name DROP OWNED;
+                ALTER LINK desc DROP OWNED;
+            };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                WITH
+                    C := (SELECT schema::ObjectType
+                          FILTER .name = 'test::User')
+                SELECT
+                    C {
+                        pointers: {
+                            @is_owned,
+                            required,
+                            constraints: {
+                                name,
+                            }
+                        }
+                        FILTER .name IN {'name', 'desc'}
+                    };
+            """,
+            [
+                {
+                    'pointers': [{
+                        '@is_owned': False,
+                        'required': False,
+                        'constraints': [],
+                    }, {
+                        '@is_owned': False,
+                        'required': False,
+                        'constraints': [],
+                    }],
+                },
+            ],
+        )
+
+    async def test_edgeql_ddl_25(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidDefinitionError,
+            "cannot drop owned property 'name'.*not inherited",
+        ):
+            await self.con.execute("""
+                SET MODULE test;
+                CREATE TYPE Named {
+                    CREATE PROPERTY name -> str;
+                };
+                ALTER TYPE Named ALTER PROPERTY name DROP OWNED;
+            """)
+
+    async def test_edgeql_ddl_26(self):
+        await self.con.execute("""
+            SET MODULE test;
+            CREATE TYPE Target;
+            CREATE TYPE Source {
+                CREATE LINK target -> Source;
+            };
+            CREATE TYPE Child EXTENDING Source {
+                ALTER LINK target {
+                    SET REQUIRED;
+                    CREATE PROPERTY foo -> str;
+                }
+            };
+            CREATE TYPE Grandchild EXTENDING Child {
+                ALTER LINK target {
+                    ALTER PROPERTY foo {
+                        CREATE CONSTRAINT exclusive;
+                    }
+                }
+            };
+        """)
+
+        with self.assertRaisesRegex(
+            edgedb.SchemaError,
+            "cannot drop property 'foo' of link 'target' of "
+            "object type 'test::Child'",
+        ):
+            await self.con.execute("""
+                SET MODULE test;
+                ALTER TYPE Child ALTER LINK target DROP OWNED;
+            """)
 
     async def test_edgeql_ddl_default_01(self):
         with self.assertRaisesRegex(
@@ -1024,7 +1223,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
     async def test_edgeql_ddl_bad_01(self):
         with self.assertRaisesRegex(
                 edgedb.InvalidReferenceError,
-                r"type 'array' does not exist"):
+                r"type 'default::array' does not exist"):
             await self.con.execute(r"""
                 CREATE TYPE test::Foo {
                     CREATE PROPERTY bar -> array;
@@ -1034,7 +1233,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
     async def test_edgeql_ddl_bad_02(self):
         with self.assertRaisesRegex(
                 edgedb.InvalidReferenceError,
-                r"type 'tuple' does not exist"):
+                r"type 'default::tuple' does not exist"):
             await self.con.execute(r"""
                 CREATE TYPE test::Foo {
                     CREATE PROPERTY bar -> tuple;
@@ -1886,6 +2085,54 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 'bzzz'
             ],
         )
+
+    async def test_edgeql_ddl_function_27(self):
+        # This test checks constants, but we have to do DDLs to test them
+        # with constant extraction disabled
+        await self.con.execute('''
+            CREATE FUNCTION test::constant_int() -> std::int64 {
+                USING (SELECT 1_024);
+            };
+            CREATE FUNCTION test::constant_bigint() -> std::bigint {
+                USING (SELECT 1_024n);
+            };
+            CREATE FUNCTION test::constant_float() -> std::float64 {
+                USING (SELECT 1_024.1_250);
+            };
+            CREATE FUNCTION test::constant_decimal() -> std::decimal {
+                USING (SELECT 1_024.1_024n);
+            };
+        ''')
+        try:
+            await self.assert_query_result(
+                r'''
+                    SELECT (
+                        int := test::constant_int(),
+                        bigint := test::constant_bigint(),
+                        float := test::constant_float(),
+                        decimal := test::constant_decimal(),
+                    )
+                ''',
+                [{
+                    "int": 1024,
+                    "bigint": 1024,
+                    "float": 1024.125,
+                    "decimal": 1024.1024,
+                }],
+                [{
+                    "int": 1024,
+                    "bigint": 1024,
+                    "float": 1024.125,
+                    "decimal": decimal.Decimal('1024.1024'),
+                }],
+            )
+        finally:
+            await self.con.execute("""
+                DROP FUNCTION test::constant_int();
+                DROP FUNCTION test::constant_float();
+                DROP FUNCTION test::constant_bigint();
+                DROP FUNCTION test::constant_decimal();
+            """)
 
     async def test_edgeql_ddl_module_01(self):
         with self.assertRaisesRegex(
@@ -2891,6 +3138,56 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 };
             """)
 
+    async def test_edgeql_ddl_annotation_11(self):
+        await self.con.execute("""
+            CREATE ABSTRACT ANNOTATION test::anno11;
+        """)
+
+        await self.assert_query_result(
+            r'''
+                WITH MODULE schema
+                SELECT Annotation {
+                    name,
+                }
+                FILTER
+                    .name LIKE 'test::anno11%';
+            ''',
+            [{"name": "test::anno11"}]
+        )
+
+        await self.con.execute("""
+            ALTER ABSTRACT ANNOTATION test::anno11
+                RENAME TO test::anno11_new_name;
+        """)
+
+        await self.assert_query_result(
+            r'''
+                WITH MODULE schema
+                SELECT Annotation {
+                    name,
+                }
+                FILTER
+                    .name LIKE 'test::anno11%';
+            ''',
+            [{"name": "test::anno11_new_name"}]
+        )
+
+        await self.con.execute("""
+            DROP ABSTRACT ANNOTATION test::anno11_new_name;
+        """)
+
+        await self.assert_query_result(
+            r'''
+                WITH MODULE schema
+                SELECT Annotation {
+                    name,
+                }
+                FILTER
+                    .name LIKE 'test::anno11%';
+            ''',
+            []
+        )
+
     async def test_edgeql_ddl_anytype_01(self):
         with self.assertRaisesRegex(
                 edgedb.InvalidPropertyTargetError,
@@ -3383,7 +3680,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             }]
         )
 
-        role = await self.con.fetchone('''
+        role = await self.con.query_one('''
             SELECT sys::Role { password }
             FILTER .name = 'foo2'
         ''')
@@ -3396,7 +3693,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             };
         """)
 
-        role = await self.con.fetchone('''
+        role = await self.con.query_one('''
             SELECT sys::Role { password }
             FILTER .name = 'foo2'
         ''')
@@ -5469,7 +5766,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         async with self._run_and_rollback():
             with self.assertRaisesRegex(
                     edgedb.errors.InvalidReferenceError,
-                    "improperly formed name 'blah': module is not specified"):
+                    "object type 'test::blah' does not exist"):
                 await self.con.execute('''
                     WITH MODULE test
                     CREATE TYPE Err1 EXTENDING blah {

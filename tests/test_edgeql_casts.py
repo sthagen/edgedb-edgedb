@@ -553,12 +553,12 @@ class TestEdgeQLCasts(tb.QueryTestCase):
             with self.assertRaisesRegex(
                     edgedb.InvalidValueError,
                     fr"invalid syntax for std::bool: '{variant}'"):
-                await self.con.fetchone(f'SELECT <bool>"{variant}"')
+                await self.con.query_one(f'SELECT <bool>"{variant}"')
 
         self.assertTrue(
-            await self.con.fetchone('SELECT <bool>"    TruE   "'))
+            await self.con.query_one('SELECT <bool>"    TruE   "'))
         self.assertFalse(
-            await self.con.fetchone('SELECT <bool>"    FalsE   "'))
+            await self.con.query_one('SELECT <bool>"    FalsE   "'))
 
     async def test_edgeql_casts_str_03(self):
         # str to json is always lossless
@@ -641,31 +641,31 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <datetime>"2018-05-07;20:01:22.306916+00:00"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <datetime>"2018-05-07T20:01:22.306916"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <datetime>"2018-05-07T20:01:22.306916 1000"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <datetime>"2018-05-07T20:01:22.306916 US/Central"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <datetime>"2018-05-07T20:01:22.306916 +GMT1"')
 
     async def test_edgeql_casts_str_06(self):
@@ -699,13 +699,13 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_datetime>"2018-05-07;20:01:22.306916"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 '''
                     SELECT
                         <cal::local_datetime>"2018-05-07T20:01:22.306916+01:00"
@@ -714,13 +714,13 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_datetime>"2018-05-07T20:01:22.306916 GMT"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 '''
                     SELECT
                       <cal::local_datetime>"2018-05-07T20:01:22.306916 GMT0"
@@ -729,7 +729,7 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 '''SELECT <cal::local_datetime>
                     "2018-05-07T20:01:22.306916 US/Central"
                 ''')
@@ -760,25 +760,25 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_date>"2018-05-07T20:01:22.306916"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_date>"2018/05/07"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_date>"2018.05.07"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_date>"2018-05-07+01:00"')
 
     async def test_edgeql_casts_str_08(self):
@@ -809,13 +809,13 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 'invalid input syntax for type cal::local_time'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 "SELECT <cal::local_time>'2018-05-07 20:01:22'")
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_time>"20:01:22.306916+01:00"')
 
     async def test_edgeql_casts_str_09(self):
@@ -1883,7 +1883,7 @@ class TestEdgeQLCasts(tb.QueryTestCase):
 
     async def test_edgeql_casts_json_04(self):
         self.assertEqual(
-            await self.con.fetchall('''
+            await self.con.query('''
                 select <json>(
                     select schema::Type{name} filter .name = 'std::bool'
                 )
@@ -1893,38 +1893,38 @@ class TestEdgeQLCasts(tb.QueryTestCase):
 
     async def test_edgeql_casts_json_05(self):
         self.assertEqual(
-            await self.con.fetchall(
+            await self.con.query(
                 'select <json>{(1, 2), (3, 4)}'),
             ['[1, 2]', '[3, 4]'])
 
         self.assertEqual(
-            await self.con.fetchall(
+            await self.con.query(
                 'select <json>{(a := 1, b := 2), (a := 3, b := 4)}'),
             ['{"a": 1, "b": 2}', '{"a": 3, "b": 4}'])
 
         self.assertEqual(
-            await self.con.fetchall(
+            await self.con.query(
                 'select <json>{[1, 2], [3, 4]}'),
             ['[1, 2]', '[3, 4]'])
 
         self.assertEqual(
-            await self.con.fetchall(
+            await self.con.query(
                 'select <json>{[(1, 2)], [(3, 4)]}'),
             ['[[1, 2]]', '[[3, 4]]'])
 
     async def test_edgeql_casts_json_06(self):
         self.assertEqual(
-            await self.con.fetchall_json(
+            await self.con.query_json(
                 'select <json>{(1, 2), (3, 4)}'),
             '[[1, 2], [3, 4]]')
 
         self.assertEqual(
-            await self.con.fetchall_json(
+            await self.con.query_json(
                 'select <json>{[1, 2], [3, 4]}'),
             '[[1, 2], [3, 4]]')
 
         self.assertEqual(
-            await self.con.fetchall_json(
+            await self.con.query_json(
                 'select <json>{[(1, 2)], [(3, 4)]}'),
             '[[[1, 2]], [[3, 4]]]')
 
@@ -1969,25 +1969,25 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <datetime><json>"2018-05-07;20:01:22.306916+00:00"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <datetime><json>"2018-05-07T20:01:22.306916"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <datetime><json>"2018-05-07T20:01:22.306916 1000"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 '''SELECT <datetime><json>
                     "2018-05-07T20:01:22.306916 US/Central"
                 ''')
@@ -1995,7 +1995,7 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <datetime><json>"2018-05-07T20:01:22.306916 +GMT1"')
 
     async def test_edgeql_casts_json_08(self):
@@ -2034,7 +2034,7 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 '''SELECT
                     <cal::local_datetime><json>"2018-05-07;20:01:22.306916"
                 ''')
@@ -2042,7 +2042,7 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 '''SELECT <cal::local_datetime><json>
                     "2018-05-07T20:01:22.306916+01:00"
                 ''')
@@ -2050,21 +2050,21 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 '''SELECT <cal::local_datetime><json>
                     "2018-05-07T20:01:22.306916 GMT"''')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 '''SELECT <cal::local_datetime><json>
                     "2018-05-07T20:01:22.306916 GMT0"''')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 '''SELECT <cal::local_datetime><json>
                     "2018-05-07T20:01:22.306916 US/Central"
                 ''')
@@ -2099,25 +2099,25 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_date><json>"2018-05-07T20:01:22.306916"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_date><json>"2018/05/07"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_date><json>"2018.05.07"')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_date><json>"2018-05-07+01:00"')
 
     async def test_edgeql_casts_json_10(self):
@@ -2153,14 +2153,58 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 'invalid input syntax for type cal::local_time'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 "SELECT <cal::local_time><json>'2018-05-07 20:01:22'")
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
                 r'invalid input syntax for type'):
-            await self.con.fetchone(
+            await self.con.query_one(
                 'SELECT <cal::local_time><json>"20:01:22.306916+01:00"')
+
+    async def test_edgeql_casts_json_11(self):
+        await self.assert_query_result(
+            r"SELECT <array<int64>><json>[1, 1, 2, 3, 5]",
+            [[1, 1, 2, 3, 5]]
+        )
+
+        with self.assertRaisesRegex(
+                # FIXME: This should be a different error
+                edgedb.InternalServerError,
+                r'expected json number, null; got json string'):
+            await self.con.query_one(
+                r"SELECT <array<int64>><json>['asdf']")
+
+        with self.assertRaisesRegex(
+                # FIXME: This should be a different error
+                edgedb.InternalServerError,
+                r'expected json number, null; got json string'):
+            await self.con.query_one(
+                r"SELECT <array<int64>>to_json('[1, 2, \"asdf\"]')")
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r'invalid null value in cast'):
+            await self.con.query_one(
+                r"SELECT <array<int64>>[to_json('1'), to_json('null')]")
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r'invalid null value in cast'):
+            await self.con.query_one(
+                r"SELECT <array<int64>>to_json('[1, 2, null]')")
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r'invalid null value in cast'):
+            await self.con.query_one(
+                r"SELECT <array<int64>><array<json>>to_json('[1, 2, null]')")
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r'cannot extract elements from a scalar'):
+            await self.con.query_one(
+                r"SELECT <array<int64>><json>'asdf'")
 
     async def test_edgeql_casts_assignment_01(self):
         async with self._run_and_rollback():
@@ -2266,7 +2310,7 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         with self.assertRaisesRegex(
                 edgedb.ConstraintViolationError,
                 'invalid custom_str_t'):
-            await self.con.fetchall(
+            await self.con.query(
                 "SELECT <test::custom_str_t>'123'")
 
     async def test_edgeql_casts_prohibit_tuple_query_params_01(self):
@@ -2274,7 +2318,7 @@ class TestEdgeQLCasts(tb.QueryTestCase):
             edgedb.QueryError,
             r'cannot pass tuples as query parameters',
         ):
-            await self.con.fetchall(
+            await self.con.query(
                 r'''
                 WITH MODULE test
                 SELECT Test {
@@ -2292,7 +2336,7 @@ class TestEdgeQLCasts(tb.QueryTestCase):
             r'cannot pass collections with tuple elements'
             r' as query parameters',
         ):
-            await self.con.fetchall(
+            await self.con.query(
                 r"SELECT <array<tuple<int64, str>>>$0;",
                 [(0, 'zero'), (1, 'one')],
             )

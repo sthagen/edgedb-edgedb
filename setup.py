@@ -60,7 +60,7 @@ RUNTIME_DEPS = [
     'graphql-core~=3.0.3',
     'promise~=2.2.0',
 
-    'edgedb>=0.8.0a1',
+    'edgedb>=0.9.0a1',
 ]
 
 CYTHON_DEPENDENCY = 'Cython==0.29.14'
@@ -75,7 +75,7 @@ BUILD_DEPS = [
     CYTHON_DEPENDENCY,
 ]
 
-RUST_VERSION = '1.44.0'  # Also update docs/internal/dev.rst
+RUST_VERSION = '1.45.0'  # Also update docs/internal/dev.rst
 
 EDGEDBCLI_REPO = 'https://github.com/edgedb/edgedb-cli'
 
@@ -91,6 +91,9 @@ EXTRA_DEPS = {
         'coverage~=4.5.2',
         'requests-xml~=0.2.3',
         'lxml',
+        # For rebuilding GHA workflows
+        'Jinja2',
+        'PyYAML',
     ] + DOCS_DEPS,
 
     'docs': DOCS_DEPS,
