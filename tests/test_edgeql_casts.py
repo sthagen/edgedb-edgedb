@@ -2169,15 +2169,13 @@ class TestEdgeQLCasts(tb.QueryTestCase):
         )
 
         with self.assertRaisesRegex(
-                # FIXME: This should be a different error
-                edgedb.InternalServerError,
+                edgedb.InvalidValueError,
                 r'expected json number, null; got json string'):
             await self.con.query_one(
                 r"SELECT <array<int64>><json>['asdf']")
 
         with self.assertRaisesRegex(
-                # FIXME: This should be a different error
-                edgedb.InternalServerError,
+                edgedb.InvalidValueError,
                 r'expected json number, null; got json string'):
             await self.con.query_one(
                 r"SELECT <array<int64>>to_json('[1, 2, \"asdf\"]')")
@@ -2205,6 +2203,135 @@ class TestEdgeQLCasts(tb.QueryTestCase):
                 r'cannot extract elements from a scalar'):
             await self.con.query_one(
                 r"SELECT <array<int64>><json>'asdf'")
+
+    async def test_edgeql_casts_json_12(self):
+        self.assertEqual(
+            await self.con.query(
+                r"""
+                    SELECT <tuple<a: int64, b: int64>>
+                    to_json('{"a": 1, "b": 2}')
+                """
+            ),
+            [edgedb.NamedTuple(a=1, b=2)],
+        )
+
+        await self.assert_query_result(
+            r"""
+                SELECT <tuple<a: int64, b: int64>>
+                to_json({'{"a": 3000, "b": -1}', '{"a": 1, "b": 12}'});
+            """,
+            [{"a": 3000, "b": -1}, {"a": 1, "b": 12}],
+        )
+
+        await self.assert_query_result(
+            r"""
+                SELECT <tuple<int64, int64>>
+                to_json({'[3000, -1]', '[1, 12]'})
+            """,
+            [[3000, -1], [1, 12]],
+        )
+
+        self.assertEqual(
+            await self.con.query(
+                r"""
+                    SELECT <tuple<int64, int64>>
+                    to_json({'[3000, -1]', '[1, 12]'})
+                """
+            ),
+            [(3000, -1), (1, 12)],
+        )
+
+        self.assertEqual(
+            await self.con.query(
+                r"""
+                    SELECT <tuple<json, json>>
+                    to_json({'[3000, -1]', '[1, 12]'})
+                """
+            ),
+            [('3000', '-1'), ('1', '12')],
+        )
+
+        self.assertEqual(
+            await self.con.query(
+                r"""
+                    SELECT <tuple<json, json>>
+                    to_json({'[3000, -1]', '[1, null]'})
+                """
+            ),
+            [('3000', '-1'), ('1', 'null')],
+        )
+
+        self.assertEqual(
+            await self.con.query_one(
+                r"""
+                    SELECT <tuple<int64, tuple<a: int64, b: int64>>>
+                    to_json('[3000, {"a": 1, "b": 2}]')
+                """
+            ),
+            (3000, edgedb.NamedTuple(a=1, b=2))
+        )
+
+        self.assertEqual(
+            await self.con.query_one(
+                r"""
+                    SELECT <tuple<int64, array<tuple<a: int64, b: str>>>>
+                    to_json('[3000, [{"a": 1, "b": "foo"},
+                                     {"a": 12, "b": "bar"}]]')
+                """
+            ),
+            (3000,
+             [edgedb.NamedTuple(a=1, b="foo"),
+              edgedb.NamedTuple(a=12, b="bar")])
+        )
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r'expected json number, null; got json string'):
+            await self.con.query(
+                r"""
+                    SELECT <tuple<a: int64, b: int64>>
+                    to_json('{"a": 1, "b": "2"}')
+                """
+            )
+
+        # This isn't really the best error message for this.
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r'invalid null value in cast'):
+            await self.con.query(
+                r"""SELECT <tuple<a: int64, b: int64>>to_json('{"a": 1}')"""
+            )
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r'invalid null value in cast'):
+            await self.con.query(
+                r"""SELECT <tuple<int64, int64>>to_json('[3000]')"""
+            )
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r'invalid null value in cast'):
+            await self.con.query(
+                r"""
+                    SELECT <tuple<a: int64, b: int64>>
+                    to_json('[3000, 1000]')
+                """
+            )
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r'invalid null value in cast'):
+            await self.con.query(
+                r"""SELECT <tuple<a: int64, b: int64>> to_json('"test"')"""
+            )
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r'invalid null value in cast'):
+            await self.con.query(
+                r"""SELECT <tuple<json, json>> to_json('[3000]')"""
+            )
 
     async def test_edgeql_casts_assignment_01(self):
         async with self._run_and_rollback():

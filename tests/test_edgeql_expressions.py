@@ -3979,6 +3979,32 @@ aa \
             [['a', 'miss'], ['c', 'hit'], ['t', 'miss']],
         )
 
+    async def test_edgeql_expr_if_else_07(self):
+        await self.assert_query_result(
+            r"""
+                FOR x IN {<str>{} IF false ELSE <str>{'1'}}
+                UNION (SELECT x);
+            """,
+            ['1'],
+        )
+
+    async def test_edgeql_expr_if_else_08(self):
+        await self.assert_query_result(
+            r"""
+                SELECT <str>{} IF true ELSE '';
+            """,
+            [],
+        )
+
+    async def test_edgeql_expr_if_else_09(self):
+        await self.assert_query_result(
+            r"""
+                FOR _ IN {<str>{'1'} IF false ELSE <str>{}}
+                UNION ();
+            """,
+            [],
+        )
+
     async def test_edgeql_expr_setop_01(self):
         await self.assert_query_result(
             r"""SELECT EXISTS <str>{};""",

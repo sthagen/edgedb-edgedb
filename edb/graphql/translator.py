@@ -682,7 +682,13 @@ class GraphQLTranslator:
                 filterable.result.expr = qlast.Path(
                     steps=[qlast.ObjectRef(name=alias)])
 
-        path.pop()
+        # Remove the processed path.
+        self._context.path[-1].pop()
+        if len(self._context.path[-1]) == 0:
+            # If this was the last shape field, remove the now empty
+            # shell for the shape paths.
+            self._context.path.pop()
+
         return spec
 
     def visit_InlineFragmentNode(self, node):
@@ -1466,6 +1472,11 @@ class GraphQLTranslator:
         if isinstance(vartype, gql_ast.NonNullTypeNode):
             vartype = vartype.type
             optional = False
+
+        if vartype.name.value not in gt.GQL_TO_EDB_SCALARS_MAP:
+            raise errors.QueryError(
+                f"Only scalar input variables are allowed. "
+                f"Variable {varname!r} has non-scalar value.")
 
         casttype = qlast.TypeName(
             maintype=qlast.ObjectRef(
