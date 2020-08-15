@@ -57,11 +57,7 @@ def delta_objects(
     new_schema: s_schema.Schema,
 ) -> DeltaRoot:
 
-    adds_mods = DeltaRoot()
-    dels = DeltaRoot()
-
-    old = list(old)
-    new = list(new)
+    delta = DeltaRoot()
 
     oldkeys = {o.id: o.hash_criteria(old_schema) for o in old}
     newkeys = {o.id: o.hash_criteria(new_schema) for o in new}
@@ -75,130 +71,92 @@ def delta_objects(
         o for o in new
         if newkeys[o.id] not in unchanged)
 
-    comparison: List[Tuple[float, so.Object, so.Object]] = []
-    for x, y in itertools.product(new, old):
-        # type ignore below, because mypy does not correlate `old`
-        # and `old_schema`.
-        comp = x.compare(
+    oldnames = {o.get_name(old_schema) for o in old}
+    newnames = {o.get_name(new_schema) for o in new}
+    common_names = oldnames & newnames
+
+    pairs = sorted(
+        itertools.product(new, old),
+        key=lambda pair: pair[0].get_name(new_schema) not in common_names,
+    )
+
+    full_matrix: List[Tuple[so.Object, so.Object, float]] = []
+
+    for x, y in pairs:
+        similarity = x.compare(
             y,
             our_schema=new_schema,
             their_schema=old_schema,
             context=context,
         )
-        comparison.append((comp, x, y))
 
-    used_x: Set[so.Object] = set()
-    used_y: Set[so.Object] = set()
-    altered = ordered.OrderedSet[ObjectCommand[so.Object]]()
+        full_matrix.append((x, y, similarity))
 
-    if comparison:
-        _new_schema = new_schema
+    full_matrix.sort(key=lambda v: v[2], reverse=True)
 
-        def _key(
-            item: Tuple[float, so.Object, so.Object],
-        ) -> Tuple[float, str]:
-            return item[0], item[1].get_name(_new_schema)
+    seen_x = set()
+    seen_y = set()
+    comparison_map: Dict[so.Object, Tuple[float, so.Object]] = {}
+    for x, y, similarity in full_matrix:
+        if x not in seen_x and y not in seen_y:
+            comparison_map[x] = (similarity, y)
+            seen_x.add(x)
+            seen_y.add(y)
 
-        comparison = sorted(comparison, key=_key, reverse=True)
+    altered = []
 
-        for s, x, y in comparison:
-            if x not in used_x and y not in used_y:
-                if s != 1.0:
-                    if s > 0.6:
-                        altered.add(
-                            y.as_alter_delta(
-                                other=x,
-                                context=context,
-                                self_schema=old_schema,
-                                other_schema=new_schema,
-                            ),
-                        )
-                        used_x.add(x)
-                        used_y.add(y)
-                else:
-                    used_x.add(x)
-                    used_y.add(y)
+    if comparison_map:
+        if isinstance(next(iter(comparison_map)), so.InheritingObject):
+            # Generate the diff from the top of the inheritance
+            # hierarchy, since changes to parent objects may inform
+            # how the delta in child objects is treated.
+            graph = {}
+            for x in comparison_map:
+                assert isinstance(x, so.InheritingObject)
+                graph[x] = {
+                    'item': x,
+                    'deps': x.get_bases(new_schema).objects(new_schema),
+                }
 
-    deleted = old - used_y
-    created = new - used_x
+            order_x = topological.sort(graph, allow_unresolved=True)
+        else:
+            order_x = comparison_map
 
-    if created:
-        for x in created:
-            adds_mods.add(
-                x.as_create_delta(
-                    schema=new_schema,
+        for x in order_x:
+            s, y = comparison_map[x]
+            if 0.6 < s < 1.0:
+                alter = y.as_alter_delta(
+                    other=x,
                     context=context,
-                ),
-            )
-
-    if old_schema is not None and new_schema is not None:
-        probe: Optional[so.Object]
-        if old:
-            probe = next(iter(old))
-        elif new:
-            probe = next(iter(new))
-        else:
-            probe = None
-
-        if probe is not None:
-            has_bases = isinstance(probe, so.InheritingObject)
-        else:
-            has_bases = False
-
-        if has_bases:
-            g = {}
-
-            altered_idx = {p.classname: p for p in altered}
-            for p in altered:
-                for op in p.get_subcommands(type=RenameObject):
-                    altered_idx[op.new_name] = p
-
-            for p in altered:
-                old_class: so.Object = old_schema.get(p.classname)
-
-                for op in p.get_subcommands(type=RenameObject):
-                    new_name = op.new_name
-                    break
-                else:
-                    new_name = p.classname
-
-                new_class: so.Object = new_schema.get(new_name)
-
-                assert isinstance(old_class, so.InheritingObject)
-                assert isinstance(new_class, so.InheritingObject)
-
-                old_bases = \
-                    old_class.get_bases(old_schema).objects(old_schema)
-                new_bases = \
-                    new_class.get_bases(new_schema).objects(new_schema)
-
-                bases = (
-                    {b.get_name(old_schema) for b in old_bases} |
-                    {b.get_name(new_schema) for b in new_bases}
+                    self_schema=old_schema,
+                    other_schema=new_schema,
                 )
 
-                deps = {b for b in bases if b in altered_idx}
+                altered.append(alter)
 
-                g[p.classname] = {'item': p, 'deps': deps}
-                if new_name != p.classname:
-                    g[new_name] = {'item': p, 'deps': deps}
+    deleted = old - {y for _, (s, y) in comparison_map.items() if s > 0.6}
+    created = new - {x for x, (s, _) in comparison_map.items() if s > 0.6}
 
-            altered = topological.sort(g)
+    for x in created:
+        delta.add(
+            x.as_create_delta(
+                schema=new_schema,
+                context=context,
+            ),
+        )
 
     for p in altered:
-        adds_mods.add(p)
+        delta.add(p)
 
-    if deleted:
-        for y in deleted:
-            dels.add(
-                y.as_delete_delta(
-                    schema=old_schema,
-                    context=context,
-                ),
-            )
+    for y in deleted:
+        delta.add(
+            y.as_delete_delta(
+                schema=old_schema,
+                context=context,
+            ),
+        )
 
-    adds_mods.add(dels)
-    return adds_mods
+    return delta
 
 
 CommandMeta_T = TypeVar("CommandMeta_T", bound="CommandMeta")
@@ -638,6 +596,21 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         return modaliases
 
     @classmethod
+    def localnames_from_ast(
+        cls,
+        schema: s_schema.Schema,
+        astnode: qlast.DDLOperation,
+        context: CommandContext,
+    ) -> Set[str]:
+        localnames: Set[str] = set()
+        if isinstance(astnode, qlast.DDLCommand):
+            for alias in astnode.aliases:
+                if isinstance(alias, qlast.AliasedExpr):
+                    localnames.add(alias.alias)
+
+        return localnames
+
+    @classmethod
     def _cmd_tree_from_ast(
         cls,
         schema: s_schema.Schema,
@@ -737,6 +710,7 @@ class CommandContextToken(Generic[Command_T]):
     original_schema: s_schema.Schema
     op: Command_T
     modaliases: Mapping[Optional[str], str]
+    localnames: AbstractSet[str]
     inheritance_merge: Optional[bool]
     inheritance_refdicts: Optional[AbstractSet[str]]
     mark_derived: Optional[bool]
@@ -750,10 +724,14 @@ class CommandContextToken(Generic[Command_T]):
         op: Command_T,
         *,
         modaliases: Optional[Mapping[Optional[str], str]] = None,
+        # localnames are the names defined locally via with block or
+        # as function parameters and should not be fully-qualified
+        localnames: AbstractSet[str] = frozenset(),
     ) -> None:
         self.original_schema = schema
         self.op = op
         self.modaliases = modaliases if modaliases is not None else {}
+        self.localnames = localnames
         self.inheritance_merge = None
         self.inheritance_refdicts = None
         self.mark_derived = None
@@ -790,6 +768,7 @@ class CommandContext:
         *,
         schema: Optional[s_schema.Schema] = None,
         modaliases: Optional[Mapping[Optional[str], str]] = None,
+        localnames: AbstractSet[str] = frozenset(),
         declarative: bool = False,
         stdmode: bool = False,
         testmode: bool = False,
@@ -806,6 +785,7 @@ class CommandContext:
         self.declarative = declarative
         self.schema = schema
         self._modaliases = modaliases if modaliases is not None else {}
+        self._localnames = localnames
         self.stdmode = stdmode
         self.testmode = testmode
         self.descriptive_mode = descriptive_mode
@@ -823,6 +803,14 @@ class CommandContext:
         maps = [t.modaliases for t in reversed(self.stack)]
         maps.append(self._modaliases)
         return collections.ChainMap(*maps)
+
+    @property
+    def localnames(self) -> Set[str]:
+        ign: Set[str] = set()
+        for ctx in reversed(self.stack):
+            ign.update(ctx.localnames)
+        ign.update(self._localnames)
+        return ign
 
     @property
     def inheritance_merge(self) -> Optional[bool]:
@@ -1363,7 +1351,7 @@ class ObjectCommand(
         context: CommandContext,
         node: qlast.DDLOperation,
     ) -> None:
-        for op in self.get_subcommands(type=RenameObject):
+        for op in self.get_subcommands(type=AlterObjectFragment):
             self._append_subcmd_ast(schema, node, op, context)
 
         mcls = self.get_schema_metaclass()
@@ -1683,8 +1671,10 @@ class ObjectCommandContext(CommandContextToken[ObjectCommand[so.Object_T]]):
         scls: so.Object_T,
         *,
         modaliases: Optional[Mapping[Optional[str], str]] = None,
+        localnames: AbstractSet[str] = frozenset(),
     ) -> None:
-        super().__init__(schema, op, modaliases=modaliases)
+        super().__init__(
+            schema, op, modaliases=modaliases, localnames=localnames)
         self.scls = scls
 
 
@@ -2458,6 +2448,7 @@ class AlterSpecialObjectProperty(Command):
                 astnode.value,
                 schema,
                 context.modaliases,
+                context.localnames,
                 orig_text=orig_text,
             )
 
@@ -2472,8 +2463,8 @@ class AlterObjectProperty(Command):
     astnode = qlast.SetField
 
     property = struct.Field(str)
-    old_value = struct.Field(object, None)
-    new_value = struct.Field(object, None)
+    old_value = struct.Field[Any](object, None)
+    new_value = struct.Field[Any](object, None)
     source = struct.Field(str, None)
 
     @classmethod
@@ -2724,6 +2715,7 @@ def compile_ddl(
     context_class = cmdcls.get_context_class()
     if context_class is not None:
         modaliases = cmdcls._modaliases_from_ast(schema, astnode, context)
+        localnames = cmdcls.localnames_from_ast(schema, astnode, context)
         ctxcls = cast(
             Type[ObjectCommandContext[so.Object]],
             context_class,
@@ -2733,6 +2725,7 @@ def compile_ddl(
             op=cast(ObjectCommand[so.Object], _dummy_command),
             scls=_dummy_object,
             modaliases=modaliases,
+            localnames=localnames,
         )
         with context(ctx):
             cmd = cmdcls._cmd_tree_from_ast(schema, astnode, context)

@@ -209,6 +209,18 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             self._visit_shape(node.shape)
             self.indentation -= 1
 
+        if node.unless_conflict:
+            on_expr, else_expr = node.unless_conflict
+            self.write('UNLESS CONFLICT')
+
+            if on_expr:
+                self.write(' ON ')
+                self.visit(on_expr)
+
+                if else_expr:
+                    self.write(' ELSE ')
+                    self.visit(else_expr)
+
         if parenthesise:
             self.write(')')
 
@@ -756,6 +768,21 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             self._write_keywords(' EXTENDING ')
             self.visit_list(node.bases, newlines=False)
 
+    def _ddl_clean_up_commands(
+        self,
+        commands: Sequence[qlast.DDLOperation],
+    ) -> Sequence[qlast.DDLOperation]:
+        # Always omit orig_expr fields from output since we are
+        # using the original expression in TEXT output
+        # already.
+        return [
+            c for c in commands
+            if (
+                not isinstance(c, qlast.SetField)
+                or not c.name.startswith('orig_')
+            )
+        ]
+
     def _ddl_visit_body(
         self,
         commands: Sequence[qlast.DDLOperation],
@@ -772,18 +799,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 )
             ]
 
-        if self.descmode:
-            # Omit orig_expr fields from output since we are
-            # using the original expression in TEXT output
-            # already.
-            commands = [
-                c for c in commands
-                if (
-                    not isinstance(c, qlast.SetField)
-                    or not c.name.startswith('orig_')
-                )
-            ]
-
+        commands = self._ddl_clean_up_commands(commands)
         if len(commands) == 1 and allow_short and not (
             isinstance(commands[0], qlast.ObjectDDL)
         ):
@@ -1011,6 +1027,12 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
 
     def visit_CreateMigration(self, node: qlast.CreateMigration) -> None:
         self.write('CREATE MIGRATION')
+        if node.name is not None:
+            self.write(' ')
+            self.write(ident_to_str(node.name.name))
+            if node.parent is not None:
+                self.write(' ONTO ')
+                self.write(ident_to_str(node.parent.name))
         if node.commands:
             self._ddl_visit_body(node.commands)
 
@@ -1517,7 +1539,8 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             if node.commands:
                 self.write(' {')
                 self._block_ws(1)
-                self.visit_list(node.commands, terminator=';')
+                commands = self._ddl_clean_up_commands(node.commands)
+                self.visit_list(commands, terminator=';')
                 self.new_lines = 1
             else:
                 self.write(' ')

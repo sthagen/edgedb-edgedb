@@ -757,15 +757,20 @@ class CallableCommand(sd.QualifiedObjectCommand[CallableObjectT]):
         context: sd.CommandContext,
     ) -> FuncParameterList:
         params = self.get_attribute_value('params')
+        result: Any
         if params is None:
             param_list = []
             for cr_param in self.get_subcommands(type=ParameterCommand):
                 param = schema.get(cr_param.classname, type=Parameter)
                 param_list.append(param)
-            params = FuncParameterList.create(schema, param_list)
+            result = FuncParameterList.create(schema, param_list)
+        elif isinstance(params, so.ObjectCollectionShell):
+            result = params.resolve(schema)
+        else:
+            result = params
 
-        assert isinstance(params, FuncParameterList)
-        return params
+        assert isinstance(result, FuncParameterList)
+        return result
 
     @classmethod
     def _get_param_desc_from_ast(
@@ -1159,6 +1164,21 @@ class FunctionCommand(
 
         return compiled
 
+    @classmethod
+    def localnames_from_ast(
+        cls,
+        schema: s_schema.Schema,
+        astnode: qlast.DDLOperation,
+        context: sd.CommandContext,
+    ) -> Set[str]:
+        localnames = super().localnames_from_ast(
+            schema, astnode, context
+        )
+        if isinstance(astnode, (qlast.CreateFunction, qlast.AlterFunction)):
+            localnames |= {param.name for param in astnode.params}
+
+        return localnames
+
 
 class CreateFunction(CreateCallableObject[Function], FunctionCommand):
     astnode = qlast.CreateFunction
@@ -1343,8 +1363,8 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
         context: sd.CommandContext,
     ) -> sd.Command:
         cmd = super()._cmd_tree_from_ast(schema, astnode, context)
-        assert isinstance(astnode, qlast.CreateFunction)
 
+        assert isinstance(astnode, qlast.CreateFunction)
         if astnode.code is not None:
             cmd.set_attribute_value(
                 'language',
@@ -1360,6 +1380,7 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
                     nativecode_expr,
                     schema,
                     context.modaliases,
+                    context.localnames,
                 )
 
                 cmd.set_attribute_value(
@@ -1487,6 +1508,7 @@ class AlterFunction(AlterCallableObject[Function], FunctionCommand):
                     nativecode_expr,
                     schema,
                     context.modaliases,
+                    context.localnames,
                 )
 
                 cmd.set_attribute_value(

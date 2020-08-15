@@ -58,9 +58,36 @@ def _assert_not_none(value: Optional[T]) -> T:
     return value
 
 
+def merge_constraint_params(
+    constraint: Constraint,
+    supers: List[Constraint],
+    field_name: str,
+    *,
+    ignore_local: bool,
+    schema: s_schema.Schema,
+) -> Any:
+    if constraint.get_subject(schema) is None:
+        # consistency of abstract constraint params is checked
+        # in CreateConstraint.validate_create
+        return constraint.get_explicit_field_value(schema, field_name, None)
+    else:
+        # concrete constraints cannot redefined parameters and always
+        # inherit from super.
+        return supers[0].get_explicit_field_value(schema, field_name, None)
+
+
 class Constraint(referencing.ReferencedInheritingObject,
                  s_func.CallableObject, s_abc.Constraint,
                  qlkind=ft.SchemaObjectClass.CONSTRAINT):
+
+    params = so.SchemaField(
+        s_func.FuncParameterList,
+        coerce=True,
+        compcoef=0.4,
+        default=so.DEFAULT_CONSTRUCTOR,
+        inheritable=True,
+        merge_fn=merge_constraint_params,
+    )
 
     expr = so.SchemaField(
         s_expr.Expression, default=None, compcoef=0.909,
@@ -212,44 +239,6 @@ class Constraint(referencing.ReferencedInheritingObject,
         return ddl_identity
 
     @classmethod
-    def delta_properties(
-        cls,
-        delta: sd.ObjectCommand[Constraint],
-        old: Optional[Constraint],
-        new: Optional[Constraint],
-        *,
-        context: so.ComparisonContext,
-        old_schema: Optional[s_schema.Schema],
-        new_schema: Optional[s_schema.Schema],
-    ) -> None:
-        super().delta_properties(
-            delta,
-            old,
-            new,
-            context=context,
-            old_schema=old_schema,
-            new_schema=new_schema,
-        )
-
-        if new is not None:
-            assert new_schema is not None
-
-            if new.get_subject(new_schema) is not None:
-                new_params = new.get_params(new_schema)
-
-                if old is not None:
-                    assert old_schema is not None
-
-                if old is None or new_params != old.get_params(
-                    _assert_not_none(old_schema)
-                ):
-                    delta.set_attribute_value(
-                        'params',
-                        new_params,
-                        inherited=True,
-                    )
-
-    @classmethod
     def get_root_classes(cls) -> Tuple[sn.Name, ...]:
         return (
             sn.Name(module='std', name='constraint'),
@@ -323,12 +312,12 @@ class ConstraintCommand(
     ) -> None:
         # check that 'subject' and 'subjectexpr' are not set as annotations
         for command in astnode.commands:
-            assert isinstance(command, (qlast.NamedDDL, qlast.BaseSetField))
-            cname = command.name
-            if cname in {'subject', 'subjectexpr'}:
-                raise errors.InvalidConstraintDefinitionError(
-                    f'{cname} is not a valid constraint annotation',
-                    context=command.context)
+            if isinstance(command, qlast.BaseSetField):
+                cname = command.name
+                if cname in {'subject', 'subjectexpr'}:
+                    raise errors.InvalidConstraintDefinitionError(
+                        f'{cname} is not a valid constraint annotation',
+                        context=command.context)
 
     @classmethod
     def _classname_quals_from_ast(
@@ -346,17 +335,12 @@ class ConstraintCommand(
         for arg in args:
             exprs.append(arg.text)
 
-        subjexpr_text = cls.get_orig_expr_text(schema, astnode, 'subjectexpr')
-
         assert isinstance(astnode, qlast.ConstraintOp)
-        if subjexpr_text is None and astnode.subjectexpr:
-            # if not, then use the origtext directly from the expression
+        if astnode.subjectexpr:
+            # use the normalized text directly from the expression
             expr = s_expr.Expression.from_ast(
                 astnode.subjectexpr, schema, context.modaliases)
-            subjexpr_text = expr.origtext
-
-        if subjexpr_text:
-            exprs.append(subjexpr_text)
+            exprs.append(expr.text)
 
         return (cls._name_qual_from_exprs(schema, exprs),)
 
@@ -527,6 +511,41 @@ class ConstraintCommand(
             return tuple(f for f in id_fields if f.name not in omit_fields)
         else:
             return id_fields
+
+    @classmethod
+    def localnames_from_ast(
+        cls,
+        schema: s_schema.Schema,
+        astnode: qlast.DDLOperation,
+        context: sd.CommandContext,
+    ) -> Set[str]:
+        localnames = super().localnames_from_ast(
+            schema, astnode, context
+        )
+        # Set up the constraint parameters as part of names to be
+        # ignored in expression normalization.
+        if isinstance(astnode, qlast.CreateConstraint):
+            localnames |= {param.name for param in astnode.params}
+        elif isinstance(astnode, qlast.AlterConstraint):
+            # ALTER ABSTRACT CONSTRAINT doesn't repeat the params,
+            # but we can get them from the schema.
+            objref = astnode.name
+
+            # Merge the context modaliases and the command modaliases.
+            modaliases = dict(context.modaliases)
+            modaliases.update(
+                cls._modaliases_from_ast(schema, astnode, context))
+            # Get the original constraint.
+            constr = schema.get(
+                objref.name,
+                module_aliases=modaliases,
+                type=Constraint,
+            )
+
+            localnames |= {param.get_parameter_name(schema) for param in
+                           constr.get_params(schema).objects(schema)}
+
+        return localnames
 
 
 class CreateConstraint(
@@ -967,6 +986,7 @@ class CreateConstraint(
                 astnode.subjectexpr,
                 schema,
                 context.modaliases,
+                context.localnames,
                 orig_text=orig_text,
             )
 

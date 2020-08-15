@@ -67,8 +67,6 @@ def pull_path_namespace(
 
     for source_q in source_qs:
         s_paths: Set[Tuple[irast.PathId, str]] = set()
-        if hasattr(source_q, 'value_scope'):
-            s_paths.update((p, 'value') for p in source_q.value_scope)
         if hasattr(source_q, 'path_outputs'):
             s_paths.update(source_q.path_outputs)
         if hasattr(source_q, 'path_namespace'):
@@ -84,7 +82,8 @@ def pull_path_namespace(
             if path_id in squery.path_id_mask:
                 continue
 
-            rvar = maybe_get_path_rvar(target, path_id, aspect=aspect, ctx=ctx)
+            rvar = pathctx.maybe_get_path_rvar(
+                target, path_id, aspect=aspect, env=ctx.env)
             if rvar is None:
                 pathctx.put_path_rvar(
                     target, path_id, source, aspect=aspect, env=ctx.env)
@@ -319,7 +318,6 @@ def new_empty_rvar(
     nullrel = pgast.NullRelation(path_id=ir_set.path_id)
     rvar = rvar_for_rel(nullrel, ctx=ctx)
     pathctx.put_rvar_path_bond(rvar, ir_set.path_id)
-    rvar.query.value_scope.add(ir_set.path_id)
     return rvar
 
 
@@ -361,7 +359,6 @@ def new_root_rvar(
     set_rvar = range_for_typeref(
         typeref, ir_set.path_id, dml_source=dml_source, ctx=ctx)
     pathctx.put_rvar_path_bond(set_rvar, ir_set.path_id)
-    set_rvar.query.value_scope.add(ir_set.path_id)
 
     if ir_set.rptr and ir_set.rptr.is_inbound:
         ptrref = ir_set.rptr.ptrref
@@ -593,6 +590,19 @@ def ensure_transient_identity_for_set(
     pathctx.put_path_identity_var(stmt, ir_set.path_id,
                                   id_expr, force=True, env=ctx.env)
     pathctx.put_path_bond(stmt, ir_set.path_id)
+
+    if (ctx.volatility_ref is not None and
+            ctx.volatility_ref is not context.NO_VOLATILITY and
+            isinstance(stmt, pgast.SelectStmt)):
+        # Apply the volatility reference.
+        # See the comment in process_set_as_subquery().
+        stmt.where_clause = astutils.extend_binop(
+            stmt.where_clause,
+            pgast.NullTest(
+                arg=ctx.volatility_ref,
+                negated=True,
+            )
+        )
 
 
 def get_scope(

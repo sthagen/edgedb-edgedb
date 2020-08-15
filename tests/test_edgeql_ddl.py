@@ -16,8 +16,10 @@
 # limitations under the License.
 #
 
-import edgedb
 import decimal
+import json
+
+import edgedb
 
 from edb.testbase import server as tb
 from edb.tools import test
@@ -4108,7 +4110,8 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         # Issue #1187
         with self.assertRaisesRegex(
                 edgedb.SchemaDefinitionError,
-                "illegal self-reference in definition of 'IllegalAlias07'"):
+                "illegal self-reference in definition of "
+                "'test::IllegalAlias07'"):
 
             await self.con.execute(r"""
                 WITH MODULE test
@@ -5837,3 +5840,79 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                     WITH MODULE test
                     DROP FUNCTION foo___1(a: int64);
                 ''')
+
+    async def test_edgeql_ddl_create_migration_01(self):
+        await self.con.execute(f'''
+            CREATE MIGRATION
+            {{
+                CREATE TYPE Type1 {{
+                    CREATE PROPERTY field1 -> str;
+                }};
+            }};
+        ''')
+
+        await self.assert_query_result(
+            '''
+            SELECT schema::ObjectType {
+                name
+            } FILTER .name = 'default::Type1'
+            ''',
+            [{
+                'name': 'default::Type1',
+            }]
+        )
+
+    async def test_edgeql_ddl_describe_migration_json_01(self):
+        await self.con.execute('''
+            START MIGRATION TO {
+                module default {
+                    type Type1 {
+                        property field1 -> str;
+                    };
+                };
+            };
+        ''')
+
+        expected = {
+            'confirmed': [],
+            'proposed': [{
+                'statements': [{
+                    'text': (
+                        'CREATE TYPE default::Type1 {\n'
+                        '    CREATE OPTIONAL SINGLE PROPERTY field1'
+                        ' -> std::str;\n'
+                        '};'
+                    )
+                }],
+                'confidence': 1.0,
+            }]
+        }
+
+        result = await self.con.query_one(
+            '''
+                DESCRIBE CURRENT MIGRATION AS JSON;
+            ''',
+        )
+
+        self.assertEqual(json.loads(result), expected)
+
+    async def test_edgeql_ddl_describe_migration_json_02(self):
+        await self.con.execute('''
+            START MIGRATION TO {
+                module test {
+                };
+            };
+        ''')
+
+        expected = {
+            'confirmed': [],
+            'proposed': [],
+        }
+
+        result = await self.con.query_one(
+            '''
+                DESCRIBE CURRENT MIGRATION AS JSON;
+            ''',
+        )
+
+        self.assertEqual(json.loads(result), expected)

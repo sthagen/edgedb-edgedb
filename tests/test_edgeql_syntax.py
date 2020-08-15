@@ -2454,6 +2454,36 @@ aa';
         };
         """
 
+    def test_edgeql_syntax_insert_18(self):
+        """
+        INSERT Foo {
+            bar := 42,
+        } UNLESS CONFLICT;
+        """
+
+    def test_edgeql_syntax_insert_19(self):
+        """
+        INSERT Foo {
+            bar := 42,
+        } UNLESS CONFLICT ON .bar;
+        """
+
+    def test_edgeql_syntax_insert_20(self):
+        """
+        INSERT Foo {
+            bar := 42,
+        } UNLESS CONFLICT ON .bar
+        ELSE (SELECT Foo);
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError, line=4, col=27)
+    def test_edgeql_syntax_insert_21(self):
+        """
+        INSERT Foo {
+            bar := 42,
+        } UNLESS CONFLICT ELSE (SELECT Foo);
+        """
+
     def test_edgeql_syntax_delete_01(self):
         """
         DELETE Foo;
@@ -2879,6 +2909,48 @@ aa';
             type test::Foo {
                 property bar -> str;
             };
+        };
+        """
+
+    def test_edgeql_syntax_ddl_create_migration_01(self):
+        """
+        CREATE MIGRATION {};
+
+% OK %
+
+        CREATE MIGRATION;
+        """
+
+    def test_edgeql_syntax_ddl_create_migration_02(self):
+        """
+        CREATE MIGRATION { ;;; CREATE TYPE Foo ;;; CREATE TYPE Bar ;;; };
+
+% OK %
+
+        CREATE MIGRATION {
+            CREATE TYPE Foo;
+            CREATE TYPE Bar;
+        };
+        """
+
+    def test_edgeql_syntax_ddl_create_migration_03(self):
+        """
+        CREATE MIGRATION {
+            CREATE TYPE Foo;
+        };
+        """
+
+    def test_edgeql_syntax_ddl_create_migration_04(self):
+        """
+        CREATE MIGRATION m123123123 {
+            CREATE TYPE Foo;
+        };
+        """
+
+    def test_edgeql_syntax_ddl_create_migration_05(self):
+        """
+        CREATE MIGRATION m123123123 ONTO m134134134 {
+            CREATE TYPE Foo;
         };
         """
 
@@ -3814,6 +3886,124 @@ aa';
 
             ALTER INDEX ON (.title) {
                 DROP ANNOTATION system;
+            };
+        };
+        """
+
+    def test_edgeql_syntax_ddl_empty_01(self):
+        """
+        CREATE TYPE Foo { };
+
+% OK %
+
+        CREATE TYPE Foo;
+        """
+
+    def test_edgeql_syntax_ddl_empty_02(self):
+        """
+        CREATE TYPE Foo { CREATE PROPERTY bar -> str { } };
+
+% OK %
+
+        CREATE TYPE Foo {
+            CREATE PROPERTY bar -> str;
+        };
+        """
+
+    def test_edgeql_syntax_sdl_empty_01(self):
+        """
+        START MIGRATION to {
+            type default::User {
+
+            };
+        };
+
+% OK %
+
+        START MIGRATION to {
+            type default::User;
+        };
+        """
+
+    def test_edgeql_syntax_sdl_empty_02(self):
+        """
+        START MIGRATION to {
+            type default::User {
+                property name -> str {
+
+                };
+            };
+        };
+
+% OK %
+
+        START MIGRATION to {
+            type default::User {
+                property name -> str;
+            };
+        };
+        """
+
+    def test_edgeql_syntax_ddl_semi_01(self):
+        """
+        CREATE TYPE Foo { ;;; };
+
+% OK %
+
+        CREATE TYPE Foo;
+        """
+
+    def test_edgeql_syntax_ddl_semi_02(self):
+        """
+        CREATE TYPE Foo {
+            ;;;
+            CREATE PROPERTY bar -> str
+            ;;;
+            CREATE PROPERTY baz -> int64;
+            ;;;
+        };
+
+% OK %
+
+        CREATE TYPE Foo {
+            CREATE PROPERTY bar -> str;
+            CREATE PROPERTY baz -> int64;
+        };
+        """
+
+    def test_edgeql_syntax_sdl_semi_01(self):
+        """
+        START MIGRATION to {
+            type default::User {
+                ;;;;
+            };
+        };
+
+% OK %
+
+        START MIGRATION to {
+            type default::User;
+        };
+        """
+
+    def test_edgeql_syntax_sdl_semi_02(self):
+        """
+        START MIGRATION to {
+            type default::User {
+                ;;;
+                property bar -> int64;
+                ;;;
+                property name -> str;
+                ;;;
+            };
+        };
+
+% OK %
+
+        START MIGRATION to {
+            type default::User {
+                property bar -> int64;
+                property name -> str;
             };
         };
         """

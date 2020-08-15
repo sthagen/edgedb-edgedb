@@ -29,11 +29,14 @@ from collections import defaultdict
 from edb import errors
 
 from edb.ir import ast as irast
+from edb.ir import staeval as ireval
+from edb.ir import typeutils
 
 from edb.schema import ddl as s_ddl
 from edb.schema import functions as s_func
 from edb.schema import links as s_links
 from edb.schema import lproperties as s_lprops
+from edb.schema import modules as s_mod
 from edb.schema import name as s_name
 from edb.schema import objects as s_obj
 from edb.schema import objtypes as s_objtypes
@@ -55,6 +58,10 @@ from . import viewgen
 from . import schemactx
 from . import stmtctx
 from . import typegen
+
+if TYPE_CHECKING:
+    from edb.schema import constraints as s_constr
+    from edb.schema import schema as s_schema
 
 
 @dispatch.compile.register(qlast.SelectQuery)
@@ -200,67 +207,100 @@ def compile_GroupQuery(
         "'GROUP' statement is not currently implemented",
         context=expr.context)
 
-    with ctx.subquery() as ictx:
-        stmt = irast.GroupStmt()
-        init_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
 
-        typename = s_name.Name(
-            module='__group__', name=ctx.aliases.get('Group'))
-        obj = ctx.env.get_track_schema_object('std::BaseObject')
-        stmt.group_path_id = pathctx.get_path_id(
-            obj, typename=typename, ctx=ictx)
+def simple_stmt_eq(lhs: irast.Base, rhs: irast.Base,
+                   schema: s_schema.Schema) -> bool:
+    if (
+        isinstance(lhs, irast.BaseConstant)
+        and isinstance(rhs, irast.BaseConstant)
+        and (ireval.evaluate_to_python_val(lhs, schema) ==
+             ireval.evaluate_to_python_val(rhs, schema))
+    ):
+        return True
+    elif (
+        isinstance(lhs, irast.Parameter)
+        and isinstance(rhs, irast.Parameter)
+        and lhs.name == rhs.name
+    ):
+        return True
+    else:
+        return False
 
-        pathctx.register_set_in_scope(stmt.group_path_id, ctx=ictx)
 
-        with ictx.newscope(fenced=True) as subjctx:
-            subject_set = setgen.scoped_set(
-                dispatch.compile(expr.subject, ctx=subjctx), ctx=subjctx)
+def compile_insert_unless_conflict(
+    stmt: irast.InsertStmt,
+    constraint_spec: qlast.Expr,
+    else_branch: Optional[qlast.Expr],
+    *, ctx: context.ContextLevel,
+) -> irast.ConstraintRef:
+    ctx.partial_path_prefix = stmt.subject
 
-            alias = expr.subject_alias or subject_set.path_id.target_name_hint
-            stmt.subject = stmtctx.declare_inline_view(
-                subject_set, alias, ctx=ictx)
+    if else_branch:
+        raise errors.UnsupportedFeatureError(
+            'UNLESS CONFLICT ... ELSE currently unimplemented',
+            context=else_branch.context,
+        )
 
-            with subjctx.new() as grpctx:
-                stmt.groupby = compile_groupby_clause(
-                    expr.groupby, ctx=grpctx)
+    # We compile the name here so we can analyze it, but we don't do
+    # anything else with it.
+    cspec_res = setgen.ensure_set(dispatch.compile(
+        constraint_spec, ctx=ctx), ctx=ctx)
 
-        with ictx.subquery() as isctx, isctx.newscope(fenced=True) as sctx:
-            o_stmt = sctx.stmt = irast.SelectStmt()
+    stmtctx.enforce_singleton(cspec_res, ctx=ctx)
 
-            o_stmt.result = compile_result_clause(
-                expr.result,
-                view_scls=ctx.view_scls,
-                view_rptr=ctx.view_rptr,
-                result_alias=expr.result_alias,
-                view_name=ctx.toplevel_result_view_name,
-                ctx=sctx)
+    if not cspec_res.rptr:
+        raise errors.QueryError(
+            'ON CONFLICT argument must be a property',
+            context=constraint_spec.context,
+        )
 
-            clauses.compile_where_clause(
-                o_stmt, expr.where, ctx=sctx)
+    if cspec_res.rptr.source.path_id != stmt.subject.path_id:
+        raise errors.QueryError(
+            'ON CONFLICT argument must be a property of the '
+            'type being inserted',
+            context=constraint_spec.context,
+        )
 
-            o_stmt.orderby = clauses.compile_orderby_clause(
-                expr.orderby, ctx=sctx)
+    schema = ctx.env.schema
+    schema, ptr = (
+        typeutils.ptrcls_from_ptrref(cspec_res.rptr.ptrref,
+                                     schema=schema))
+    if not isinstance(ptr, s_pointers.Pointer):
+        raise errors.QueryError(
+            'ON CONFLICT property must be a property',
+            context=constraint_spec.context,
+        )
 
-            o_stmt.offset = clauses.compile_limit_offset_clause(
-                expr.offset, ctx=sctx)
+    ptr = ptr.get_nearest_non_derived_parent(schema)
 
-            o_stmt.limit = clauses.compile_limit_offset_clause(
-                expr.limit, ctx=sctx)
+    exclusive_constr: s_constr.Constraint = schema.get('std::exclusive')
+    ex_cnstrs = [c for c in ptr.get_constraints(schema).objects(schema)
+                 if c.issubclass(schema, exclusive_constr)]
 
-            stmt.result = setgen.scoped_set(o_stmt, ctx=sctx)
+    if len(ex_cnstrs) != 1:
+        raise errors.QueryError(
+            'ON CONFLICT property must have a single exclusive constraint',
+            context=constraint_spec.context,
+        )
 
-        result = fini_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
+    module_id = schema.get_global(
+        s_mod.Module, ptr.get_name(schema).module).id
 
-    return result
+    ctx.env.schema = schema
+
+    return irast.ConstraintRef(
+        id=ex_cnstrs[0].id, module_id=module_id)
 
 
 @dispatch.compile.register(qlast.InsertQuery)
 def compile_InsertQuery(
-        expr: qlast.InsertQuery, *, ctx: context.ContextLevel) -> irast.Set:
+        expr: qlast.InsertQuery, *,
+        ctx: context.ContextLevel) -> irast.Set:
 
     if ctx.in_conditional is not None:
         raise errors.QueryError(
-            'INSERT statements cannot be used inside conditional expressions',
+            'INSERT statements cannot be used inside conditional '
+            'expressions',
             context=expr.context,
         )
 
@@ -309,6 +349,16 @@ def compile_InsertQuery(
             path_id=stmt.subject.path_id,
             ctx=ctx,
         )
+
+        if expr.unless_conflict is not None:
+            constraint_spec, else_branch = expr.unless_conflict
+
+            if constraint_spec:
+                with ictx.new() as constraint_ctx:
+                    stmt.on_conflict = compile_insert_unless_conflict(
+                        stmt, constraint_spec, else_branch, ctx=constraint_ctx)
+            else:
+                stmt.on_conflict = True
 
         with ictx.new() as resultctx:
             if ictx.stmt is ctx.toplevel_stmt:
