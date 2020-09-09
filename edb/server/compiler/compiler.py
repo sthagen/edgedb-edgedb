@@ -39,6 +39,7 @@ from edb.pgsql import compiler as pg_compiler
 
 from edb import edgeql
 from edb.common import debug
+from edb.common import verutils
 from edb.common import uuidgen
 
 from edb.edgeql import ast as qlast
@@ -107,6 +108,7 @@ class CompileContext:
     schema_object_ids: Optional[Mapping[str, uuid.UUID]] = None
     first_extracted_var: Optional[int] = None
     backend_instance_params: BackendInstanceParams = BackendInstanceParams()
+    compat_ver: Optional[verutils.Version] = None
 
 
 EMPTY_MAP = immutables.Map()
@@ -390,6 +392,7 @@ class Compiler(BaseCompiler):
         context.testmode = self._in_testmode(ctx)
         context.stdmode = self._bootstrap_mode
         context.schema_object_ids = ctx.schema_object_ids
+        context.compat_ver = ctx.compat_ver
         context.backend_superuser_role = (
             self._backend_instance_params.explicit_superuser_role)
         return context
@@ -714,6 +717,7 @@ class Compiler(BaseCompiler):
             modaliases=current_tx.get_modaliases(),
             testmode=self._in_testmode(ctx),
             schema_object_ids=ctx.schema_object_ids,
+            compat_ver=ctx.compat_ver,
         )
 
         if debug.flags.delta_plan_input:
@@ -790,8 +794,10 @@ class Compiler(BaseCompiler):
 
             current_tx.update_migration_state(
                 dbstate.MigrationState(
+                    parent_migration=schema.get_last_migration(),
                     initial_schema=schema,
                     initial_savepoint=savepoint_name,
+                    guidance=s_obj.DeltaGuidance(),
                     target_schema=target_schema,
                     current_ddl=tuple(),
                 ),
@@ -815,7 +821,11 @@ class Compiler(BaseCompiler):
                     context=ql.context,
                 )
 
-            diff = s_ddl.delta_schemas(schema, mstate.target_schema)
+            diff = s_ddl.delta_schemas(
+                schema,
+                mstate.target_schema,
+                guidance=mstate.guidance,
+            )
             new_ddl = s_ddl.ddlast_from_delta(mstate.target_schema, diff)
             all_ddl = mstate.current_ddl + new_ddl
             if not mstate.current_ddl:
@@ -872,23 +882,46 @@ class Compiler(BaseCompiler):
                         qlcodegen.generate_source(stmt, pretty=True),
                     )
 
-                diff = s_ddl.delta_schemas(schema, mstate.target_schema)
-                proposed = s_ddl.statements_from_delta(
+                guided_diff = s_ddl.delta_schemas(
+                    schema,
                     mstate.target_schema,
-                    diff,
+                    generate_prompts=True,
+                    guidance=mstate.guidance,
                 )
 
-                if proposed:
-                    proposed_desc = [{
+                auto_diff = s_ddl.delta_schemas(
+                    schema,
+                    mstate.target_schema,
+                )
+
+                proposed_ddl = s_ddl.statements_from_delta(
+                    mstate.target_schema,
+                    guided_diff,
+                )
+
+                if proposed_ddl:
+                    top_op = next(iter(guided_diff.get_subcommands()))
+                    op_id = top_op.get_annotation('op_id')
+                    assert op_id is not None
+
+                    proposed_desc = {
                         'statements': [{
-                            'text': proposed[0],
+                            'text': proposed_ddl[0],
                         }],
                         'confidence': 1.0,
-                    }]
+                        'prompt': top_op.get_annotation('user_prompt'),
+                        'operation_id': op_id,
+                    }
                 else:
-                    proposed_desc = []
+                    proposed_desc = None
 
                 desc = json.dumps({
+                    'parent': (
+                        mstate.parent_migration.get_name(schema)
+                        if mstate.parent_migration is not None
+                        else 'initial'
+                    ),
+                    'complete': not bool(list(auto_diff.get_subcommands())),
                     'confirmed': confirmed,
                     'proposed': proposed_desc,
                 }).encode('unicode_escape').decode('utf-8')
@@ -907,6 +940,70 @@ class Compiler(BaseCompiler):
                     f'DESCRIBE CURRENT MIGRATION AS {ql.language}'
                     f' is not implemented'
                 )
+
+        elif isinstance(ql, qlast.AlterCurrentMigrationRejectProposed):
+            mstate = current_tx.get_migration_state()
+            if mstate is None:
+                raise errors.QueryError(
+                    'unexpected ALTER CURRENT MIGRATION:'
+                    ' not currently in a migration block',
+                    context=ql.context,
+                )
+
+            diff = s_ddl.delta_schemas(
+                schema,
+                mstate.target_schema,
+                generate_prompts=True,
+                guidance=mstate.guidance,
+            )
+            top_command = next(iter(diff.get_subcommands()))
+
+            if (orig_cmdclass := top_command.get_annotation('orig_cmdclass')):
+                top_cmdclass = orig_cmdclass
+            else:
+                top_cmdclass = type(top_command)
+
+            if issubclass(top_cmdclass, s_delta.AlterObject):
+                new_guidance = mstate.guidance._replace(
+                    banned_alters=mstate.guidance.banned_alters | {(
+                        top_command.get_schema_metaclass(),
+                        (
+                            top_command.classname,
+                            top_command.get_annotation('new_name'),
+                        ),
+                    )}
+                )
+            elif issubclass(top_cmdclass, s_delta.CreateObject):
+                new_guidance = mstate.guidance._replace(
+                    banned_creations=mstate.guidance.banned_creations | {(
+                        top_command.get_schema_metaclass(),
+                        top_command.classname,
+                    )}
+                )
+            elif issubclass(top_cmdclass, s_delta.DeleteObject):
+                new_guidance = mstate.guidance._replace(
+                    banned_deletions=mstate.guidance.banned_deletions | {(
+                        top_command.get_schema_metaclass(),
+                        top_command.classname,
+                    )}
+                )
+            else:
+                raise AssertionError(
+                    f'unexpected top-level command in '
+                    f'delta diff: {top_cmdclass!r}',
+                )
+
+            mstate = mstate._replace(guidance=new_guidance)
+            current_tx.update_migration_state(mstate)
+
+            query = dbstate.MigrationControlQuery(
+                sql=(b'SELECT LIMIT 0',),
+                tx_action=None,
+                action=dbstate.MigrationAction.REJECT_PROPOSED,
+                cacheable=False,
+                modaliases=None,
+                single_unit=False,
+            )
 
         elif isinstance(ql, qlast.CommitMigration):
             mstate = current_tx.get_migration_state()
@@ -1503,6 +1600,7 @@ class Compiler(BaseCompiler):
         schema: Optional[s_schema.Schema] = None,
         schema_object_ids: Optional[Mapping[str, uuid.UUID]] = None,
         first_extracted_var: Optional[int] = None,
+        compat_ver: Optional[verutils.Version] = None,
     ) -> CompileContext:
 
         if session_config is None:
@@ -1539,6 +1637,7 @@ class Compiler(BaseCompiler):
             stmt_mode=stmt_mode,
             json_parameters=json_parameters,
             schema_object_ids=schema_object_ids,
+            compat_ver=compat_ver,
             first_extracted_var=first_extracted_var,
         )
 
@@ -1920,6 +2019,7 @@ class Compiler(BaseCompiler):
     async def describe_database_restore(
         self,
         tx_snapshot_id: str,
+        dump_server_ver_str: Optional[str],
         schema_ddl: bytes,
         schema_ids: List[Tuple[str, str, bytes]],
         blocks: List[Tuple[bytes, bytes]],  # type_id, typespec
@@ -1928,6 +2028,11 @@ class Compiler(BaseCompiler):
             (name, qltype if qltype else None): uuidgen.from_bytes(objid)
             for name, qltype, objid in schema_ids
         }
+
+        if dump_server_ver_str is not None:
+            dump_server_ver = verutils.parse_version(dump_server_ver_str)
+        else:
+            dump_server_ver = None
 
         schema = await self._introspect_schema_in_snapshot(tx_snapshot_id)
         ctx = await self._ctx_new_con_state(
@@ -1940,7 +2045,9 @@ class Compiler(BaseCompiler):
             capability=enums.Capability.ALL,
             json_parameters=False,
             schema=schema,
-            schema_object_ids=schema_object_ids)
+            schema_object_ids=schema_object_ids,
+            compat_ver=dump_server_ver,
+        )
         ctx.state.start_tx()
 
         units = self._compile(
@@ -1984,7 +2091,7 @@ class Compiler(BaseCompiler):
                     raise RuntimeError(
                         'Link table dump data has extra fields')
 
-            else:
+            elif isinstance(obj, s_objtypes.ObjectType):
                 assert isinstance(desc, sertypes.ShapeDesc)
                 desc_cols = list(desc.fields.keys())
 
@@ -2005,6 +2112,12 @@ class Compiler(BaseCompiler):
                 if set(desc_cols) != set(cols):
                     raise RuntimeError(
                         'Object table dump data has extra fields')
+
+            else:
+                raise AssertionError(
+                    f'unexpected object type in restore '
+                    f'type descriptor: {obj!r}'
+                )
 
             table_name = pg_common.get_backend_name(
                 schema, obj, catenate=True)

@@ -26,14 +26,14 @@ import shutil
 import subprocess
 import textwrap
 
+import setuptools
+from setuptools.command import develop as setuptools_develop
+
 import distutils
 from distutils import version
 from distutils import extension as distutils_extension
 from distutils.command import build as distutils_build
 from distutils.command import build_ext as distutils_build_ext
-
-import setuptools
-from setuptools.command import develop as setuptools_develop
 
 try:
     import setuptools_rust
@@ -43,7 +43,7 @@ except ImportError:
 
 RUNTIME_DEPS = [
     'asyncpg~=0.20.0',
-    'click~=6.7',
+    'click~=7.1',
     'httptools>=0.0.13',
     'immutables>=0.13',
     'parsing~=1.6.1',
@@ -55,7 +55,7 @@ RUNTIME_DEPS = [
     'setuptools_scm~=3.2.0',
     'typing_inspect~=0.5.0',
     'uvloop~=0.14.0',
-    'wcwidth~=0.1.8',
+    'wcwidth~=0.2.5',
 
     'graphql-core~=3.0.3',
     'promise~=2.2.0',
@@ -84,11 +84,11 @@ EXTRA_DEPS = {
         # Depend on unreleased version for Python 3.8 support,
         'pycodestyle~=2.6.0',
         'pyflakes~=2.2.0',
-        'black~=19.3b0',
+        'black~=19.10b0',
         'flake8~=3.8.1',
-        'flake8-bugbear~=19.8.0',
+        'flake8-bugbear~=20.1.4',
         'mypy==0.782',
-        'coverage~=4.5.2',
+        'coverage~=5.2.1',
         'requests-xml~=0.2.3',
         'lxml',
         # For rebuilding GHA workflows
@@ -132,12 +132,9 @@ def _compile_parsers(build_lib, inplace=False):
 
 def _compile_build_meta(build_lib, version, pg_config, runstatedir,
                         shared_dir, version_suffix):
-    import pkg_resources
-    from edb.server import buildmeta
+    from edb.common import verutils
 
-    parsed_version = buildmeta.parse_version(
-        pkg_resources.parse_version(version))
-
+    parsed_version = verutils.parse_version(version)
     vertuple = list(parsed_version._asdict().values())
     vertuple[2] = int(vertuple[2])
     if version_suffix:
@@ -540,9 +537,14 @@ else:
     rust_extensions = []
 
 
+def custom_scm_version():
+    from edb.server import buildmeta
+    return {'version_scheme': buildmeta.scm_version_scheme}
+
+
 setuptools.setup(
     setup_requires=RUNTIME_DEPS + BUILD_DEPS,
-    use_scm_version=True,
+    use_scm_version=custom_scm_version,
     name='edgedb-server',
     description='EdgeDB Server',
     author='MagicStack Inc.',

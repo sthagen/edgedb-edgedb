@@ -288,10 +288,6 @@ class ParameterDesc(ParameterLike):
         cmd.set_attribute_value('name', param_name)
         cmd.set_attribute_value('type', self.type)
 
-        if isinstance(self.type, s_types.CollectionTypeShell):
-            s_types.ensure_schema_collection(
-                schema, self.type, cmd, context=context)
-
         for attr in ('num', 'typemod', 'kind', 'default'):
             cmd.set_attribute_value(attr, getattr(self, attr))
 
@@ -316,14 +312,9 @@ class ParameterDesc(ParameterLike):
         cmd = DeleteParameter(classname=param_name)
 
         if isinstance(self.type, s_types.CollectionTypeShell):
-            param = schema.get(param_name, type=Parameter)
-            s_types.cleanup_schema_collection(
-                schema,
-                self.type.resolve(schema),
-                param,
-                cmd,
-                context=context,
-            )
+            colltype = self.type.resolve(schema)
+            assert isinstance(colltype, s_types.Collection)
+            cmd.add(colltype.as_colltype_delete_delta(schema))
 
         return cmd
 
@@ -349,7 +340,7 @@ class Parameter(so.ObjectFragment, ParameterLike):
 
     @classmethod
     def paramname_from_fullname(cls, fullname: sn.Name) -> str:
-        parts = str(fullname.name).split('@@', 1)
+        parts = str(fullname.name).split('@', 1)
         if len(parts) == 2:
             return sn.unmangle_name(parts[0])
         elif '::' in fullname:
@@ -437,7 +428,15 @@ class ParameterCommand(
     context_class=ParameterCommandContext,
     referrer_context_class=CallableCommandContext
 ):
-    pass
+
+    def canonicalize_attributes(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        schema = super().canonicalize_attributes(schema, context)
+        return s_types.materialize_type_in_attribute(
+            schema, context, self, 'type')
 
 
 class CreateParameter(ParameterCommand, sd.CreateObject[Parameter]):
@@ -631,7 +630,7 @@ class CallableObject(
         self: CallableObjectT,
         schema: s_schema.Schema,
         context: so.ComparisonContext,
-    ) -> sd.ObjectCommand[CallableObjectT]:
+    ) -> sd.Command:
         delta = super().as_create_delta(schema, context)
 
         new_params = self.get_params(schema).objects(schema)
@@ -650,7 +649,7 @@ class CallableObject(
         self_schema: s_schema.Schema,
         other_schema: s_schema.Schema,
         context: so.ComparisonContext,
-    ) -> sd.ObjectCommand[CallableObjectT]:
+    ) -> sd.Command:
         delta = super().as_alter_delta(
             other,
             self_schema=self_schema,
@@ -674,6 +673,7 @@ class CallableObject(
             sd.delta_objects(
                 oldcoll,
                 newcoll,
+                sclass=Parameter,
                 context=context,
                 old_schema=self_schema,
                 new_schema=other_schema,
@@ -687,7 +687,7 @@ class CallableObject(
         *,
         schema: s_schema.Schema,
         context: so.ComparisonContext,
-    ) -> sd.ObjectCommand[CallableObjectT]:
+    ) -> sd.Command:
         delta = super().as_delete_delta(schema=schema, context=context)
         old_params = self.get_params(schema).objects(schema)
         for p in old_params:
@@ -810,6 +810,15 @@ class CallableCommand(sd.QualifiedObjectCommand[CallableObjectT]):
 
         return schema, params
 
+    def canonicalize_attributes(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        schema = super().canonicalize_attributes(schema, context)
+        return s_types.materialize_type_in_attribute(
+            schema, context, self, 'return_type')
+
 
 class AlterCallableObject(
     CallableCommand[CallableObjectT],
@@ -882,13 +891,6 @@ class CreateCallableObject(
                 schema=schema,
             )
 
-            if isinstance(return_type, s_types.CollectionTypeShell):
-                s_types.ensure_schema_collection(
-                    schema, return_type, cmd,
-                    src_context=astnode.returning.context,
-                    context=context,
-                )
-
             cmd.set_attribute_value(
                 'return_type', return_type)
             cmd.set_attribute_value(
@@ -936,10 +938,8 @@ class DeleteCallableObject(
             sourcectx=astnode.context)
 
         return_type = obj.get_return_type(schema)
-        if return_type.is_collection():
-            s_types.cleanup_schema_collection(
-                schema, return_type, obj, cmd, context=context,
-                src_context=astnode.context)
+        if isinstance(return_type, s_types.Collection):
+            cmd.add(return_type.as_colltype_delete_delta(schema))
 
         return cmd
 

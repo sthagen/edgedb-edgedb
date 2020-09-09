@@ -412,6 +412,13 @@ class AlterProperty(
                         type=utils.typeref_to_ast(schema, op.new_value),
                     ),
                 )
+        elif op.property == 'required':
+            node.commands.append(
+                qlast.SetSpecialField(
+                    name='required',
+                    value=op.new_value,
+                ),
+            )
         else:
             super()._apply_field_ast(schema, context, node, op)
 
@@ -439,9 +446,21 @@ class DeleteProperty(
             prop = schema.get(cmd.classname, type=Property)
             target = prop.get_target(schema)
 
-            if target is not None and target.is_collection():
-                s_types.cleanup_schema_collection(
-                    schema, target, prop, cmd, context=context,
-                    src_context=astnode.context)
+            if target is not None and isinstance(target, s_types.Collection):
+                cmd.add(target.as_colltype_delete_delta(schema))
 
         return cmd
+
+    def _get_ast(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        *,
+        parent_node: Optional[qlast.DDLOperation] = None,
+    ) -> Optional[qlast.DDLOperation]:
+        if self.get_orig_attribute_value('is_from_alias'):
+            # This is an alias type, appropriate DDL would be generated
+            # from the corresponding Alter/DeleteAlias node.
+            return None
+        else:
+            return super()._get_ast(schema, context, parent_node=parent_node)

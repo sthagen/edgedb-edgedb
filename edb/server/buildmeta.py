@@ -20,24 +20,22 @@
 from __future__ import annotations
 from typing import *
 
-import enum
 import hashlib
 import json
 import logging
 import os
 import pathlib
 import pickle
+import re
+import subprocess
 import tempfile
 
 import immutables as immu
 
 import edb
 from edb.common import devmode
-
-try:
-    import pkg_resources
-except ImportError:
-    pkg_resources = None  # type: ignore
+from edb.common import verutils
+from edb.common import debug
 
 try:
     import setuptools_scm
@@ -140,7 +138,7 @@ def read_data_cache(
     if full_path.exists():
         with open(full_path, 'rb') as f:
             src_hash = f.read(len(cache_key))
-            if src_hash == cache_key:
+            if src_hash == cache_key or debug.flags.bootstrap_cache_yolo:
                 if pickled:
                     data = f.read()
                     try:
@@ -182,86 +180,21 @@ def write_data_cache(
         os.rename(f.name, full_path)
 
 
-class VersionStage(enum.IntEnum):
-
-    DEV = 0
-    ALPHA = 10
-    BETA = 20
-    RC = 30
-    FINAL = 40
-
-
-class Version(NamedTuple):
-
-    major: int
-    minor: int
-    stage: VersionStage
-    stage_no: int
-    local: Tuple[str, ...]
-
-    def __str__(self):
-        ver = f'{self.major}.{self.minor}'
-        if self.stage is not VersionStage.FINAL:
-            ver += f'-{self.stage.name.lower()}.{self.stage_no}'
-        if self.local:
-            ver += f'{("+" + ".".join(self.local)) if self.local else ""}'
-
-        return ver
-
-
-def parse_version(ver: Any) -> Version:
-    v = ver._version
-    local = []
-    if v.pre:
-        if v.pre[0] == 'a':
-            stage = VersionStage.ALPHA
-        elif v.pre[0] == 'b':
-            stage = VersionStage.BETA
-        elif v.pre[0] == 'c':
-            stage = VersionStage.RC
-        else:
-            raise MetadataError(
-                f'cannot determine release stage from {ver}')
-
-        stage_no = v.pre[1]
-
-        if v.dev:
-            local.extend(['dev', str(v.dev[1])])
-    elif v.dev:
-        stage = VersionStage.DEV
-        stage_no = v.dev[1]
-    else:
-        stage = VersionStage.FINAL
-        stage_no = 0
-
-    if v.local:
-        local.extend(v.local)
-
-    return Version(
-        major=v.release[0],
-        minor=v.release[1],
-        stage=stage,
-        stage_no=stage_no,
-        local=tuple(local),
-    )
-
-
-def get_version() -> Version:
+def get_version() -> verutils.Version:
     if devmode.is_in_dev_mode():
-        if pkg_resources is None:
-            raise MetadataError(
-                'cannot determine build version: no pkg_resources module')
         if setuptools_scm is None:
             raise MetadataError(
                 'cannot determine build version: no setuptools_scm module')
         version = setuptools_scm.get_version(
-            root='../..', relative_to=__file__)
-        pv = pkg_resources.parse_version(version)
-        version = parse_version(pv)
+            root='../..',
+            relative_to=__file__,
+            version_scheme=scm_version_scheme,
+        )
+        version = verutils.parse_version(version)
     else:
         vertuple: List[Any] = list(get_build_metadata_value('VERSION'))
-        vertuple[2] = VersionStage(vertuple[2])
-        version = Version(*vertuple)
+        vertuple[2] = verutils.VersionStage(vertuple[2])
+        version = verutils.Version(*vertuple)
 
     return version
 
@@ -293,3 +226,84 @@ def get_version_json() -> str:
     if _version_json is None:
         _version_json = json.dumps(dict(get_version_dict()))
     return _version_json
+
+
+def scm_version_scheme(version):
+    pretend = os.environ.get('SETUPTOOLS_SCM_PRETEND_VERSION')
+    if pretend:
+        return pretend
+
+    posint = r'(0|[1-9]\d*)'
+    pep440_version_re = re.compile(
+        rf"""
+        ^
+        (?P<major>{posint})
+        \.
+        (?P<minor>{posint})
+        (
+            \.
+            (?P<micro>{posint})
+        )?
+        (
+            (?P<prekind>a|b|rc)
+            (?P<preval>{posint})
+        )?
+        $
+        """,
+        re.X,
+    )
+
+    proc = subprocess.run(
+        ['git', 'tag', '--list', 'v*'],
+        stdout=subprocess.PIPE,
+        universal_newlines=True,
+        check=True,
+    )
+    versions = proc.stdout.split('\n')
+    latest_version = max(versions)
+
+    proc = subprocess.run(
+        ['git', 'tag', '--points-at', 'HEAD'],
+        stdout=subprocess.PIPE,
+        universal_newlines=True,
+        check=True,
+    )
+    tag_list = proc.stdout.strip()
+    if tag_list:
+        tags = tag_list.strip('\n')
+    else:
+        tags = []
+
+    exact_tags = set(versions) & set(tags)
+
+    proc = subprocess.run(
+        ['git', 'rev-list', '--count', 'HEAD'],
+        stdout=subprocess.PIPE,
+        universal_newlines=True,
+        check=True,
+    )
+    commits_on_branch = proc.stdout.strip()
+
+    if exact_tags:
+        return exact_tags.pop()[1:]
+
+    m = pep440_version_re.match(latest_version[1:])
+    if not m:
+        return f'{latest_version[1:]}.dev{commits_on_branch}'
+
+    major = m.group('major')
+    minor = m.group('minor')
+    micro = m.group('micro') or ''
+    microkind = '.' if micro else ''
+    prekind = m.group('prekind') or ''
+    preval = m.group('preval') or ''
+
+    if prekind and preval:
+        preval = str(int(preval) + 1)
+    elif micro:
+        micro = str(int(micro) + 1)
+    else:
+        minor = str(int(minor) + 1)
+
+    incremented_ver = f'{major}.{minor}{microkind}{micro}{prekind}{preval}'
+    return f'{incremented_ver}.dev{commits_on_branch}'

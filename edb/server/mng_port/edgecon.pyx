@@ -60,6 +60,7 @@ from edb.server import config
 
 from edb.server import buildmeta
 from edb.server import compiler
+from edb.server import defines as edbdef
 from edb.server.compiler import errormech
 from edb.server.pgcon cimport pgcon
 from edb.server.pgcon import errors as pgerror
@@ -263,6 +264,15 @@ cdef class EdgeConnection:
 
         logger.debug('received connection request by %s to database %s',
                      user, database)
+
+        if database == edbdef.EDGEDB_TEMPLATE_DB:
+            # Prevent connections to the system template database,
+            # which only purpose is to serve as a template for new
+            # databases.
+            raise errors.AccessError(
+                f'database {edbdef.EDGEDB_TEMPLATE_DB!r} does not '
+                f'accept connections'
+            )
 
         dbv = self.port.new_view(
             dbname=database, user=user,
@@ -1884,11 +1894,13 @@ cdef class EdgeConnection:
 
         # Now parse the embedded dump header message:
 
-        # Ignore headers
+        dump_server_ver_str = None
         headers_num = self.buffer.read_int16()
         for _ in range(headers_num):
-            self.buffer.read_int16()
-            self.buffer.read_len_prefixed_bytes()
+            hdrname = self.buffer.read_int16()
+            hdrval = self.buffer.read_len_prefixed_bytes()
+            if hdrname == DUMP_HEADER_SERVER_VER:
+                dump_server_ver_str = hdrval.decode('utf-8')
 
         proto_major = self.buffer.read_int16()
         proto_minor = self.buffer.read_int16()
@@ -1939,6 +1951,7 @@ cdef class EdgeConnection:
                 await self.get_backend().compiler.call(
                     'describe_database_restore',
                     tx_snapshot_id,
+                    dump_server_ver_str,
                     schema_ddl,
                     schema_ids,
                     blocks,

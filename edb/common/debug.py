@@ -75,6 +75,9 @@ class flags(metaclass=FlagsMeta):
     bootstrap = Flag(
         doc="Debug server catalog bootstrap.")
 
+    bootstrap_cache_yolo = Flag(
+        doc="Disable bootstrap cache consistency check.")
+
     edgeql_parser = Flag(
         doc="Debug EdgeQL parser (rebuild grammar verbosly).")
 
@@ -122,6 +125,9 @@ class flags(metaclass=FlagsMeta):
 
     log_metrics = Flag(
         doc="Log verbose statistics on connections and compiler behavior.")
+
+    migrations_via_ddl = Flag(
+        doc="Always use generated DDL when running migrations.")
 
 
 @contextlib.contextmanager

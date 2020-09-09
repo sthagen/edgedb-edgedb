@@ -144,6 +144,13 @@ class TranspiledOperation(NamedTuple):
     variables_desc: dict
 
 
+class Ordering(NamedTuple):
+
+    names: List[str]
+    direction: qlast.SortOrder
+    nulls: qlast.NonesOrder
+
+
 class BookkeepDict(dict):
 
     def __init__(self, values):
@@ -1328,14 +1335,32 @@ class GraphQLTranslator:
 
         if op:
             value = self.visit(node.value)
-            if self._context.right_cast is not None:
+            left = self._context.base_expr
+
+            # 'exists' filter gets converted to:
+            # EXISTS (<expr>) = <value>
+            # where the <value> is either true or false. This is so
+            # that there's a one-to-one correspondence between the
+            # potential input variables and the EdgeQL variables.
+            #
+            # If different EdgeQL code were generated instead, then
+            # the assumption that it's safe to re-run the same EdgeQL
+            # query with different input variables would not hold.
+            if op == 'EXISTS':
+                left = qlast.UnaryOp(op='EXISTS', operand=left)
+                # The binary operator that we need here is "="
+                op = '='
+
+            elif self._context.right_cast is not None:
+                # We don't need to cast the RHS for the EXISTS, only
+                # for other operations.
                 value = qlast.TypeCast(
                     expr=value,
                     type=self._context.right_cast,
                 )
 
             return qlast.BinOp(
-                left=self._context.base_expr, op=op, right=value)
+                left=left, op=op, right=value)
 
         # we're at the beginning of a scalar op
         _, target = self._get_parent_and_current_type()
@@ -1380,8 +1405,14 @@ class GraphQLTranslator:
             self._context.base_expr = None
 
         # we need to cast a target string into <uuid> or enum
-        if typename == 'std::uuid' and not isinstance(
-                value.right, qlast.TypeCast):
+        if (typename == 'std::uuid'
+                and not (
+                    # EXISTS side does not need a <uuid> cast
+                    isinstance(value.left, qlast.UnaryOp) and
+                    value.left.op == 'EXISTS'
+                )
+                and not isinstance(value.right, qlast.TypeCast)):
+
             value.right = qlast.TypeCast(
                 expr=value.right,
                 type=qlast.TypeName(maintype=ftype.edb_base_name_ast),
@@ -1412,36 +1443,52 @@ class GraphQLTranslator:
         # Ordering is handled by specifying a list of special Ordering objects.
         # Validation is already handled by this point.
         orderby = []
-        for enum in node.fields:
-            name, direction, nulls = self._visit_order_item(enum)
+        for ordering in self._visit_order_item(node):
             orderby.append(qlast.SortExpr(
                 path=qlast.Path(
-                    steps=[qlast.Ptr(ptr=qlast.ObjectRef(name=name))],
+                    steps=[
+                        qlast.Ptr(ptr=qlast.ObjectRef(name=name))
+                        for name in ordering.names
+                    ],
                     partial=True,
                 ),
-                direction=direction,
-                nones_order=nulls,
+                direction=ordering.direction,
+                nones_order=ordering.nulls,
             ))
 
         return orderby
 
     def _visit_order_item(self, node):
-        if not isinstance(node, gql_ast.ObjectFieldNode):
+        if not isinstance(node, gql_ast.ObjectValueNode):
             raise g_errors.GraphQLTranslationError(
                 f'an object is expected for "order"')
 
-        if not isinstance(node.value, gql_ast.ObjectValueNode):
-            raise g_errors.GraphQLTranslationError(
-                f'an object is expected for "order"')
-
-        name = node.name.value
+        orderings = []
         direction = nulls = None
 
-        for part in node.value.fields:
-            if part.name.value == 'dir':
+        for part in node.fields:
+            # Check if there's a longer nested path here. If there is,
+            # validate that there's only one option chosen at this
+            # level.
+            if isinstance(part.value, gql_ast.ObjectValueNode):
+                for subordering in self._visit_order_item(part.value):
+                    orderings.append(
+                        Ordering(
+                            names=[part.name.value] + subordering.names,
+                            direction=subordering.direction,
+                            nulls=subordering.nulls
+                        )
+                    )
+
+            elif part.name.value == 'dir':
                 direction = part.value.value
-            if part.name.value == 'nulls':
+            elif part.name.value == 'nulls':
                 nulls = part.value.value
+
+        if orderings:
+            # We have compiled some ordering paths, so we don't have
+            # any direction or nulls on this level.
+            return orderings
 
         # direction is a required field, so we can rely on it having
         # one of two values
@@ -1461,7 +1508,7 @@ class GraphQLTranslator:
             else:
                 nulls = qlast.NonesLast
 
-        return name, direction, nulls
+        return [Ordering(names=[], direction=direction, nulls=nulls)]
 
     def visit_VariableNode(self, node):
         varname = node.name.value

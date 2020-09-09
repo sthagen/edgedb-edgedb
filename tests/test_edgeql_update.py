@@ -1566,6 +1566,49 @@ class TestUpdate(tb.QueryTestCase):
             ]
         )
 
+    async def test_edgeql_update_for_02(self):
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test
+                FOR x IN {
+                        'update-test1',
+                        'update-test2',
+                    }
+                UNION (
+                    UPDATE UpdateTest
+                    FILTER UpdateTest.name = x
+                    SET {
+                        comment := x ++ "!"
+                    }
+                );
+            """,
+            [{}, {}],  # since updates are in FOR they return objects
+        )
+
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test
+                SELECT UpdateTest {
+                    name,
+                    comment
+                } ORDER BY UpdateTest.name;
+            """,
+            [
+                {
+                    'name': 'update-test1',
+                    'comment': 'update-test1!'
+                },
+                {
+                    'name': 'update-test2',
+                    'comment': 'update-test2!'
+                },
+                {
+                    'name': 'update-test3',
+                    'comment': 'third'
+                },
+            ]
+        )
+
     async def test_edgeql_update_empty_01(self):
         await self.assert_query_result(
             r"""
@@ -1663,21 +1706,22 @@ class TestUpdate(tb.QueryTestCase):
 
     async def test_edgeql_update_cardinality_02(self):
         await self.assert_query_result(r'''
-            WITH MODULE test
+            WITH
+                MODULE test,
+                x1 := (
+                    UPDATE UpdateTest
+                    FILTER .name = 'update-test1'
+                    SET {
+                        status := (
+                            SELECT Status
+                            # the ID is non-existent
+                            FILTER .id = <uuid>
+                                '10000000-aaaa-bbbb-cccc-d00000000000'
+                        )
+                    }
+                )
             SELECT stdgraphql::Query {
                 multi x0 := (
-                    WITH x1 := (
-                        UPDATE UpdateTest
-                        FILTER .name = 'update-test1'
-                        SET {
-                            status := (
-                                SELECT Status
-                                # the ID is non-existent
-                                FILTER .id = <uuid>
-                                    '10000000-aaaa-bbbb-cccc-d00000000000'
-                            )
-                        }
-                    )
                     SELECT x1 {
                         name,
                         status: {
@@ -1878,6 +1922,18 @@ class TestUpdate(tb.QueryTestCase):
                     }),
                     Status,
                 );
+            ''')
+
+    async def test_edgeql_update_correlated_bad_03(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                "cannot reference correlated set 'UpdateTest' here"):
+            await self.con.execute(r'''
+                WITH MODULE test
+                SELECT (
+                    UpdateTest,
+                    (UPDATE UpdateTest SET {name := 'update bad'}),
+                )
             ''')
 
     async def test_edgeql_update_protect_readonly_01(self):

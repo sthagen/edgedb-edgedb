@@ -593,7 +593,7 @@ _123456789_123456789_123456789 -> str
         base_names = constr.get_bases(schema).names(schema)
         self.assertEqual(len(base_names), 1)
         self.assertTrue(base_names[0].startswith(
-            'default::std|exclusive@@default|__|name@@default|Named@'))
+            'default::std|exclusive@default|__||name&default||Named@'))
 
     def test_schema_constraint_inheritance_02(self):
         schema = tb._load_std_schema()
@@ -618,7 +618,7 @@ _123456789_123456789_123456789 -> str
         base_names = constr.get_bases(schema).names(schema)
         self.assertEqual(len(base_names), 1)
         self.assertTrue(base_names[0].startswith(
-            'default::std|exclusive@@default|__|name@@default|Named@'))
+            'default::std|exclusive@default|__||name&default||Named@'))
 
     def test_schema_constraint_inheritance_03(self):
         schema = tb._load_std_schema()
@@ -1836,6 +1836,26 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             link class -> Class;
         }
         type TimeSpot;
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_get_migration_34(self):
+        # Make sure that awkward order of function definitions doesn't
+        # affect the migraiton.
+        #
+        # Issue #1649.
+        schema = r'''
+        function b() -> int64 {
+            using EdgeQL $$
+                SELECT a()
+            $$
+        }
+        function a() -> int64 {
+            using EdgeQL $$
+                SELECT 1
+            $$
+        }
         '''
 
         self._assert_migration_consistency(schema)
@@ -4010,6 +4030,36 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             };
         """])
 
+    def test_schema_migrations_equivalence_collections_23(self):
+        self._assert_migration_equivalence([r"""
+            scalar type MyScalar extending str;
+
+            type User {
+                required property tup -> tuple<x:MyScalar>;
+            };
+        """, r"""
+            scalar type MyScalar extending str;
+
+            type User {
+                required property tup -> array<x:MyScalar>;
+            };
+        """])
+
+    def test_schema_migrations_equivalence_collections_24(self):
+        self._assert_migration_equivalence([r"""
+            scalar type MyScalar extending str;
+
+            type User {
+                required property arr -> array<x:MyScalar>;
+            };
+        """, r"""
+            scalar type MyScalar extending str;
+
+            type User {
+                required property arr -> tuple<x:MyScalar>;
+            };
+        """])
+
 
 class TestDescribe(tb.BaseSchemaLoadTest):
     """Test the DESCRIBE command."""
@@ -4182,6 +4232,8 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             """
             function std::array_agg(s: SET OF anytype) ->  array<anytype> {
                 volatility := 'IMMUTABLE';
+                annotation std::description := 'Return the array made from all
+                    of the input set elements.';
                 using sql;
             };
             """,
@@ -4570,6 +4622,8 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             {
                 SET errmessage := '{__subject__} must be no longer
                                    than {max} characters.';
+                CREATE ANNOTATION std::description := 'Specifies the maximum
+                    length of subject string representation.';
             };
             ''',
 
@@ -4961,17 +5015,16 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             CREATE TYPE test::Foo {
-                CREATE OPTIONAL SINGLE PROPERTY annotated_compprop {
-                    USING ('foo');
-                    CREATE ANNOTATION std::title := 'compprop';
-                };
                 CREATE OPTIONAL SINGLE LINK annotated_link {
                     USING (SELECT test::Foo LIMIT 1);
                     CREATE ANNOTATION std::title := 'complink';
                 };
-                CREATE OPTIONAL SINGLE LINK complink := (
-                    SELECT test::Foo LIMIT 1
-                );
+                CREATE OPTIONAL SINGLE LINK complink :=
+                    (SELECT test::Foo LIMIT 1);
+                CREATE OPTIONAL SINGLE PROPERTY annotated_compprop {
+                    USING ('foo');
+                    CREATE ANNOTATION std::title := 'compprop';
+                };
                 CREATE REQUIRED SINGLE PROPERTY compprop := ('foo');
             };
             """
@@ -4998,10 +5051,6 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             CREATE TYPE test::Foo {
-                CREATE OPTIONAL SINGLE PROPERTY annotated_compprop {
-                    USING ('foo');
-                    CREATE ANNOTATION std::title := 'compprop';
-                };
                 CREATE OPTIONAL SINGLE LINK annotated_link {
                     USING (SELECT test::Foo LIMIT 1);
                     CREATE ANNOTATION std::title := 'complink';
@@ -5009,6 +5058,10 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 CREATE OPTIONAL SINGLE LINK complink := (
                     SELECT test::Foo LIMIT 1
                 );
+                CREATE OPTIONAL SINGLE PROPERTY annotated_compprop {
+                    USING ('foo');
+                    CREATE ANNOTATION std::title := 'compprop';
+                };
                 CREATE REQUIRED SINGLE PROPERTY compprop := ('foo');
             };
             """
@@ -5201,6 +5254,8 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             # function std::all(vals: SET OF std::bool) ->  std::bool {
             #     volatility := 'IMMUTABLE';
+            #     annotation std::description := 'Generalized boolean `AND`
+                      applied to the set of *values*.';
             #     using sql
             # ;};
             """,

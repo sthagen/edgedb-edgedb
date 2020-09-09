@@ -17,7 +17,6 @@
 #
 
 from __future__ import annotations
-
 from typing import *
 
 import collections.abc
@@ -305,6 +304,9 @@ class Pointer(referencing.ReferencedInheritingObject,
     def is_type_intersection(self) -> bool:
         return False
 
+    def is_generated(self, schema: s_schema.Schema) -> bool:
+        return bool(self.get_is_from_alias(schema))
+
     @classmethod
     def get_displayname_static(cls, name: str) -> str:
         sn = cls.get_shortname_static(name)
@@ -570,6 +572,16 @@ class Pointer(referencing.ReferencedInheritingObject,
             if b.get_source(schema) != my_source
         ]
 
+    def get_implicit_ancestors(self, schema: s_schema.Schema) -> List[Pointer]:
+        ancestors = super().get_implicit_ancestors(schema)
+
+        # True implicit ancestors for pointers will have a different source.
+        my_source = self.get_source(schema)
+        return [
+            b for b in ancestors
+            if b.get_source(schema) != my_source
+        ]
+
     def has_user_defined_properties(self, schema: s_schema.Schema) -> bool:
         return False
 
@@ -580,8 +592,10 @@ class Pointer(referencing.ReferencedInheritingObject,
         refdict: so.RefDict,
     ) -> bool:
         object_type = self.get_source(schema)
-        assert isinstance(object_type, s_types.Type)
-        return not object_type.is_view(schema)
+        if isinstance(object_type, s_types.Type):
+            return not object_type.is_view(schema)
+        else:
+            return True
 
     def get_schema_reflection_default(
         self,
@@ -809,37 +823,8 @@ class PointerCommandOrFragment(
         target_ref = self.get_local_attribute_value('target')
 
         if target_ref is not None:
-            srcctx = self.get_attribute_source_context('target')
-
-            if isinstance(target_ref, s_types.TypeExprShell):
-                cc_cmd = s_types.ensure_schema_type_expr_type(
-                    schema,
-                    target_ref,
-                    parent_cmd=self,
-                    src_context=srcctx,
-                    context=context,
-                )
-                if cc_cmd is not None:
-                    schema = cc_cmd.apply(schema, context)
-
-            if isinstance(target_ref, s_types.TypeShell):
-                try:
-                    target = target_ref.resolve(schema)
-                except errors.InvalidReferenceError as e:
-                    refname = target_ref.get_refname(schema)
-                    if refname is not None:
-                        utils.enrich_schema_lookup_error(
-                            e,
-                            refname,
-                            modaliases=context.modaliases,
-                            schema=schema,
-                            item_type=s_types.Type,
-                            context=srcctx,
-                        )
-                    raise
-
-            elif isinstance(target_ref, ComputableRef):
-                schema, target_t, base = self._parse_computable(
+            if isinstance(target_ref, ComputableRef):
+                schema, target, base = self._parse_computable(
                     target_ref.expr, schema, context)
 
                 if base is not None:
@@ -856,12 +841,15 @@ class PointerCommandOrFragment(
                             'declared_overloaded', True
                         )
 
-                target = target_t
-
+                srcctx = self.get_attribute_source_context('target')
+                self.set_attribute_value(
+                    'target',
+                    target.as_shell(schema),
+                    source_context=srcctx,
+                )
             else:
-                target = target_ref
-
-            self.set_attribute_value('target', target, source_context=srcctx)
+                schema = s_types.materialize_type_in_attribute(
+                    schema, context, self, 'target')
 
         return schema
 
@@ -882,6 +870,7 @@ class PointerCommandOrFragment(
 
         source = schema.get(source_name, type=s_objtypes.ObjectType)
 
+        ptr_name = self.get_displayname()
         expression = s_expr.Expression.compiled(
             s_expr.Expression.from_ast(expr, schema, context.modaliases),
             schema=schema,
@@ -890,6 +879,7 @@ class PointerCommandOrFragment(
                 anchors={qlast.Source().name: source},
                 path_prefix_anchor=qlast.Source().name,
                 singletons=frozenset([source]),
+                in_ddl_context_name=f'computable {ptr_name!r}',
             ),
         )
 
@@ -926,12 +916,23 @@ class PointerCommandOrFragment(
 
         self.set_attribute_value('expr', expression)
         required, card = expression.irast.cardinality.to_schema_value()
+
+        is_alter = (
+            isinstance(self, sd.AlterObject)
+            or (
+                isinstance(self, sd.AlterObjectFragment)
+                and isinstance(self.get_parent_op(context), sd.AlterObject)
+            )
+        )
+
         spec_required = self.get_attribute_value('required')
+        if spec_required is None and is_alter:
+            spec_required = self.scls.get_required(schema)
         spec_card = self.get_attribute_value('cardinality')
+        if spec_card is None and is_alter:
+            spec_card = self.scls.get_cardinality(schema)
 
         if spec_required and not required:
-            ptr_name = sn.shortname_from_fullname(
-                self.get_attribute_value('name')).name
             srcctx = self.get_attribute_source_context('target')
             raise errors.SchemaDefinitionError(
                 f'possibly an empty set returned by an '
@@ -945,8 +946,6 @@ class PointerCommandOrFragment(
             spec_card in {None, qltypes.SchemaCardinality.ONE} and
             card is not qltypes.SchemaCardinality.ONE
         ):
-            ptr_name = sn.shortname_from_fullname(
-                self.get_attribute_value('name')).name
             srcctx = self.get_attribute_source_context('target')
             raise errors.SchemaDefinitionError(
                 f'possibly more than one element returned by an '
@@ -1191,16 +1190,6 @@ class PointerCommand(
             # Target is inherited.
             target_ref = None
 
-        if isinstance(target_ref, s_types.CollectionTypeShell):
-            assert astnode.target is not None
-            s_types.ensure_schema_collection(
-                schema,
-                target_ref,
-                parent_cmd=self,
-                src_context=astnode.target.context,
-                context=context,
-            )
-
         if isinstance(self, sd.CreateObject):
             assert astnode.target is not None
             self.set_attribute_value(
@@ -1411,25 +1400,6 @@ class SetPointerType(
                 modaliases=context.modaliases,
                 schema=schema,
             )
-
-        if isinstance(target_ref, s_types.CollectionTypeShell):
-            s_types.ensure_schema_collection(
-                schema,
-                target_ref,
-                parent_cmd=cmd,
-                src_context=astnode.type.context,
-                context=context,
-            )
-
-        ctx = context.current()
-        assert isinstance(ctx, sd.ObjectCommandContext)
-        ptr = ctx.op.get_object(schema, context, default=None)  # type: ignore
-        if ptr is not None:
-            orig_type = ptr.get_target(schema)
-            if orig_type.is_collection():
-                s_types.cleanup_schema_collection(
-                    schema, orig_type, ptr, cmd, context=context,
-                    src_context=astnode.context)
 
         cmd.set_attribute_value('target', target_ref)
 

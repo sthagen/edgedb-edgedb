@@ -39,6 +39,8 @@ from . import schema as s_schema
 if TYPE_CHECKING:
     import uuid
 
+    from edb.common import verutils
+
 
 def delta_schemas(
     schema_a: Optional[s_schema.Schema],
@@ -59,6 +61,8 @@ def delta_schemas(
     include_derived_types: bool=True,
     include_migrations: bool=False,
     linearize_delta: bool=True,
+    generate_prompts: bool=False,
+    guidance: Optional[so.DeltaGuidance]=None,
 ) -> sd.DeltaRoot:
     """Return difference between *schema_a* and *schema_b*.
 
@@ -113,6 +117,13 @@ def delta_schemas(
         linearize_delta:
             Whether the resulting diff should be properly ordered
             using the dependencies between objects.
+
+        generate_prompts:
+            Whether to generate prompts that can be used in
+            DESCRIBE MIGRATION.
+
+        guidance:
+            Optional explicit guidance to schema diff.
 
     Returns:
         A :class:`schema.delta.DeltaRoot` instances representing
@@ -203,7 +214,10 @@ def delta_schemas(
             result.add(create)
 
     objects = sd.DeltaRoot(canonical=True)
-    context = so.ComparisonContext()
+    context = so.ComparisonContext(
+        generate_prompts=generate_prompts,
+        guidance=guidance,
+    )
 
     schemaclasses = [
         schemacls
@@ -257,6 +271,7 @@ def delta_schemas(
             sd.delta_objects(
                 old,
                 new,
+                sclass=sclass,
                 old_schema=schema_a,
                 new_schema=schema_b,
                 context=context,
@@ -423,10 +438,17 @@ def delta_from_ddl(
     schema_object_ids: Optional[
         Mapping[Tuple[str, Optional[str]], uuid.UUID]
     ]=None,
+    compat_ver: verutils.Version = None,
 ) -> sd.DeltaRoot:
-    _, cmd = _delta_from_ddl(ddl_stmt, schema=schema, modaliases=modaliases,
-                             stdmode=stdmode, testmode=testmode,
-                             schema_object_ids=schema_object_ids)
+    _, cmd = _delta_from_ddl(
+        ddl_stmt,
+        schema=schema,
+        modaliases=modaliases,
+        stdmode=stdmode,
+        testmode=testmode,
+        schema_object_ids=schema_object_ids,
+        compat_ver=compat_ver,
+    )
     return cmd
 
 
@@ -440,6 +462,7 @@ def _delta_from_ddl(
     schema_object_ids: Optional[
         Mapping[Tuple[str, Optional[str]], uuid.UUID]
     ]=None,
+    compat_ver: verutils.Version = None,
 ) -> Tuple[s_schema.Schema, sd.DeltaRoot]:
     delta = sd.DeltaRoot()
     context = sd.CommandContext(
@@ -448,6 +471,7 @@ def _delta_from_ddl(
         stdmode=stdmode,
         testmode=testmode,
         schema_object_ids=schema_object_ids,
+        compat_ver=compat_ver,
     )
 
     with context(sd.DeltaRootContext(schema=schema, op=delta)):

@@ -205,6 +205,12 @@ class RelRangeVar(PathRangeVar):
         else:
             return self.relation
 
+    def __repr__(self) -> str:
+        return (
+            f'<pg.{self.__class__.__name__} '
+            f'name={self.relation.name!r} at {id(self):#x}>'
+        )
+
 
 class IntersectionRangeVar(PathRangeVar):
 
@@ -812,3 +818,10 @@ class Set(ImmutableBaseExpr):
 
     name: str
     value: BaseExpr
+
+
+class IteratorCTE(ImmutableBase):
+    path_id: irast.PathId
+    cte: CommonTableExpr
+    parent: typing.Optional[IteratorCTE]
+    is_dml_pseudo_iterator: bool = False

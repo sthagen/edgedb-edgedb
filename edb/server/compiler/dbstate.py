@@ -29,8 +29,12 @@ import immutables
 from edb import errors
 
 from edb.edgeql import ast as qlast
+
 from edb.schema import delta as s_delta
+from edb.schema import migrations as s_migrations
+from edb.schema import objects as s_obj
 from edb.schema import schema as s_schema
+
 from edb.server import config
 
 from . import enums
@@ -55,6 +59,7 @@ class MigrationAction(enum.IntEnum):
     DESCRIBE = 3
     ABORT = 4
     COMMIT = 5
+    REJECT_PROPOSED = 6
 
 
 @dataclasses.dataclass(frozen=True)
@@ -218,9 +223,11 @@ class QueryUnit:
 
 class MigrationState(NamedTuple):
 
+    parent_migration: Optional[s_migrations.Migration]
     initial_schema: s_schema.Schema
     initial_savepoint: Optional[str]
     target_schema: s_schema.Schema
+    guidance: s_obj.DeltaGuidance
     current_ddl: Tuple[qlast.DDLOperation, ...]
     auto_diff: Optional[s_delta.DeltaRoot] = None
 
@@ -312,6 +319,7 @@ class Transaction:
                 modaliases=self.get_modaliases(),
                 config=self.get_session_config(),
                 cached_reflection=self.get_cached_reflection(),
+                migration_state=self.get_migration_state(),
             ),
         )
 
@@ -324,6 +332,7 @@ class Transaction:
                 modaliases=self.get_modaliases(),
                 config=self.get_session_config(),
                 cached_reflection=self.get_cached_reflection(),
+                migration_state=self.get_migration_state(),
             ),
         )
 
