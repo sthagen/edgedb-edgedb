@@ -23,39 +23,43 @@ from typing import *
 from edb.common import enum as s_enum
 
 
+if TYPE_CHECKING:
+    T = TypeVar("T", covariant=True)
+
+
 class ParameterKind(s_enum.StrEnum):
-    VARIADIC = 'VARIADIC'
-    NAMED_ONLY = 'NAMED ONLY'
-    POSITIONAL = 'POSITIONAL'
+    VariadicParam = 'VariadicParam'
+    NamedOnlyParam = 'NamedOnlyParam'
+    PositionalParam = 'PositionalParam'
 
     def to_edgeql(self) -> str:
-        if self is ParameterKind.VARIADIC:
+        if self is ParameterKind.VariadicParam:
             return 'VARIADIC'
-        elif self is ParameterKind.NAMED_ONLY:
+        elif self is ParameterKind.NamedOnlyParam:
             return 'NAMED ONLY'
         else:
             return ''
 
 
 class TypeModifier(s_enum.StrEnum):
-    SET_OF = 'SET OF'
-    OPTIONAL = 'OPTIONAL'
-    SINGLETON = 'SINGLETON'
+    SetOfType = 'SetOfType'
+    OptionalType = 'OptionalType'
+    SingletonType = 'SingletonType'
 
     def to_edgeql(self) -> str:
-        if self is TypeModifier.SET_OF:
+        if self is TypeModifier.SetOfType:
             return 'SET OF'
-        elif self is TypeModifier.OPTIONAL:
+        elif self is TypeModifier.OptionalType:
             return 'OPTIONAL'
         else:
             return ''
 
 
 class OperatorKind(s_enum.StrEnum):
-    INFIX = 'INFIX'
-    POSTFIX = 'POSTFIX'
-    PREFIX = 'PREFIX'
-    TERNARY = 'TERNARY'
+    Infix = 'Infix'
+    Postfix = 'Postfix'
+    Prefix = 'Prefix'
+    Ternary = 'Ternary'
 
 
 class TransactionIsolationLevel(s_enum.StrEnum):
@@ -75,11 +79,11 @@ class TransactionDeferMode(s_enum.StrEnum):
 
 class SchemaCardinality(s_enum.StrEnum):
     '''This enum is used to store cardinality in the schema.'''
-    ONE = 'ONE'
-    MANY = 'MANY'
+    One = 'One'
+    Many = 'Many'
 
     def as_ptr_qual(self) -> str:
-        if self is SchemaCardinality.ONE:
+        if self is SchemaCardinality.One:
             return 'single'
         else:
             return 'multi'
@@ -117,23 +121,29 @@ class Cardinality(s_enum.StrEnum):
 
 
 _CARD_TO_TUPLE = {
-    Cardinality.AT_MOST_ONE: (False, SchemaCardinality.ONE),
-    Cardinality.ONE: (True, SchemaCardinality.ONE),
-    Cardinality.MANY: (False, SchemaCardinality.MANY),
-    Cardinality.AT_LEAST_ONE: (True, SchemaCardinality.MANY),
+    Cardinality.AT_MOST_ONE: (False, SchemaCardinality.One),
+    Cardinality.ONE: (True, SchemaCardinality.One),
+    Cardinality.MANY: (False, SchemaCardinality.Many),
+    Cardinality.AT_LEAST_ONE: (True, SchemaCardinality.Many),
 }
 _TUPLE_TO_CARD = {
-    (False, SchemaCardinality.ONE): Cardinality.AT_MOST_ONE,
-    (True, SchemaCardinality.ONE): Cardinality.ONE,
-    (False, SchemaCardinality.MANY): Cardinality.MANY,
-    (True, SchemaCardinality.MANY): Cardinality.AT_LEAST_ONE,
+    (False, SchemaCardinality.One): Cardinality.AT_MOST_ONE,
+    (True, SchemaCardinality.One): Cardinality.ONE,
+    (False, SchemaCardinality.Many): Cardinality.MANY,
+    (True, SchemaCardinality.Many): Cardinality.AT_LEAST_ONE,
 }
 
 
 class Volatility(s_enum.StrEnum):
-    IMMUTABLE = 'IMMUTABLE'
-    STABLE = 'STABLE'
-    VOLATILE = 'VOLATILE'
+    Immutable = 'Immutable'
+    Stable = 'Stable'
+    Volatile = 'Volatile'
+
+    @classmethod
+    def _missing_(cls, name):
+        # We want both `volatility := 'immutable'` in SDL and
+        # `SET volatility := 'IMMUTABLE`` in DDL to work.
+        return cls(name.title())
 
 
 class DescribeLanguage(s_enum.StrEnum):
@@ -157,6 +167,7 @@ class SchemaObjectClass(s_enum.StrEnum):
     MIGRATION = 'MIGRATION'
     MODULE = 'MODULE'
     OPERATOR = 'OPERATOR'
+    PARAMETER = 'PARAMETER'
     PROPERTY = 'PROPERTY'
     ROLE = 'ROLE'
     SCALAR_TYPE = 'SCALAR TYPE'
@@ -165,7 +176,32 @@ class SchemaObjectClass(s_enum.StrEnum):
 
 
 class LinkTargetDeleteAction(s_enum.StrEnum):
-    RESTRICT = 'RESTRICT'
-    DELETE_SOURCE = 'DELETE SOURCE'
-    ALLOW = 'ALLOW'
-    DEFERRED_RESTRICT = 'DEFERRED RESTRICT'
+    Restrict = 'Restrict'
+    DeleteSource = 'DeleteSource'
+    Allow = 'Allow'
+    DeferredRestrict = 'DeferredRestrict'
+
+    def to_edgeql(self) -> str:
+        if self is LinkTargetDeleteAction.DeleteSource:
+            return 'DELETE SOURCE'
+        elif self is LinkTargetDeleteAction.DeferredRestrict:
+            return 'DEFERRED RESTRICT'
+        elif self is LinkTargetDeleteAction.Restrict:
+            return 'RESTRICT'
+        elif self is LinkTargetDeleteAction.Allow:
+            return 'ALLOW'
+        else:
+            raise ValueError(f'unsupported enum value {self!r}')
+
+
+class ConfigScope(s_enum.StrEnum):
+
+    SYSTEM = 'SYSTEM'
+    DATABASE = 'DATABASE'
+    SESSION = 'SESSION'
+
+    def to_edgeql(self) -> str:
+        if self is ConfigScope.DATABASE:
+            return 'CURRENT DATABASE'
+        else:
+            return str(self)

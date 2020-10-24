@@ -18,6 +18,7 @@
 
 
 import binascii
+import functools
 import os
 import os.path
 import pathlib
@@ -63,7 +64,7 @@ RUNTIME_DEPS = [
     'edgedb>=0.9.0a1',
 ]
 
-CYTHON_DEPENDENCY = 'Cython==0.29.14'
+CYTHON_DEPENDENCY = 'Cython==0.29.21'
 
 DOCS_DEPS = [
     'Sphinx~=2.3.1',
@@ -87,7 +88,7 @@ EXTRA_DEPS = {
         'black~=19.10b0',
         'flake8~=3.8.1',
         'flake8-bugbear~=20.1.4',
-        'mypy==0.782',
+        'mypy==0.790',
         'coverage~=5.2.1',
         'requests-xml~=0.2.3',
         'lxml',
@@ -539,7 +540,11 @@ else:
 
 def custom_scm_version():
     from edb.server import buildmeta
-    return {'version_scheme': buildmeta.scm_version_scheme}
+    return {
+        'version_scheme': (
+            functools.partial(buildmeta.scm_version_scheme, ROOT_PATH)
+        ),
+    }
 
 
 setuptools.setup(

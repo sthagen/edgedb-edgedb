@@ -63,10 +63,8 @@ from edb.schema import schema as s_schema
 from edb.schema import types as s_types
 from edb.schema import utils as s_utils
 
-from edb.pgsql import ast as pg_ast
 from edb.pgsql import delta as pg_delta
 from edb.pgsql import dbops as pg_dbops
-from edb.pgsql import codegen as pg_codegen
 from edb.pgsql import common as pg_common
 from edb.pgsql import types as pg_types
 
@@ -109,6 +107,8 @@ class CompileContext:
     first_extracted_var: Optional[int] = None
     backend_instance_params: BackendInstanceParams = BackendInstanceParams()
     compat_ver: Optional[verutils.Version] = None
+    bootstrap_mode: bool = False
+    internal_schema_mode: bool = False
 
 
 EMPTY_MAP = immutables.Map()
@@ -149,14 +149,12 @@ def new_compiler(
     std_schema: s_schema.Schema,
     reflection_schema: s_schema.Schema,
     schema_class_layout: Dict[Type[s_obj.Object], s_refl.SchemaTypeLayout],
-    bootstrap_mode: bool = False,
 ) -> Compiler:
     """Create and return an ad-hoc compiler instance."""
 
     compiler = Compiler(None)
     compiler._std_schema = std_schema
     compiler._refl_schema = reflection_schema
-    compiler._bootstrap_mode = bootstrap_mode
     compiler._schema_class_layout = schema_class_layout
 
     return compiler
@@ -171,6 +169,8 @@ def new_compiler_context(
     json_parameters: bool = False,
     schema_reflection_mode: bool = False,
     output_format: enums.IoFormat = enums.IoFormat.BINARY,
+    bootstrap_mode: bool = False,
+    internal_schema_mode: bool = False,
 ) -> CompileContext:
     """Create and return an ad-hoc compiler context."""
 
@@ -189,6 +189,8 @@ def new_compiler_context(
         expected_cardinality_one=expected_cardinality_one,
         json_parameters=json_parameters,
         schema_reflection_mode=schema_reflection_mode,
+        bootstrap_mode=bootstrap_mode,
+        internal_schema_mode=internal_schema_mode,
         stmt_mode=(
             enums.CompileStatementMode.SINGLE
             if single_statement else enums.CompileStatementMode.ALL
@@ -285,10 +287,14 @@ class BaseCompiler:
         connection: asyncpg.Connection,
     ) -> s_schema.Schema:
         data = await connection.fetch(self._intro_query)
-        return s_refl.parse_into(
-            schema=self._std_schema,
-            data=[r[0] for r in data],
-            schema_class_layout=self._schema_class_layout,
+        return s_schema.ChainedSchema(
+            self._std_schema,
+            s_refl.parse_into(
+                base_schema=self._std_schema,
+                schema=s_schema.FlatSchema(),
+                data=[r[0] for r in data],
+                schema_class_layout=self._schema_class_layout,
+            )
         )
 
     async def _load_reflection_cache(
@@ -375,22 +381,22 @@ class Compiler(BaseCompiler):
         )
 
         self._current_db_state = None
-        self._bootstrap_mode = False
 
     def _in_testmode(self, ctx: CompileContext):
         current_tx = ctx.state.current_tx()
         session_config = current_tx.get_session_config()
 
         return config.lookup(
-            config.get_settings(),
             '__internal_testmode',
             session_config,
-            allow_unrecognized=True)
+            allow_unrecognized=True,
+        )
 
     def _new_delta_context(self, ctx: CompileContext):
         context = s_delta.CommandContext()
         context.testmode = self._in_testmode(ctx)
-        context.stdmode = self._bootstrap_mode
+        context.stdmode = ctx.bootstrap_mode
+        context.internal_schema_mode = ctx.internal_schema_mode
         context.schema_object_ids = ctx.schema_object_ids
         context.compat_ver = ctx.compat_ver
         context.backend_superuser_role = (
@@ -442,9 +448,6 @@ class Compiler(BaseCompiler):
         ctx: CompileContext,
         delta: s_delta.Command,
         block: pg_dbops.SQLBlock,
-        *,
-        is_internal_reflection: bool = False,
-        stdmode: bool = False,
     ):
 
         current_tx = ctx.state.current_tx()
@@ -458,8 +461,8 @@ class Compiler(BaseCompiler):
             schema=schema,
             context=s_delta.CommandContext(),
             blocks=meta_blocks,
-            is_internal_reflection=is_internal_reflection,
-            stdmode=stdmode,
+            internal_schema_mode=ctx.internal_schema_mode,
+            stdmode=ctx.bootstrap_mode,
         )
 
         cache = current_tx.get_cached_reflection()
@@ -516,6 +519,7 @@ class Compiler(BaseCompiler):
                 schema_reflection_mode=True,
                 output_format=enums.IoFormat.JSON,
                 expected_cardinality_one=False,
+                bootstrap_mode=ctx.bootstrap_mode,
             )
 
             return self._compile_ql_script(newctx, eql)
@@ -580,10 +584,10 @@ class Compiler(BaseCompiler):
         )
 
         disable_constant_folding = config.lookup(
-            config.get_settings(),
             '__internal_no_const_folding',
             session_config,
-            allow_unrecognized=True)
+            allow_unrecognized=True,
+        )
 
         # the capability to execute transaction or session control
         # commands indicates that session mode is available
@@ -601,7 +605,10 @@ class Compiler(BaseCompiler):
                 implicit_limit=ctx.implicit_limit,
                 session_mode=session_mode,
                 allow_writing_protected_pointers=ctx.schema_reflection_mode,
-                introspection_schema_rewrites=not ctx.schema_reflection_mode,
+                apply_query_rewrites=(
+                    not ctx.bootstrap_mode
+                    and not ctx.schema_reflection_mode
+                ),
             ),
         )
 
@@ -879,7 +886,10 @@ class Compiler(BaseCompiler):
                 confirmed = []
                 for stmt in mstate.current_ddl:
                     confirmed.append(
-                        qlcodegen.generate_source(stmt, pretty=True),
+                        # Add a terminating semicolon to match
+                        # "proposed", which is created by
+                        # s_ddl.statements_from_delta.
+                        qlcodegen.generate_source(stmt, pretty=True) + ';',
                     )
 
                 guided_diff = s_ddl.delta_schemas(
@@ -956,42 +966,47 @@ class Compiler(BaseCompiler):
                 generate_prompts=True,
                 guidance=mstate.guidance,
             )
-            top_command = next(iter(diff.get_subcommands()))
 
-            if (orig_cmdclass := top_command.get_annotation('orig_cmdclass')):
-                top_cmdclass = orig_cmdclass
+            try:
+                top_command = next(iter(diff.get_subcommands()))
+            except StopIteration:
+                new_guidance = mstate.guidance
             else:
-                top_cmdclass = type(top_command)
+                if (orig_cmdclass :=
+                        top_command.get_annotation('orig_cmdclass')):
+                    top_cmdclass = orig_cmdclass
+                else:
+                    top_cmdclass = type(top_command)
 
-            if issubclass(top_cmdclass, s_delta.AlterObject):
-                new_guidance = mstate.guidance._replace(
-                    banned_alters=mstate.guidance.banned_alters | {(
-                        top_command.get_schema_metaclass(),
-                        (
+                if issubclass(top_cmdclass, s_delta.AlterObject):
+                    new_guidance = mstate.guidance._replace(
+                        banned_alters=mstate.guidance.banned_alters | {(
+                            top_command.get_schema_metaclass(),
+                            (
+                                top_command.classname,
+                                top_command.get_annotation('new_name'),
+                            ),
+                        )}
+                    )
+                elif issubclass(top_cmdclass, s_delta.CreateObject):
+                    new_guidance = mstate.guidance._replace(
+                        banned_creations=mstate.guidance.banned_creations | {(
+                            top_command.get_schema_metaclass(),
                             top_command.classname,
-                            top_command.get_annotation('new_name'),
-                        ),
-                    )}
-                )
-            elif issubclass(top_cmdclass, s_delta.CreateObject):
-                new_guidance = mstate.guidance._replace(
-                    banned_creations=mstate.guidance.banned_creations | {(
-                        top_command.get_schema_metaclass(),
-                        top_command.classname,
-                    )}
-                )
-            elif issubclass(top_cmdclass, s_delta.DeleteObject):
-                new_guidance = mstate.guidance._replace(
-                    banned_deletions=mstate.guidance.banned_deletions | {(
-                        top_command.get_schema_metaclass(),
-                        top_command.classname,
-                    )}
-                )
-            else:
-                raise AssertionError(
-                    f'unexpected top-level command in '
-                    f'delta diff: {top_cmdclass!r}',
-                )
+                        )}
+                    )
+                elif issubclass(top_cmdclass, s_delta.DeleteObject):
+                    new_guidance = mstate.guidance._replace(
+                        banned_deletions=mstate.guidance.banned_deletions | {(
+                            top_command.get_schema_metaclass(),
+                            top_command.classname,
+                        )}
+                    )
+                else:
+                    raise AssertionError(
+                        f'unexpected top-level command in '
+                        f'delta diff: {top_cmdclass!r}',
+                    )
 
             mstate = mstate._replace(guidance=new_guidance)
             current_tx.update_migration_state(mstate)
@@ -1137,7 +1152,7 @@ class Compiler(BaseCompiler):
             tx = ctx.state.current_tx()
             sp_id = tx.declare_savepoint(ql.name)
 
-            if not self._bootstrap_mode:
+            if not ctx.bootstrap_mode:
                 pgname = pg_common.quote_ident(ql.name)
                 sql = (
                     f'''
@@ -1215,21 +1230,21 @@ class Compiler(BaseCompiler):
 
             aliases = aliases.set(ql.alias, ql.module)
 
-            if not self._bootstrap_mode:
+            if not ctx.bootstrap_mode:
                 sql = alias_tpl(ql.alias, ql.module)
                 sqlbuf.append(sql)
 
         elif isinstance(ql, qlast.SessionResetModule):
             aliases = aliases.set(None, defines.DEFAULT_MODULE_ALIAS)
 
-            if not self._bootstrap_mode:
+            if not ctx.bootstrap_mode:
                 sql = alias_tpl('', defines.DEFAULT_MODULE_ALIAS)
                 sqlbuf.append(sql)
 
         elif isinstance(ql, qlast.SessionResetAllAliases):
             aliases = DEFAULT_MODULE_ALIASES_MAP
 
-            if not self._bootstrap_mode:
+            if not ctx.bootstrap_mode:
                 sqlbuf.append(
                     b"DELETE FROM _edgecon_state s WHERE s.type = 'A';")
                 sqlbuf.append(
@@ -1238,7 +1253,7 @@ class Compiler(BaseCompiler):
         elif isinstance(ql, qlast.SessionResetAliasDecl):
             aliases = aliases.delete(ql.alias)
 
-            if not self._bootstrap_mode:
+            if not ctx.bootstrap_mode:
                 sql = f'''
                     DELETE FROM _edgecon_state s
                     WHERE s.name = {pg_ql(ql.alias)} AND s.type = 'A';
@@ -1272,10 +1287,12 @@ class Compiler(BaseCompiler):
         modaliases = ctx.state.current_tx().get_modaliases()
         session_config = ctx.state.current_tx().get_session_config()
 
-        if ql.system and not current_tx.is_implicit():
+        if (
+            ql.scope is qltypes.ConfigScope.SYSTEM
+            and not current_tx.is_implicit()
+        ):
             raise errors.QueryError(
-                'CONFIGURE SYSTEM cannot be executed in a '
-                'transaction block')
+                'CONFIGURE SYSTEM cannot be executed in a transaction block')
 
         ir = qlcompiler.compile_ast_to_ir(
             ql,
@@ -1288,46 +1305,25 @@ class Compiler(BaseCompiler):
         is_backend_setting = bool(getattr(ir, 'backend_setting', None))
         requires_restart = bool(getattr(ir, 'requires_restart', False))
 
-        if is_backend_setting:
-            if isinstance(ql, qlast.ConfigReset):
-                val = None
-            else:
-                # Postgres is fine with all setting types to be passed
-                # as strings.
-                value = ireval.evaluate_to_python_val(ir.expr, schema=schema)
-                val = pg_ast.StringConstant(val=str(value))
+        sql_text, _ = pg_compiler.compile_ir_to_sql(
+            ir,
+            pretty=debug.flags.edgeql_compile,
+        )
 
-            if ir.system:
-                sql_ast = pg_ast.AlterSystem(
-                    name=ir.backend_setting,
-                    value=val,
-                )
-            else:
-                sql_ast = pg_ast.Set(
-                    name=ir.backend_setting,
-                    value=val,
-                )
+        sql = (sql_text.encode(),)
 
-            sql_text = pg_codegen.generate_source(sql_ast) + ';'
-
-            sql = (sql_text.encode(),)
-
-        else:
-            sql_text, _ = pg_compiler.compile_ir_to_sql(
-                ir,
-                pretty=debug.flags.edgeql_compile,
-                output_format=pg_compiler.OutputFormat.JSONB)
-
-            sql = (sql_text.encode(),)
-
-        if not ql.system:
+        if ql.scope is qltypes.ConfigScope.SESSION:
             config_op = ireval.evaluate_to_config_op(ir, schema=schema)
 
             session_config = config_op.apply(
                 config.get_settings(),
                 session_config)
             ctx.state.current_tx().update_session_config(session_config)
-        else:
+
+        elif ql.scope is qltypes.ConfigScope.DATABASE:
+            config_op = ireval.evaluate_to_config_op(ir, schema=schema)
+
+        elif ql.scope is qltypes.ConfigScope.SYSTEM:
             try:
                 config_op = ireval.evaluate_to_config_op(ir, schema=schema)
             except ireval.UnsupportedExpressionError:
@@ -1335,10 +1331,13 @@ class Compiler(BaseCompiler):
                 # op will be produced by the compiler as json.
                 config_op = None
 
+        else:
+            raise AssertionError(f'unexpected configuration scope: {ql.scope}')
+
         return dbstate.SessionStateQuery(
             sql=sql,
             is_backend_setting=is_backend_setting,
-            is_system_setting=ql.system,
+            config_scope=ql.scope,
             requires_restart=requires_restart,
             config_op=config_op,
         )
@@ -1528,7 +1527,7 @@ class Compiler(BaseCompiler):
             elif isinstance(comp, dbstate.SessionStateQuery):
                 unit.sql += comp.sql
 
-                if comp.is_system_setting:
+                if comp.config_scope is qltypes.ConfigScope.SYSTEM:
                     if (not ctx.state.current_tx().is_implicit() or
                             statements_len > 1):
                         raise errors.QueryError(
@@ -1536,6 +1535,8 @@ class Compiler(BaseCompiler):
                             'transaction block')
 
                     unit.system_config = True
+                elif comp.config_scope is qltypes.ConfigScope.DATABASE:
+                    unit.database_config = True
 
                 if comp.is_backend_setting:
                     unit.backend_config = True
@@ -1590,8 +1591,12 @@ class Compiler(BaseCompiler):
         return units
 
     async def _ctx_new_con_state(
-        self, *, dbver: bytes, io_format: enums.IoFormat, expect_one: bool,
-        modaliases,
+        self,
+        *,
+        dbver: bytes,
+        io_format: enums.IoFormat,
+        expect_one: bool,
+        modaliases: Mapping[Optional[str], str],
         session_config: Optional[immutables.Map],
         stmt_mode: Optional[enums.CompileStatementMode],
         capability: enums.Capability,
@@ -2060,21 +2065,30 @@ class Compiler(BaseCompiler):
         tables = []
         for schema_object_id, typedesc in blocks:
             schema_object_id = uuidgen.from_bytes(schema_object_id)
-            obj = schema._id_to_type.get(schema_object_id)
+            obj = schema.get_by_id(schema_object_id)
             desc = sertypes.TypeSerializer.parse(typedesc)
 
             if isinstance(obj, s_props.Property):
                 assert isinstance(desc, sertypes.NamedTupleDesc)
-                desc_cols = list(desc.fields.keys())
-                if set(desc_cols) != {'source', 'target', 'ptr_item_id'}:
+                desc_ptrs = list(desc.fields.keys())
+                if set(desc_ptrs) != {'source', 'target', 'ptr_item_id'}:
                     raise RuntimeError(
                         'Property table dump data has extra fields')
+                cols = {
+                    'source': 'source',
+                    'target': 'target',
+                    'ptr_item_id': 'ptr_item_id',
+                }
 
             elif isinstance(obj, s_links.Link):
                 assert isinstance(desc, sertypes.NamedTupleDesc)
-                desc_cols = list(desc.fields.keys())
+                desc_ptrs = list(desc.fields.keys())
+                cols = {
+                    'source': 'source',
+                    'target': 'target',
+                    'ptr_item_id': 'ptr_item_id',
+                }
 
-                cols = ['source', 'target', 'ptr_item_id']
                 for ptr in obj.get_pointers(schema).objects(schema):
                     if ptr.is_endpoint_pointer(schema):
                         continue
@@ -2085,17 +2099,18 @@ class Compiler(BaseCompiler):
                         link_bias=True,
                     )
 
-                    cols.append(stor_info.column_name)
+                    ptr_name = ptr.get_shortname(schema).name
+                    cols[ptr_name] = stor_info.column_name
 
-                if set(desc_cols) != set(cols):
+                if set(desc_ptrs) != set(cols):
                     raise RuntimeError(
                         'Link table dump data has extra fields')
 
             elif isinstance(obj, s_objtypes.ObjectType):
                 assert isinstance(desc, sertypes.ShapeDesc)
-                desc_cols = list(desc.fields.keys())
+                desc_ptrs = list(desc.fields.keys())
 
-                cols = []
+                cols = {}
                 for ptr in obj.get_pointers(schema).objects(schema):
                     if ptr.is_endpoint_pointer(schema):
                         continue
@@ -2107,9 +2122,10 @@ class Compiler(BaseCompiler):
                     )
 
                     if stor_info.table_type == 'ObjectType':
-                        cols.append(stor_info.column_name)
+                        ptr_name = ptr.get_shortname(schema).name
+                        cols[ptr_name] = stor_info.column_name
 
-                if set(desc_cols) != set(cols):
+                if set(desc_ptrs) != set(cols):
                     raise RuntimeError(
                         'Object table dump data has extra fields')
 
@@ -2122,9 +2138,11 @@ class Compiler(BaseCompiler):
             table_name = pg_common.get_backend_name(
                 schema, obj, catenate=True)
 
+            col_list = (pg_common.quote_ident(cols[pn]) for pn in desc_ptrs)
+
             stmt = (
                 f'COPY {table_name} '
-                f'({", ".join(pg_common.quote_ident(c) for c in desc_cols)}) '
+                f'({", ".join(col_list)})'
                 f'FROM STDIN WITH BINARY'
             ).encode()
 

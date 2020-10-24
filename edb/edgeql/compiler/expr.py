@@ -59,8 +59,7 @@ def compile__Optional(
         dispatch.compile(expr.expr, ctx=ctx),
         ctx=ctx)
 
-    pathctx.register_set_in_scope(result, ctx=ctx)
-    pathctx.mark_path_as_optional(result.path_id, ctx=ctx)
+    pathctx.register_set_in_scope(result, optional=True, ctx=ctx)
 
     return result
 
@@ -145,17 +144,16 @@ def compile_Set(
             # a set literal is just sugar for a UNION
             op = 'UNION'
 
+            # Turn it into a tree of UNIONs so we only blow up the nesting
+            # depth logarithmically.
+            # TODO: Introduce an N-ary operation that handles the whole thing?
+            mid = len(elements) // 2
+            ls, rs = elements[:mid], elements[mid:]
             bigunion = qlast.BinOp(
-                left=elements[0],
-                right=elements[1],
+                left=qlast.Set(elements=ls) if len(ls) > 1 else ls[0],
+                right=qlast.Set(elements=rs) if len(rs) > 1 else rs[0],
                 op=op
             )
-            for el in elements[2:]:
-                bigunion = qlast.BinOp(
-                    left=bigunion,
-                    right=el,
-                    op=op
-                )
             return dispatch.compile(bigunion, ctx=ctx)
     else:
         return setgen.new_empty_set(
@@ -230,7 +228,7 @@ def try_fold_binop(
                               ctx.env.schema.get('std::anyreal'))
 
         if (opcall.func_shortname in ('std::+', 'std::*') and
-                opcall.operator_kind is ft.OperatorKind.INFIX and
+                opcall.operator_kind is ft.OperatorKind.Infix and
                 all(setgen.get_set_type(a.expr, ctx=ctx).issubclass(
                     ctx.env.schema, anyreal)
                     for a in opcall.args)):
@@ -259,7 +257,7 @@ def try_fold_associative_binop(
     if (isinstance(my_const.expr, irast.BaseConstant) and
             isinstance(other_binop.expr, irast.OperatorCall) and
             other_binop.expr.func_shortname == op and
-            other_binop.expr.operator_kind is ft.OperatorKind.INFIX):
+            other_binop.expr.operator_kind is ft.OperatorKind.Infix):
 
         other_const = other_binop.expr.args[0].expr
         other_binop_node = other_binop.expr.args[1].expr
@@ -600,7 +598,7 @@ def compile_type_check_op(
 
     if ltype.is_object_type():
         left = setgen.ptr_step_set(
-            left, source=ltype, ptr_name='__type__',
+            left, expr=None, source=ltype, ptr_name='__type__',
             source_context=expr.context, ctx=ctx)
         pathctx.register_set_in_scope(left, ctx=ctx)
         result = None

@@ -174,6 +174,8 @@ class CommonTableExpr(Base):
     query: Query
     # True if this CTE is recursive
     recursive: bool
+    # If specified, determines if CTE is [NOT] MATERIALIZED
+    materialized: typing.Optional[bool]
 
     def __repr__(self):
         return (
@@ -817,6 +819,13 @@ class AlterSystem(ImmutableBaseExpr):
 class Set(ImmutableBaseExpr):
 
     name: str
+    value: BaseExpr
+
+
+class ConfigureDatabase(ImmutableBase):
+
+    database_name: str
+    parameter_name: str
     value: BaseExpr
 
 

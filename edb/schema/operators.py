@@ -47,19 +47,19 @@ class Operator(s_func.CallableObject, s_func.VolatilitySubject,
 
     from_operator = so.SchemaField(
         checked.CheckedList[str], coerce=True,
-        default=None, compcoef=0.4, introspectable=False)
+        default=None, compcoef=0.4)
 
     from_function = so.SchemaField(
-        str, default=None, compcoef=0.4, introspectable=False)
+        str, default=None, compcoef=0.4)
 
     from_expr = so.SchemaField(
-        bool, default=False, compcoef=0.4, introspectable=False)
+        bool, default=False, compcoef=0.4)
 
     force_return_cast = so.SchemaField(
-        bool, default=False, compcoef=0.9, introspectable=False)
+        bool, default=False, compcoef=0.9)
 
     code = so.SchemaField(
-        str, default=None, compcoef=0.4, introspectable=False)
+        str, default=None, compcoef=0.4)
 
     # If this is a derivative operator, *derivative_of* would
     # contain the name of the origin operator.
@@ -75,7 +75,7 @@ class Operator(s_func.CallableObject, s_func.VolatilitySubject,
         sn.Name, coerce=True, default=None, compcoef=0.99)
 
     recursive = so.SchemaField(
-        bool, default=False, compcoef=0.4, introspectable=False)
+        bool, default=False, compcoef=0.4)
 
     def get_display_signature(self, schema: s_schema.Schema) -> str:
         params = [
@@ -84,13 +84,13 @@ class Operator(s_func.CallableObject, s_func.VolatilitySubject,
         ]
         name = self.get_shortname(schema).name
         kind = self.get_operator_kind(schema)
-        if kind is ft.OperatorKind.INFIX:
+        if kind is ft.OperatorKind.Infix:
             return f'{params[0]} {name} {params[1]}'
-        elif kind is ft.OperatorKind.POSTFIX:
+        elif kind is ft.OperatorKind.Postfix:
             return f'{params[0]} {name}'
-        elif kind is ft.OperatorKind.PREFIX:
+        elif kind is ft.OperatorKind.Prefix:
             return f'{name} {params[1]}'
-        elif kind is ft.OperatorKind.TERNARY:
+        elif kind is ft.OperatorKind.Ternary:
             return f'{name} ({", ".join(params)})'
         else:
             raise ValueError('unexpected operator kind')
@@ -206,7 +206,7 @@ class CreateOperator(
                 context=self.source_context)
 
         for oper in schema.get_operators(shortname, ()):
-            if oper is self.scls:
+            if oper == self.scls:
                 continue
 
             oper_return_typemod = oper.get_return_typemod(schema)

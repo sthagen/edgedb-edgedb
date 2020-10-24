@@ -25,23 +25,23 @@ import collections
 
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
+from edb.edgeql import parser as qlparser
 
 from . import abc as s_abc
 from . import annos as s_anno
 from . import constraints
 from . import delta as sd
+from . import expr as s_expr
 from . import inheriting
 from . import links
 from . import lproperties
 from . import name as sn
 from . import objects as so
 from . import pointers
+from . import schema as s_schema
 from . import sources
 from . import types as s_types
 from . import utils
-
-if TYPE_CHECKING:
-    from . import schema as s_schema
 
 
 class ObjectType(
@@ -70,11 +70,30 @@ class ObjectType(
     is_opaque_union = so.SchemaField(
         bool,
         default=False,
-        introspectable=False)
+    )
 
     @classmethod
     def get_schema_class_displayname(cls) -> str:
         return 'object type'
+
+    def get_access_policy_filters(
+        self,
+        schema: s_schema.Schema,
+    ) -> Optional[s_expr.ExpressionList]:
+        if (
+            self.get_name(schema).module == 'schema'
+            and self.issubclass(schema,
+                                schema.get('schema::Object', type=ObjectType))
+        ):
+            return s_expr.ExpressionList([
+                s_expr.Expression.from_ast(
+                    qlparser.parse('NOT .internal'),
+                    schema=schema,
+                    modaliases={},
+                )
+            ])
+        else:
+            return None
 
     def is_object_type(self) -> bool:
         return True
@@ -113,7 +132,7 @@ class ObjectType(
                 return ' & '.join(
                     dn for dn in comp_dns if dn != 'std::BaseObject'
                 )
-            elif mtype is self:
+            elif mtype == self:
                 return super().get_displayname(schema)
             else:
                 return mtype.get_displayname(schema)
@@ -263,6 +282,7 @@ def get_or_create_union_type(
     type_id, name = s_types.get_union_type_id(
         schema,
         components,
+        opaque=opaque,
         module=module,
     )
 
@@ -280,6 +300,8 @@ def get_or_create_union_type(
                 id=type_id,
                 union_of=so.ObjectSet.create(schema, components),
                 is_opaque_union=opaque,
+                is_abstract=True,
+                is_final=True,
             ),
         )
 
@@ -321,6 +343,8 @@ def get_or_create_intersection_type(
             attrs=dict(
                 id=type_id,
                 intersection_of=so.ObjectSet.create(schema, components),
+                is_abstract=True,
+                is_final=True,
             ),
         )
 

@@ -1716,6 +1716,19 @@ class TestEdgeQLSelect(tb.QueryTestCase):
                 ''',
             )
 
+    async def test_edgeql_select_nested_redefined_link(self):
+        await self.assert_query_result(
+            '''
+                WITH MODULE test
+                SELECT (SELECT (SELECT Issue { watchers: {name} }).watchers);
+            ''',
+            [
+                {'name': 'Elvis'},
+                {'name': 'Yury'},
+            ],
+            sort=lambda x: x['name'],
+        )
+
     async def test_edgeql_select_tvariant_01(self):
         await self.assert_query_result(
             r'''
@@ -2697,7 +2710,7 @@ class TestEdgeQLSelect(tb.QueryTestCase):
             [{'params': [
                 {
                     'num': 0,
-                    'kind': 'VARIADIC',
+                    'kind': 'VariadicParam',
                     'type': {
                         'name': 'array<anytype>'
                     }
@@ -2764,28 +2777,28 @@ class TestEdgeQLSelect(tb.QueryTestCase):
                     {
                         'num': 0,
                         'name': 'sep',
-                        'kind': 'POSITIONAL',
+                        'kind': 'PositionalParam',
                         'type': {
                             'name': 'std::str',
                             'element_type': None
                         },
-                        'typemod': 'OPTIONAL'
+                        'typemod': 'OptionalType'
                     },
                     {
                         'num': 1,
                         'name': 's',
-                        'kind': 'VARIADIC',
+                        'kind': 'VariadicParam',
                         'type': {
                             'name': 'array<std::str>',
                             'element_type': {'name': 'std::str'}
                         },
-                        'typemod': 'SINGLETON'
+                        'typemod': 'SingletonType'
                     }
                 ],
                 'return_type': {
                     'name': 'std::str'
                 },
-                'return_typemod': 'SINGLETON'
+                'return_typemod': 'SingletonType'
             }]
         )
 
@@ -6003,5 +6016,35 @@ class TestEdgeQLSelect(tb.QueryTestCase):
                 SELECT User {
                     todo,
                     todo
+                }
+            """)
+
+    async def test_edgeql_select_big_set_literal(self):
+        res = await self.con.query("""
+            SELECT {
+                 (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,),
+                 (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,),
+                 (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,),
+                 (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,),
+                 (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,),
+                 (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,),
+                 (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,),
+                 (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,),
+                 (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,),
+                 (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,),
+            };
+        """)
+
+        assert len(res) == 100
+
+    async def test_edgeql_select_shape_on_scalar(self):
+        with self.assertRaisesRegex(
+            edgedb.QueryError,
+            "shapes cannot be applied to scalar type 'std::str'",
+        ):
+            await self.con.execute("""
+                WITH MODULE test
+                SELECT User {
+                    todo: { name: {bogus} }
                 }
             """)

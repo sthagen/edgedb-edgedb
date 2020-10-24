@@ -59,6 +59,7 @@ class Annotation(so.QualifiedObject,
 
 class AnnotationValue(
     referencing.ReferencedInheritingObject,
+    qlkind=qltypes.SchemaObjectClass.ANNOTATION,
     reflection=so.ReflectionMethod.AS_LINK,
     reflection_link='annotation',
 ):
@@ -199,6 +200,18 @@ class AnnotationValueCommand(
     referrer_context_class=AnnotationSubjectCommandContext,
 ):
 
+    def _deparse_name(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        name: str,
+    ) -> qlast.ObjectRef:
+        ref = super()._deparse_name(schema, context, name)
+        # Clear `itemclass`
+        ref.itemclass = None
+
+        return ref
+
     def add_annotation(self,
                        schema: s_schema.Schema,
                        annotation: AnnotationValue,
@@ -301,6 +314,7 @@ class CreateAnnotationValue(
             'is_final',
             not anno.get_inheritable(schema),
         )
+        self.set_attribute_value('internal', True)
         return schema
 
     def _apply_field_ast(self,

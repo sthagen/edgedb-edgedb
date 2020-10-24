@@ -66,16 +66,15 @@ def compile_ConfigSet(
     try:
         ireval.evaluate(param_val, schema=ctx.env.schema)
     except ireval.UnsupportedExpressionError as e:
-        level = 'SYSTEM' if expr.system else 'SESSION'
         raise errors.QueryError(
-            f'non-constant expression in CONFIGURE {level} SET',
+            f'non-constant expression in CONFIGURE {expr.scope} SET',
             context=expr.expr.context
         ) from e
 
     return irast.ConfigSet(
         name=info.param_name,
         cardinality=info.cardinality,
-        system=expr.system,
+        scope=expr.scope,
         requires_restart=info.requires_restart,
         backend_setting=info.backend_setting,
         context=expr.context,
@@ -121,7 +120,7 @@ def compile_ConfigReset(
     return irast.ConfigReset(
         name=info.param_name,
         cardinality=info.cardinality,
-        system=expr.system,
+        scope=expr.scope,
         requires_restart=info.requires_restart,
         backend_setting=info.backend_setting,
         context=expr.context,
@@ -135,14 +134,13 @@ def compile_ConfigInsert(
 
     info = _validate_op(expr, ctx=ctx)
 
-    if not expr.system:
+    if expr.scope is not qltypes.ConfigScope.SYSTEM:
         raise errors.UnsupportedFeatureError(
-            f'CONFIGURE SESSION INSERT is not supported'
+            f'CONFIGURE {expr.scope} INSERT is not supported'
         )
 
-    level = 'SYSTEM' if expr.system else 'SESSION'
     subject = ctx.env.get_track_schema_object(
-        f'cfg::{expr.name.name}', default=None)
+        f'cfg::{expr.name.name}', expr.name, default=None)
     if subject is None:
         raise errors.ConfigurationError(
             f'{expr.name.name!r} is not a valid configuration item',
@@ -175,13 +173,13 @@ def compile_ConfigInsert(
         assert isinstance(insert_ir_set.expr, irast.InsertStmt)
         insert_subject = insert_ir_set.expr.subject
 
-        _validate_config_object(insert_subject, level=level, ctx=subctx)
+        _validate_config_object(insert_subject, scope=expr.scope, ctx=subctx)
 
     return setgen.ensure_set(
         irast.ConfigInsert(
             name=info.param_name,
             cardinality=info.cardinality,
-            system=expr.system,
+            scope=expr.scope,
             requires_restart=info.requires_restart,
             backend_setting=info.backend_setting,
             expr=insert_subject,
@@ -220,7 +218,7 @@ def _inject_tname(
 
 def _validate_config_object(
         expr: irast.Set, *,
-        level: str,
+        scope: str,
         ctx: context.ContextLevel) -> None:
 
     for element, _ in expr.shape:
@@ -229,7 +227,7 @@ def _validate_config_object(
 
         if (irtyputils.is_object(element.typeref)
                 and isinstance(element.expr, irast.InsertStmt)):
-            _validate_config_object(element, level=level, ctx=ctx)
+            _validate_config_object(element, scope=scope, ctx=ctx)
 
 
 def _validate_op(
@@ -243,7 +241,7 @@ def _validate_op(
         )
 
     name = expr.name.name
-    cfg_host_type = ctx.env.get_track_schema_type('cfg::Config')
+    cfg_host_type = ctx.env.get_track_schema_type('cfg::AbstractConfig')
     assert isinstance(cfg_host_type, s_objtypes.ObjectType)
     cfg_type = None
 
@@ -283,8 +281,11 @@ def _validate_op(
                 ptr_candidate = pointer_link
                 break
 
-        if (ptr_candidate is None
-                or ptr_candidate.get_source(ctx.env.schema) != cfg_host_type):
+        if (
+            ptr_candidate is None
+            or (ptr_source := ptr_candidate.get_source(ctx.env.schema)) is None
+            or not ptr_source.issubclass(ctx.env.schema, cfg_host_type)
+        ):
             raise errors.ConfigurationError(
                 f'{name!r} cannot be configured directly'
             )
@@ -322,7 +323,7 @@ def _validate_op(
     else:
         backend_setting = None
 
-    if not expr.system and system:
+    if system and expr.scope is not qltypes.ConfigScope.SYSTEM:
         raise errors.ConfigurationError(
             f'{name!r} is a system-level configuration parameter; '
             f'use "CONFIGURE SYSTEM"')

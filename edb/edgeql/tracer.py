@@ -468,7 +468,7 @@ def trace_Path(
                             # Invalid pointer reference, bail.
                             return None
                         else:
-                            ptr_source = ptr.source
+                            ptr_source = ptr.get_source(ctx.schema)
 
                         if ptr_source is not None:
                             source_name = ptr_source.get_name(ctx.schema)
@@ -633,8 +633,9 @@ def trace_ShapeElement(node: qlast.ShapeElement, *,
     for element in node.elements:
         trace(element, ctx=ctx)
     trace(node.where, ctx=ctx)
-    for sortexpr in node.orderby:
-        trace(sortexpr, ctx=ctx)
+    if node.orderby:
+        for sortexpr in node.orderby:
+            trace(sortexpr, ctx=ctx)
     trace(node.offset, ctx=ctx)
     trace(node.limit, ctx=ctx)
     trace(node.compexpr, ctx=ctx)

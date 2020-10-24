@@ -1777,14 +1777,15 @@ class TestServerProto(tb.QueryTestCase):
 
     async def test_server_proto_tx_16(self):
         try:
-            for isol in ['', 'SERIALIZABLE', 'REPEATABLE READ']:
+            for isol, expected in [
+                ('', 'RepeatableRead'),
+                ('SERIALIZABLE', 'Serializable'),
+                ('REPEATABLE READ', 'RepeatableRead')
+            ]:
                 stmt = 'START TRANSACTION'
 
                 if isol:
                     stmt += f' ISOLATION {isol}'
-                    expected = isol
-                else:
-                    expected = 'REPEATABLE READ'
 
                 await self.con.execute(stmt)
                 result = await self.con.query_one(
@@ -1987,7 +1988,6 @@ class TestServerProtoDdlPropagation(tb.QueryTestCase):
                             user=conargs.get('user'),
                             password=conargs.get('password'),
                             database=self.get_database_name(),
-                            admin=True,
                         )
                     except (ConnectionError, edgedb.ClientConnectionError):
                         if attempt >= 100:

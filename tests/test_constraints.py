@@ -695,11 +695,11 @@ class TestConstraintsDDL(tb.NonIsolatedDDLTestCase):
                     "params": [
                         {
                             "num": 1,
-                            "kind": 'POSITIONAL',
+                            "kind": 'PositionalParam',
                             "name": 'max',
                             "type": {"name": 'std::int64'},
                             "@value": '3',
-                            "typemod": 'SINGLETON'
+                            "typemod": 'SingletonType'
                         }
                     ],
                 },
@@ -731,10 +731,10 @@ class TestConstraintsDDL(tb.NonIsolatedDDLTestCase):
                     "params": [
                         {
                             "num": 1,
-                            "kind": 'POSITIONAL',
+                            "kind": 'PositionalParam',
                             "name": 'max',
                             "type": {"name": 'std::int64'},
-                            "typemod": 'SINGLETON'
+                            "typemod": 'SingletonType'
                         }
                     ],
                 },
@@ -1222,4 +1222,25 @@ class TestConstraintsDDL(tb.NonIsolatedDDLTestCase):
                 await self.con.execute(r"""
                     INSERT Transaction {
                         credit := (nest := (amount := 1, currency := "usd")) };
+                """)
+
+    async def test_constraints_partial_path(self):
+        async with self._run_and_rollback():
+            await self.con.execute('''\
+                CREATE TYPE Vector {
+                    CREATE PROPERTY x -> float64;
+                    CREATE PROPERTY y -> float64;
+                    CREATE CONSTRAINT expression ON (
+                        .x^2 + .y^2 < 25
+                    );
+                };
+            ''')
+
+            await self.con.execute(r"""
+                INSERT Vector { x := 3, y := 3 };
+            """)
+
+            with self.assertRaises(edgedb.ConstraintViolationError):
+                await self.con.execute(r"""
+                    INSERT Vector { x := 4, y := 4 };
                 """)

@@ -95,9 +95,11 @@ class Property(pointers.Pointer, s_abc.Property,
         if (not self.generic(our_schema) and
                 not other.generic(their_schema) and
                 self.issubclass(
-                    our_schema, our_schema.get('std::source')) and
+                    our_schema,
+                    our_schema.get('std::source', type=Property)) and
                 other.issubclass(
-                    their_schema, their_schema.get('std::source'))):
+                    their_schema,
+                    their_schema.get('std::source', type=Property))):
             # Make std::source link property ignore differences in its target.
             # This is consistent with skipping the comparison on Pointer.source
             # in general.
@@ -208,7 +210,7 @@ class PropertyCommand(pointers.PointerCommand,
         schema: s_schema.Schema,
         astnode: qlast.CreateConcretePointer,
         context: sd.CommandContext,
-        target_ref: Union[so.Object, so.ObjectShell],
+        target_ref: Union[so.Object, so.ObjectShell, pointers.ComputableRef],
     ) -> None:
         assert astnode.target is not None
         spt = SetPropertyType(classname=self.classname, type=target_ref)
@@ -239,7 +241,7 @@ class PropertyCommand(pointers.PointerCommand,
                     context=self.source_context,
                 )
             if (self.get_attribute_value('cardinality')
-                    is qltypes.SchemaCardinality.MANY):
+                    is qltypes.SchemaCardinality.Many):
                 raise errors.InvalidPropertyDefinitionError(
                     "multi properties aren't supported for links",
                     context=self.source_context,
@@ -416,6 +418,13 @@ class AlterProperty(
             node.commands.append(
                 qlast.SetSpecialField(
                     name='required',
+                    value=op.new_value,
+                ),
+            )
+        elif op.property == 'cardinality':
+            node.commands.append(
+                qlast.SetSpecialField(
+                    name='cardinality',
                     value=op.new_value,
                 ),
             )

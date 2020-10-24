@@ -47,7 +47,7 @@ def write_meta(
     schema: s_schema.Schema,
     context: sd.CommandContext,
     blocks: List[Tuple[str, Dict[str, Any]]],
-    is_internal_reflection: bool,
+    internal_schema_mode: bool,
     stdmode: bool,
 ) -> None:
     """Generate EdgeQL statements populating schema metadata.
@@ -65,7 +65,7 @@ def write_meta(
         blocks:
             A list where a sequence of (edgeql, args) tuples will
             be appended to.
-        is_internal_reflection:
+        internal_schema_mode:
             If True, *cmd* represents internal `schema` modifications.
         stdmode:
             If True, *cmd* represents a standard library bootstrap DDL.
@@ -80,7 +80,7 @@ def _descend(
     schema: s_schema.Schema,
     context: sd.CommandContext,
     blocks: List[Tuple[str, Dict[str, Any]]],
-    is_internal_reflection: bool,
+    internal_schema_mode: bool,
     stdmode: bool,
     prerequisites: bool = False,
 ) -> None:
@@ -115,7 +115,7 @@ def _descend(
                     schema=schema,
                     context=context,
                     blocks=blocks,
-                    is_internal_reflection=is_internal_reflection,
+                    internal_schema_mode=internal_schema_mode,
                     stdmode=stdmode,
                 )
     else:
@@ -128,7 +128,7 @@ def _descend(
                 schema=schema,
                 context=context,
                 blocks=blocks,
-                is_internal_reflection=is_internal_reflection,
+                internal_schema_mode=internal_schema_mode,
                 stdmode=stdmode,
             )
 
@@ -141,7 +141,7 @@ def write_meta_delta_root(
     schema: s_schema.Schema,
     context: sd.CommandContext,
     blocks: List[Tuple[str, Dict[str, Any]]],
-    is_internal_reflection: bool,
+    internal_schema_mode: bool,
     stdmode: bool,
 ) -> None:
     _descend(
@@ -150,7 +150,7 @@ def write_meta_delta_root(
         schema=schema,
         context=context,
         blocks=blocks,
-        is_internal_reflection=is_internal_reflection,
+        internal_schema_mode=internal_schema_mode,
         stdmode=stdmode,
     )
 
@@ -163,7 +163,7 @@ def _build_object_mutation_shape(
         Dict[str, Tuple[s_types.Type, sr_struct.FieldType]]
     ] = None,
     lprops_only: bool = False,
-    is_internal_reflection: bool,
+    internal_schema_mode: bool,
     stdmode: bool,
     var_prefix: str = '',
     schema: s_schema.Schema,
@@ -197,7 +197,7 @@ def _build_object_mutation_shape(
         lprop_target = lprop_fields.get(n)
         if lprop_target is not None:
             target, ftype = lprop_target
-            cardinality = qltypes.SchemaCardinality.ONE
+            cardinality = qltypes.SchemaCardinality.One
             is_ordered = False
             reflection_proxy = None
         elif lprops_only:
@@ -253,7 +253,7 @@ def _build_object_mutation_shape(
                             arg_expr = ''
                         else:
                             pkind = param.get_kind(schema)
-                            if pkind is qltypes.ParameterKind.VARIADIC:
+                            if pkind is qltypes.ParameterKind.VariadicParam:
                                 rest = [arg.origtext for arg in args[i - 1:]]
                                 arg_expr = f'[{",".join(rest)}]'
                             else:
@@ -272,7 +272,7 @@ def _build_object_mutation_shape(
                 variables[f'{var_n}__internal'] = json.dumps(None)
 
         elif isinstance(target, s_objtypes.ObjectType):
-            if cardinality is qltypes.SchemaCardinality.MANY:
+            if cardinality is qltypes.SchemaCardinality.Many:
                 if ftype is sr_struct.FieldType.OBJ_DICT:
                     target_expr, target_value = _reflect_object_dict_value(
                         schema=schema,
@@ -386,12 +386,11 @@ def _build_object_mutation_shape(
             if target.is_enum(schema):
                 target_expr = f'<str>{target_expr}'
             target_expr = f'<{target.get_name(schema)}>{target_expr}'
-            target_value = v
-            if (
-                target_value is not None
-                and not isinstance(target_value, numbers.Number)
-            ):
-                target_value = str(target_value)
+
+            if v is None or isinstance(v, numbers.Number):
+                target_value = v
+            else:
+                target_value = str(v)
 
         if lprop_target is not None:
             assignments.append(f'@{n} := {target_expr}')
@@ -401,10 +400,6 @@ def _build_object_mutation_shape(
         variables[var_n] = json.dumps(target_value)
 
     if isinstance(cmd, sd.CreateObject):
-        assignments.append(f'is_internal := <bool>$__{var_prefix}is_internal')
-        variables[f'__{var_prefix}is_internal'] = (
-            json.dumps(is_internal_reflection))
-
         if (
             issubclass(mcls, s_scalars.ScalarType)
             and not cmd.get_attribute_value('is_abstract')
@@ -515,7 +510,7 @@ def write_meta_create_object(
     schema: s_schema.Schema,
     context: sd.CommandContext,
     blocks: List[Tuple[str, Dict[str, Any]]],
-    is_internal_reflection: bool,
+    internal_schema_mode: bool,
     stdmode: bool,
 ) -> None:
     _descend(
@@ -525,7 +520,7 @@ def write_meta_create_object(
         context=context,
         blocks=blocks,
         prerequisites=True,
-        is_internal_reflection=is_internal_reflection,
+        internal_schema_mode=internal_schema_mode,
         stdmode=stdmode,
     )
 
@@ -540,7 +535,7 @@ def write_meta_create_object(
             shape, variables = _build_object_mutation_shape(
                 cmd,
                 classlayout=classlayout,
-                is_internal_reflection=is_internal_reflection,
+                internal_schema_mode=internal_schema_mode,
                 stdmode=stdmode,
                 schema=schema,
                 context=context,
@@ -569,7 +564,7 @@ def write_meta_create_object(
                 classlayout=classlayout,
                 lprop_fields=lprops,
                 lprops_only=reflect_as_link,
-                is_internal_reflection=is_internal_reflection,
+                internal_schema_mode=internal_schema_mode,
                 stdmode=stdmode,
                 schema=schema,
                 context=context,
@@ -600,7 +595,7 @@ def write_meta_create_object(
                 shadow_shape, shadow_variables = _build_object_mutation_shape(
                     cmd,
                     classlayout=classlayout,
-                    is_internal_reflection=is_internal_reflection,
+                    internal_schema_mode=internal_schema_mode,
                     lprop_fields=shadow_link_layout.properties,
                     stdmode=stdmode,
                     var_prefix='shadow_',
@@ -654,7 +649,7 @@ def write_meta_create_object(
         schema=schema,
         context=context,
         blocks=blocks,
-        is_internal_reflection=is_internal_reflection,
+        internal_schema_mode=internal_schema_mode,
         stdmode=stdmode,
     )
 
@@ -667,7 +662,7 @@ def write_meta_alter_object(
     schema: s_schema.Schema,
     context: sd.CommandContext,
     blocks: List[Tuple[str, Dict[str, Any]]],
-    is_internal_reflection: bool,
+    internal_schema_mode: bool,
     stdmode: bool,
 ) -> None:
     _descend(
@@ -677,7 +672,7 @@ def write_meta_alter_object(
         context=context,
         blocks=blocks,
         prerequisites=True,
-        is_internal_reflection=is_internal_reflection,
+        internal_schema_mode=internal_schema_mode,
         stdmode=stdmode,
     )
 
@@ -686,7 +681,7 @@ def write_meta_alter_object(
         shape, variables = _build_object_mutation_shape(
             cmd,
             classlayout=classlayout,
-            is_internal_reflection=False,
+            internal_schema_mode=False,
             stdmode=stdmode,
             schema=schema,
             context=context,
@@ -712,7 +707,7 @@ def write_meta_alter_object(
                     schema=schema,
                     blocks=blocks,
                     context=context,
-                    is_internal_reflection=is_internal_reflection,
+                    internal_schema_mode=internal_schema_mode,
                     stdmode=stdmode,
                 )
 
@@ -722,7 +717,7 @@ def write_meta_alter_object(
         schema=schema,
         context=context,
         blocks=blocks,
-        is_internal_reflection=is_internal_reflection,
+        internal_schema_mode=internal_schema_mode,
         stdmode=stdmode,
     )
 
@@ -734,7 +729,7 @@ def _update_lprops(
     schema: s_schema.Schema,
     blocks: List[Tuple[str, Dict[str, Any]]],
     context: sd.CommandContext,
-    is_internal_reflection: bool,
+    internal_schema_mode: bool,
     stdmode: bool,
 ) -> None:
     mcls = cmd.get_schema_metaclass()
@@ -776,7 +771,7 @@ def _update_lprops(
         classlayout=classlayout,
         lprop_fields=lprops,
         lprops_only=True,
-        is_internal_reflection=is_internal_reflection,
+        internal_schema_mode=internal_schema_mode,
         stdmode=stdmode,
         schema=schema,
         context=context,
@@ -831,7 +826,7 @@ def write_meta_delete_object(
     schema: s_schema.Schema,
     context: sd.CommandContext,
     blocks: List[Tuple[str, Dict[str, Any]]],
-    is_internal_reflection: bool,
+    internal_schema_mode: bool,
     stdmode: bool,
 ) -> None:
     _descend(
@@ -841,7 +836,7 @@ def write_meta_delete_object(
         context=context,
         blocks=blocks,
         prerequisites=True,
-        is_internal_reflection=is_internal_reflection,
+        internal_schema_mode=internal_schema_mode,
         stdmode=stdmode,
     )
 
@@ -851,7 +846,7 @@ def write_meta_delete_object(
         schema=schema,
         context=context,
         blocks=blocks,
-        is_internal_reflection=is_internal_reflection,
+        internal_schema_mode=internal_schema_mode,
         stdmode=stdmode,
     )
 

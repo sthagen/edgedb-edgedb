@@ -383,10 +383,18 @@ class ConstraintCommand(
         context: sd.CommandContext,
         field: so.Field[Any],
         value: s_expr.Expression,
+        track_schema_ref_exprs: bool=False,
     ) -> s_expr.Expression:
 
-        referrer_ctx = self.get_referrer_context(context)
-        if referrer_ctx is not None:
+        base: Optional[so.Object] = None
+        if isinstance(self, AlterConstraint):
+            base = self.scls.get_subject(schema)
+        else:
+            referrer_ctx = self.get_referrer_context(context)
+            if referrer_ctx:
+                base = referrer_ctx.op.scls
+
+        if base is not None:
             # Concrete constraint
             if field.name == 'expr':
                 # Concrete constraints cannot redefine the base check
@@ -403,15 +411,21 @@ class ConstraintCommand(
                 return value
 
             elif field.name in {'subjectexpr', 'finalexpr'}:
-                anchors = {'__subject__': referrer_ctx.op.scls}
+                anchors = {'__subject__': base}
+                path_prefix_anchor = (
+                    '__subject__' if isinstance(base, s_types.Type) else None
+                )
                 return s_expr.Expression.compiled(
                     value,
                     schema=schema,
                     options=qlcompiler.CompilerOptions(
                         modaliases=context.modaliases,
                         anchors=anchors,
+                        path_prefix_anchor=path_prefix_anchor,
                         allow_generic_type_output=True,
                         schema_object_context=self.get_schema_metaclass(),
+                        apply_query_rewrites=not context.stdmode,
+                        track_schema_ref_exprs=track_schema_ref_exprs,
                     ),
                 )
 
@@ -438,10 +452,13 @@ class ConstraintCommand(
                     func_params=params,
                     allow_generic_type_output=True,
                     schema_object_context=self.get_schema_metaclass(),
+                    apply_query_rewrites=not context.stdmode,
+                    track_schema_ref_exprs=track_schema_ref_exprs,
                 ),
             )
         else:
-            return super().compile_expr_field(schema, context, field, value)
+            return super().compile_expr_field(
+                schema, context, field, value, track_schema_ref_exprs)
 
     @classmethod
     def get_inherited_ref_name(
@@ -578,8 +595,8 @@ class CreateConstraint(
             name='__subject__',
             default=None,
             type=s_pseudo.PseudoTypeShell(name='anytype'),
-            typemod=ft.TypeModifier.SINGLETON,
-            kind=ft.ParameterKind.POSITIONAL,
+            typemod=ft.TypeModifier.SingletonType,
+            kind=ft.ParameterKind.PositionalParam,
         ))
 
         return params
@@ -721,7 +738,8 @@ class CreateConstraint(
             shortname = sn.shortname_from_fullname(fullname)
             self._populate_concrete_constraint_attrs(
                 schema,
-                subject,
+                context,
+                subject_obj=subject,
                 name=shortname,
                 sourcectx=self.source_context,
                 **props)
@@ -733,6 +751,7 @@ class CreateConstraint(
     def _populate_concrete_constraint_attrs(
         self,
         schema: s_schema.Schema,
+        context: sd.CommandContext,
         subject_obj: Optional[so.Object],
         *,
         name: str,
@@ -826,15 +845,22 @@ class CreateConstraint(
             expr_context = None
 
         assert subject is not None
+        path_prefix_anchor = (
+            qlast.Subject().name if isinstance(subject, s_types.Type)
+            else None
+        )
+
         final_expr = s_expr.Expression.compiled(
             s_expr.Expression.from_ast(expr_ql, schema, {}),
             schema=schema,
             options=qlcompiler.CompilerOptions(
                 anchors={qlast.Subject().name: subject},
+                path_prefix_anchor=path_prefix_anchor,
+                apply_query_rewrites=not context.stdmode,
             ),
         )
 
-        bool_t: s_scalars.ScalarType = schema.get('std::bool')
+        bool_t = schema.get('std::bool', type=s_scalars.ScalarType)
         assert isinstance(final_expr.irast, ir_ast.Statement)
 
         expr_type = final_expr.irast.stype
@@ -853,7 +879,9 @@ class CreateConstraint(
                 schema=schema,
                 options=qlcompiler.CompilerOptions(
                     anchors={qlast.Subject().name: subject},
+                    path_prefix_anchor=path_prefix_anchor,
                     singletons=frozenset({subject_obj}),
+                    apply_query_rewrites=not context.stdmode,
                 ),
             )
             assert isinstance(final_subjectexpr.irast, ir_ast.Statement)
@@ -952,7 +980,7 @@ class CreateConstraint(
                 schema, context.modaliases, astnode)
 
             for param in params:
-                if param.get_kind(schema) is ft.ParameterKind.NAMED_ONLY:
+                if param.get_kind(schema) is ft.ParameterKind.NamedOnlyParam:
                     raise errors.InvalidConstraintDefinitionError(
                         'named only parameters are not allowed '
                         'in this context',
@@ -973,7 +1001,7 @@ class CreateConstraint(
         if cmd.get_attribute_value('return_typemod') is None:
             cmd.set_attribute_value(
                 'return_typemod',
-                ft.TypeModifier.SINGLETON,
+                ft.TypeModifier.SingletonType,
             )
 
         assert isinstance(astnode, (qlast.CreateConstraint,
@@ -1014,7 +1042,7 @@ class CreateConstraint(
                 pname = s_func.Parameter.paramname_from_fullname(props['name'])
                 if pname == '__subject__':
                     continue
-                num = props['num']
+                num: int = props['num']
                 default = props.get('default')
                 param = qlast.FuncParam(
                     name=pname,

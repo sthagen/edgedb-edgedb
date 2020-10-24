@@ -106,7 +106,7 @@ class Link(sources.Source, pointers.Pointer, s_abc.Link,
 
     on_target_delete = so.SchemaField(
         LinkTargetDeleteAction,
-        default=LinkTargetDeleteAction.RESTRICT,
+        default=LinkTargetDeleteAction.Restrict,
         coerce=True,
         compcoef=0.9,
         merge_fn=merge_actions)
@@ -199,7 +199,7 @@ class LinkCommand(lproperties.PropertySourceCommand,
         schema: s_schema.Schema,
         astnode: qlast.CreateConcretePointer,
         context: sd.CommandContext,
-        target_ref: Union[so.Object, so.ObjectShell],
+        target_ref: Union[so.Object, so.ObjectShell, pointers.ComputableRef],
     ) -> None:
         assert astnode.target is not None
         slt = SetLinkType(classname=self.classname, type=target_ref)
@@ -392,7 +392,7 @@ class CreateLink(
         src_prop.set_attribute_value('is_final', True)
         src_prop.set_attribute_value('is_owned', True)
         src_prop.set_attribute_value('cardinality',
-                                     qltypes.SchemaCardinality.ONE)
+                                     qltypes.SchemaCardinality.One)
 
         cmd.prepend(src_prop)
 
@@ -425,7 +425,7 @@ class CreateLink(
         tgt_prop.set_attribute_value('is_final', True)
         tgt_prop.set_attribute_value('is_owned', True)
         tgt_prop.set_attribute_value('cardinality',
-                                     qltypes.SchemaCardinality.ONE)
+                                     qltypes.SchemaCardinality.One)
 
         cmd.prepend(tgt_prop)
 
@@ -489,7 +489,7 @@ class AlterLink(
     LinkCommand,
     referencing.AlterReferencedInheritingObject[Link],
 ):
-    astnode = [qlast.AlterLink, qlast.AlterConcreteLink]
+    astnode = [qlast.AlterConcreteLink, qlast.AlterLink]
     referenced_astnode = qlast.AlterConcreteLink
 
     @classmethod
@@ -548,6 +548,13 @@ class AlterLink(
                     value=op.new_value,
                 ),
             )
+        elif op.property == 'cardinality':
+            node.commands.append(
+                qlast.SetSpecialField(
+                    name='cardinality',
+                    value=op.new_value,
+                ),
+            )
         else:
             super()._apply_field_ast(schema, context, node, op)
 
@@ -556,7 +563,7 @@ class DeleteLink(
     LinkCommand,
     referencing.DeleteReferencedInheritingObject[Link],
 ):
-    astnode = [qlast.DropLink, qlast.DropConcreteLink]
+    astnode = [qlast.DropConcreteLink, qlast.DropLink]
     referenced_astnode = qlast.DropConcreteLink
 
     def _canonicalize(

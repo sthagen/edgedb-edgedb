@@ -455,6 +455,18 @@ class DeleteParameter(ParameterCommand, DeleteObject,
     pass
 
 
+class RenameParameter(ParameterCommand, RenameObject,
+                      adapts=s_funcs.RenameParameter):
+
+    pass
+
+
+class AlterParameter(ParameterCommand, AlterObject,
+                     adapts=s_funcs.AlterParameter):
+
+    pass
+
+
 class FunctionCommand:
 
     def get_pgname(self, func: s_funcs.Function, schema):
@@ -529,7 +541,7 @@ class FunctionCommand:
             name=self.get_pgname(func, schema),
             args=self.compile_args(func, schema),
             has_variadic=func_params.find_variadic(schema) is not None,
-            set_returning=func_return_typemod is ql_ft.TypeModifier.SET_OF,
+            set_returning=func_return_typemod is ql_ft.TypeModifier.SetOfType,
             volatility=func.get_volatility(schema),
             returns=self.get_pgtype(
                 func, func.get_return_type(schema), schema),
@@ -613,6 +625,9 @@ class AlterFunction(
     ) -> s_schema.Schema:
         schema = super().apply(schema, context)
 
+        if self.metadata_only:
+            return schema
+
         if (
             self.get_attribute_value('volatility') is not None or
             self.get_attribute_value('nativecode') is not None
@@ -670,18 +685,18 @@ class OperatorCommand(FunctionCommand):
         oper_params = list(oper.get_params(schema).objects(schema))
         oper_kind = oper.get_operator_kind(schema)
 
-        if oper_kind is ql_ft.OperatorKind.INFIX:
+        if oper_kind is ql_ft.OperatorKind.Infix:
             left_type = types.pg_type_from_object(
                 schema, oper_params[0].get_type(schema))
 
             right_type = types.pg_type_from_object(
                 schema, oper_params[1].get_type(schema))
 
-        elif oper_kind is ql_ft.OperatorKind.PREFIX:
+        elif oper_kind is ql_ft.OperatorKind.Prefix:
             right_type = types.pg_type_from_object(
                 schema, oper_params[0].get_type(schema))
 
-        elif oper_kind is ql_ft.OperatorKind.POSTFIX:
+        elif oper_kind is ql_ft.OperatorKind.Postfix:
             left_type = types.pg_type_from_object(
                 schema, oper_params[0].get_type(schema))
 
@@ -761,12 +776,12 @@ class CreateOperator(OperatorCommand, CreateObject,
                 # Need a proxy function with casts
                 oper_kind = oper.get_operator_kind(schema)
 
-                if oper_kind is ql_ft.OperatorKind.INFIX:
+                if oper_kind is ql_ft.OperatorKind.Infix:
                     op = (f'$1::{from_args[0]} {pg_oper_name} '
                           f'$2::{from_args[1]}')
-                elif oper_kind is ql_ft.OperatorKind.POSTFIX:
+                elif oper_kind is ql_ft.OperatorKind.Postfix:
                     op = f'$1::{from_args[0]} {pg_oper_name}'
-                elif oper_kind is ql_ft.OperatorKind.PREFIX:
+                elif oper_kind is ql_ft.OperatorKind.Prefix:
                     op = f'{pg_oper_name} $1::{from_args[1]}'
                 else:
                     raise RuntimeError(
@@ -1060,7 +1075,7 @@ class CreateConstraint(
             schemac_to_backendc = \
                 schemamech.ConstraintMech.\
                 schema_constraint_to_backend_constraint
-            bconstr = schemac_to_backendc(subject, constraint, schema)
+            bconstr = schemac_to_backendc(subject, constraint, schema, context)
 
             op = dbops.CommandGroup(priority=1)
             op.add_command(bconstr.create_ops())
@@ -1072,9 +1087,33 @@ class CreateConstraint(
 class RenameConstraint(
         ConstraintCommand, RenameObject,
         adapts=s_constr.RenameConstraint):
-    # Constraints are created using the ID in the backend,
-    # so there is nothing special we need to do here.
-    pass
+    def apply(self, schema, context):
+        delta_root_ctx = context.top()
+        orig_schema = delta_root_ctx.original_schema
+        schema = super().apply(schema, context)
+        constraint = self.scls
+        if not self.constraint_is_effective(orig_schema, constraint):
+            return schema
+
+        subject = constraint.get_subject(schema)
+
+        if subject is not None:
+            schemac_to_backendc = \
+                schemamech.ConstraintMech.\
+                schema_constraint_to_backend_constraint
+
+            bconstr = schemac_to_backendc(subject, constraint, schema, context)
+
+            orig_subject = constraint.get_subject(orig_schema)
+            orig_bconstr = schemac_to_backendc(
+                orig_subject, constraint, orig_schema, context
+            )
+
+            op = dbops.CommandGroup(priority=1)
+            op.add_command(bconstr.rename_ops(orig_bconstr))
+            self.pgops.add(op)
+
+        return schema
 
 
 class AlterConstraintOwned(
@@ -1093,6 +1132,8 @@ class AlterConstraint(
         orig_schema = delta_root_ctx.original_schema
         schema = super().apply(schema, context)
         constraint = self.scls
+        if self.metadata_only:
+            return schema
         if (
             not self.constraint_is_effective(schema, constraint)
             and not self.constraint_is_effective(orig_schema, constraint)
@@ -1113,12 +1154,13 @@ class AlterConstraint(
                 schemamech.ConstraintMech.\
                 schema_constraint_to_backend_constraint
 
-            bconstr = schemac_to_backendc(subject, constraint, schema)
+            bconstr = schemac_to_backendc(subject, constraint, schema, context)
 
             orig_bconstr = schemac_to_backendc(
                 constraint.get_subject(orig_schema),
                 constraint,
                 orig_schema,
+                context,
             )
 
             op = dbops.CommandGroup(priority=1)
@@ -1130,11 +1172,13 @@ class AlterConstraint(
                         child.get_subject(orig_schema),
                         child,
                         orig_schema,
+                        context,
                     )
                     cbconstr = schemac_to_backendc(
                         child.get_subject(schema),
                         child,
                         schema,
+                        context,
                     )
                     op.add_command(cbconstr.alter_ops(orig_cbconstr))
             elif not self.constraint_is_effective(schema, constraint):
@@ -1145,11 +1189,13 @@ class AlterConstraint(
                         child.get_subject(orig_schema),
                         child,
                         orig_schema,
+                        context,
                     )
                     cbconstr = schemac_to_backendc(
                         child.get_subject(schema),
                         child,
                         schema,
+                        context,
                     )
                     op.add_command(cbconstr.alter_ops(orig_cbconstr))
             else:
@@ -1177,7 +1223,8 @@ class DeleteConstraint(
                 schemac_to_backendc = \
                     schemamech.ConstraintMech.\
                     schema_constraint_to_backend_constraint
-                bconstr = schemac_to_backendc(subject, constraint, orig_schema)
+                bconstr = schemac_to_backendc(
+                    subject, constraint, orig_schema, context)
 
                 op = dbops.CommandGroup()
                 op.add_command(bconstr.delete_ops())
@@ -1202,68 +1249,6 @@ class ScalarTypeMetaCommand(AliasCapableObjectMetaCommand):
     def is_sequence(self, schema, scalar):
         seq = schema.get('std::sequence', default=None)
         return seq is not None and scalar.issubclass(schema, seq)
-
-    def alter_scalar_type(self, scalar, schema, new_type, intent):
-
-        users = []
-
-        for link in schema.get_objects(type=s_links.Link):
-            if (link.get_target(schema) and
-                    link.get_target(schema).get_name(schema) ==
-                    scalar.get_name(schema)):
-                users.append((link.get_source(schema), link))
-
-        domain_name = common.get_backend_name(
-            schema, scalar, catenate=False)
-
-        new_constraints = scalar.get_constraints(schema)
-        base = types.get_scalar_base(schema, scalar)
-
-        target_type = new_type
-
-        schemac_to_backendc = \
-            schemamech.ConstraintMech.\
-            schema_constraint_to_backend_constraint
-
-        if intent == 'alter':
-            new_name = domain_name[0], domain_name[1] + '_tmp'
-            self.pgops.add(dbops.RenameDomain(domain_name, new_name))
-            target_type = domain_name
-
-            domain = dbops.Domain(name=domain_name, base=new_type)
-            self.pgops.add(dbops.CreateDomain(domain=domain))
-
-            for constraint in new_constraints.objects(schema):
-                bconstr = schemac_to_backendc(scalar, constraint, schema)
-                op = dbops.CommandGroup(priority=1)
-                op.add_command(bconstr.create_ops())
-                self.pgops.add(op)
-
-            domain_name = new_name
-
-        elif intent == 'create':
-            domain = dbops.Domain(name=domain_name, base=base)
-            self.pgops.add(dbops.CreateDomain(domain=domain))
-
-        for _host_class, item_class in users:
-            ptr_stor_info = types.get_pointer_storage_info(
-                item_class, schema=schema)
-
-            alter_type = dbops.AlterTableAlterColumnType(
-                ptr_stor_info.column_name, target_type)
-            alter_table = dbops.AlterTable(ptr_stor_info.table_name)
-            alter_table.add_operation(alter_type)
-            self.pgops.add(alter_table)
-
-        for child_scalar in schema.get_objects(type=s_scalars.ScalarType):
-            bases = child_scalar.get_bases(schema).objects(schema)
-            scalar_name = scalar.get_name(schema)
-            if [b.get_name(schema) for b in bases] == [scalar_name]:
-                self.alter_scalar_type(
-                    child_scalar, schema, target_type, 'alter')
-
-        if intent == 'drop':
-            self.pgops.add(dbops.DropDomain(domain_name))
 
 
 class CreateScalarType(ScalarTypeMetaCommand,
@@ -1291,7 +1276,7 @@ class CreateScalarType(ScalarTypeMetaCommand,
             new_enum_name = common.get_backend_name(
                 schema, scalar, catenate=False)
             self.pgops.add(dbops.CreateEnum(
-                name=new_enum_name, values=enum_values))
+                dbops.Enum(name=new_enum_name, values=enum_values)))
             base = q(*new_enum_name)
 
         else:
@@ -1572,6 +1557,10 @@ class CompositeObjectMetaCommand(ObjectMetaCommand):
 
             cond = dbops.TableExists(name=old_table_name)
 
+            self.pgops.add(self.drop_inhview(
+                orig_schema, context, obj,
+            ))
+
         if old_table_name[1] != new_table_name[1]:
             self.pgops.add(
                 dbops.AlterTableRenameTo(
@@ -1720,6 +1709,7 @@ class CreateIndex(IndexCommand, CreateObject, adapts=s_indexes.CreateIndex):
                     anchors={ql_ast.Subject().name: subject},
                     path_prefix_anchor=path_prefix_anchor,
                     singletons=singletons,
+                    apply_query_rewrites=not context.stdmode,
                 ),
             )
             ir = index_expr.irast
@@ -1757,31 +1747,7 @@ class RenameIndex(IndexCommand, RenameObject, adapts=s_indexes.RenameIndex):
         context: sd.CommandContext,
     ) -> s_schema.Schema:
         schema = s_indexes.RenameIndex.apply(self, schema, context)
-        index = self.scls
         schema = RenameObject.apply(self, schema, context)
-
-        subject = context.get(s_links.LinkCommandContext)
-        if not subject:
-            subject = context.get(s_objtypes.ObjectTypeCommandContext)
-        orig_table_name = common.get_backend_name(
-            subject.original_schema, index, catenate=False)
-
-        index_ctx = context.get(s_indexes.IndexCommandContext)
-
-        orig_schema = index_ctx.original_schema
-        module = schema.get_global(
-            s_mod.Module, index.get_name(orig_schema).module)
-        orig_idx_name = common.get_index_backend_name(
-            index.id, module.id, catenate=False)
-
-        new_index_name = orig_idx_name
-
-        orig_pg_idx = dbops.Index(
-            name=orig_idx_name[1], table_name=orig_table_name, inherit=True,
-            metadata={'schemaname': index.get_name(schema)})
-
-        rename = dbops.RenameIndex(orig_pg_idx, new_name=new_index_name[1])
-        self.pgops.add(rename)
 
         return schema
 
@@ -2140,77 +2106,6 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
                 default=default,
                 comment=pointer.get_shortname(schema))
         ]
-
-    def rename_pointer(self, pointer, schema, context, old_name, new_name):
-        if context:
-            # before proceeding with renaming, make sure that this is
-            # not a computable
-            pointer = self.get_object(schema, context)
-            source = pointer.get_source(schema)
-            if source is not None:
-                is_computable = source.get_is_derived(schema)
-
-                # potentially this is a link property, so source may
-                # be a link
-                if isinstance(source, s_links.Link):
-                    source = source.get_source(schema)
-
-                if source is not None:
-                    is_computable = (
-                        is_computable
-                        or source.is_view(schema)
-                        or source.is_compound_type(schema)
-                    )
-            else:
-                is_computable = None
-
-            old_name = sn.shortname_from_fullname(old_name)
-            new_name = sn.shortname_from_fullname(new_name)
-
-            if not is_computable:
-                host = self.get_host(schema, context)
-
-                if host and old_name != new_name:
-                    if (new_name == 'std::source' and
-                            not host.scls.generic(schema)):
-                        pass
-                    else:
-                        old_col_name = common.edgedb_name_to_pg_name(
-                            old_name.name)
-                        new_col_name = common.edgedb_name_to_pg_name(
-                            new_name.name)
-
-                        ptr_stor_info = types.get_pointer_storage_info(
-                            pointer, schema=schema)
-
-                        is_a_column = ((
-                            ptr_stor_info.table_type == 'ObjectType' and
-                            isinstance(host.scls, s_objtypes.ObjectType)) or (
-                                ptr_stor_info.table_type == 'link' and
-                                isinstance(host.scls, s_links.Link)))
-
-                        if is_a_column:
-                            table_name = common.get_backend_name(
-                                schema, host.scls, catenate=False)
-                            cond = [
-                                dbops.ColumnExists(
-                                    table_name=table_name,
-                                    column_name=old_col_name)
-                            ]
-                            neg_cond = [
-                                dbops.ColumnIsInherited(
-                                    table_name=table_name,
-                                    column_name=old_col_name)
-                            ]
-                            rename = dbops.AlterTableRenameColumn(
-                                table_name, old_col_name, new_col_name,
-                                conditions=cond, neg_conditions=neg_cond)
-                            self.pgops.add(rename)
-
-                            tabcol = dbops.TableColumn(
-                                table_name=table_name, column=dbops.Column(
-                                    name=new_col_name, type='str'))
-                            self.pgops.add(dbops.Comment(tabcol, new_name))
 
     def create_table(self, ptr, schema, context, conditional=False):
         c = self._create_table(ptr, schema, context, conditional=conditional)
@@ -2588,9 +2483,6 @@ class RenameLink(LinkMetaCommand, adapts=s_links.RenameLink):
         schema = super()._rename_begin(schema, context)
         scls = self.scls
 
-        self.rename_pointer(
-            scls, schema, context, self.classname, self.new_name)
-
         self.attach_alter_table(context)
 
         if scls.generic(schema):
@@ -2942,14 +2834,6 @@ class RenameProperty(
 
         return schema
 
-    def _rename_begin(self, schema, context):
-        schema = super()._rename_begin(schema, context)
-
-        self.rename_pointer(
-            self.scls, schema, context, self.classname, self.new_name)
-
-        return schema
-
 
 class RebaseProperty(
         PropertyMetaCommand, adapts=s_props.RebaseProperty):
@@ -3003,6 +2887,9 @@ class AlterProperty(
         schema = s_props.AlterProperty.apply(self, schema, context)
         prop = self.scls
         schema = PropertyMetaCommand.apply(self, schema, context)
+
+        if self.metadata_only:
+            return schema
 
         with context(
                 s_props.PropertyCommandContext(schema, self, prop)) as ctx:
@@ -3068,7 +2955,10 @@ class DeleteProperty(
             alter_table = source_op.get_alter_table(
                 schema, context, force_new=True)
             ptr_stor_info = types.get_pointer_storage_info(
-                prop, schema=orig_schema)
+                prop,
+                schema=orig_schema,
+                link_bias=prop.is_link_property(orig_schema),
+            )
 
             col = dbops.AlterTableDropColumn(
                 dbops.Column(name=ptr_stor_info.column_name,
@@ -3111,8 +3001,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
             ''').format(
                 src=common.quote_ident('source'),
                 tgt=common.quote_ident('target'),
-                table=common.get_backend_name(
-                    schema, link),
+                table=common.get_backend_name(schema, link),
             ))
 
         return '(' + '\nUNION ALL\n    '.join(selects) + ') as q'
@@ -3120,6 +3009,8 @@ class UpdateEndpointDeleteActions(MetaCommand):
     def _get_inline_link_table_union(self, schema, links) -> str:
         selects = []
         for link in links:
+            link_psi = types.get_pointer_storage_info(link, schema=schema)
+            link_col = link_psi.column_name
             selects.append(textwrap.dedent('''\
                 (SELECT
                     {id}::uuid AS ptr_item_id,
@@ -3129,7 +3020,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
             ''').format(
                 id=ql(str(link.id)),
                 src=common.quote_ident('id'),
-                tgt=common.quote_ident(link.get_shortname(schema).name),
+                tgt=common.quote_ident(link_col),
                 table=common.get_backend_name(
                     schema,
                     link.get_source(schema),
@@ -3204,11 +3095,11 @@ class UpdateEndpointDeleteActions(MetaCommand):
                 links, lambda l: l.get_on_target_delete(schema))
             near_endpoint, far_endpoint = 'target', 'source'
         else:
-            groups = [(DA.ALLOW, links)]
+            groups = [(DA.Allow, links)]
             near_endpoint, far_endpoint = 'source', 'target'
 
         for action, links in groups:
-            if action is DA.RESTRICT or action is DA.DEFERRED_RESTRICT:
+            if action is DA.Restrict or action is DA.DeferredRestrict:
                 tables = self._get_link_table_union(schema, links)
 
                 text = textwrap.dedent('''\
@@ -3250,7 +3141,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
 
                 chunks.append(text)
 
-            elif action == s_links.LinkTargetDeleteAction.ALLOW:
+            elif action == s_links.LinkTargetDeleteAction.Allow:
                 for link in links:
                     link_table = common.get_backend_name(
                         schema, link)
@@ -3268,7 +3159,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
 
                     chunks.append(text)
 
-            elif action == s_links.LinkTargetDeleteAction.DELETE_SOURCE:
+            elif action == s_links.LinkTargetDeleteAction.DeleteSource:
                 sources = collections.defaultdict(list)
                 for link in links:
                     sources[link.get_source(schema)].append(link)
@@ -3326,7 +3217,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
         near_endpoint, far_endpoint = 'target', 'source'
 
         for action, links in groups:
-            if action is DA.RESTRICT or action is DA.DEFERRED_RESTRICT:
+            if action is DA.Restrict or action is DA.DeferredRestrict:
                 tables = self._get_inline_link_table_union(schema, links)
 
                 text = textwrap.dedent('''\
@@ -3368,27 +3259,26 @@ class UpdateEndpointDeleteActions(MetaCommand):
 
                 chunks.append(text)
 
-            elif action == s_links.LinkTargetDeleteAction.ALLOW:
+            elif action == s_links.LinkTargetDeleteAction.Allow:
                 for link in links:
+                    link_psi = types.get_pointer_storage_info(
+                        link, schema=schema)
+                    link_col = link_psi.column_name
                     source_table = common.get_backend_name(
                         schema, link.get_source(schema))
 
-                    text = textwrap.dedent('''\
+                    text = textwrap.dedent(f'''\
                         UPDATE
                             {source_table}
                         SET
-                            {endpoint} = NULL
+                            {qi(link_col)} = NULL
                         WHERE
-                            {endpoint} = OLD.{id};
-                    ''').format(
-                        source_table=source_table,
-                        endpoint=qi(link.get_shortname(schema).name),
-                        id='id'
-                    )
+                            {qi(link_col)} = OLD.id;
+                    ''')
 
                     chunks.append(text)
 
-            elif action == s_links.LinkTargetDeleteAction.DELETE_SOURCE:
+            elif action == s_links.LinkTargetDeleteAction.DeleteSource:
                 sources = collections.defaultdict(list)
                 for link in links:
                     sources[link.get_source(schema)].append(link)
@@ -3525,13 +3415,13 @@ class UpdateEndpointDeleteActions(MetaCommand):
                     link, schema=schema)
                 if ptr_stor_info.table_type != 'link':
                     if (link.get_on_target_delete(schema)
-                            is DA.DEFERRED_RESTRICT):
+                            is DA.DeferredRestrict):
                         deferred_inline_links.append(link)
                     else:
                         inline_links.append(link)
                 else:
                     if (link.get_on_target_delete(schema)
-                            is DA.DEFERRED_RESTRICT):
+                            is DA.DeferredRestrict):
                         deferred_links.append(link)
                     else:
                         links.append(link)

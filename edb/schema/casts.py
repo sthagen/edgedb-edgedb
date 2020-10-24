@@ -185,16 +185,16 @@ class Cast(
         qlast.Language, default=None, compcoef=0.4, coerce=True)
 
     from_function = so.SchemaField(
-        str, default=None, compcoef=0.4, introspectable=False)
+        str, default=None, compcoef=0.4)
 
     from_expr = so.SchemaField(
-        bool, default=False, compcoef=0.4, introspectable=False)
+        bool, default=False, compcoef=0.4)
 
     from_cast = so.SchemaField(
-        bool, default=False, compcoef=0.4, introspectable=False)
+        bool, default=False, compcoef=0.4)
 
     code = so.SchemaField(
-        str, default=None, compcoef=0.4, introspectable=False)
+        str, default=None, compcoef=0.4)
 
 
 class CastCommandContext(sd.ObjectCommandContext[Cast],
@@ -243,7 +243,8 @@ class CastCommand(sd.QualifiedObjectCommand[Cast],
             schema=schema,
         )
 
-        return get_cast_fullname(schema, 'std', from_type, to_type)
+        module = 'std' if context.stdmode else '__derived__'
+        return get_cast_fullname(schema, module, from_type, to_type)
 
     def canonicalize_attributes(
         self,

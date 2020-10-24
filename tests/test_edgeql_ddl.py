@@ -17,7 +17,6 @@
 #
 
 import decimal
-import json
 import uuid
 
 import edgedb
@@ -195,12 +194,12 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             [{
                 'links': [{
                     'name': 'a',
-                    'cardinality': 'ONE',
+                    'cardinality': 'One',
                 }],
 
                 'properties': [{
                     'name': 'b',
-                    'cardinality': 'ONE',
+                    'cardinality': 'One',
                 }],
             }],
         )
@@ -250,12 +249,12 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             [{
                 'links': [{
                     'name': 'a',
-                    'cardinality': 'MANY',
+                    'cardinality': 'Many',
                 }],
 
                 'properties': [{
                     'name': 'b',
-                    'cardinality': 'MANY',
+                    'cardinality': 'Many',
                 }],
             }],
         )
@@ -307,12 +306,12 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             [{
                 'links': [{
                     'name': 'a',
-                    'cardinality': 'ONE',
+                    'cardinality': 'One',
                 }],
 
                 'properties': [{
                     'name': 'b',
-                    'cardinality': 'ONE',
+                    'cardinality': 'One',
                 }],
             }],
         )
@@ -1635,21 +1634,11 @@ class TestEdgeQLDDL(tb.DDLTestCase):
     async def test_edgeql_ddl_bad_05(self):
         with self.assertRaisesRegex(
                 edgedb.EdgeQLSyntaxError,
-                r'mixing named and unnamed tuple declaration is not '
+                r'mixing named and unnamed subtype declarations is not '
                 r'supported'):
             await self.con.execute(r"""
                 CREATE TYPE test::Foo {
                     CREATE PROPERTY bar -> tuple<int64, foo:int64>;
-                };
-            """)
-
-    async def test_edgeql_ddl_bad_06(self):
-        with self.assertRaisesRegex(
-                edgedb.SchemaError,
-                r'unexpected number of subtypes, expecting 1'):
-            await self.con.execute(r"""
-                CREATE TYPE test::Foo {
-                    CREATE PROPERTY bar -> array<>;
                 };
             """)
 
@@ -2457,7 +2446,8 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 USING EdgeQL $$
                     SELECT a ++ 'aaa'
                 $$;
-                SET volatility := 'VOLATILE';
+                # volatility must be case insensitive
+                SET volatility := 'Volatile';
             };
 
             ALTER FUNCTION test::edgeql_func26(a: std::str) {
@@ -2465,7 +2455,8 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             };
 
             ALTER FUNCTION test::edgeql_func26(a: std::str) {
-                SET volatility := 'IMMUTABLE';
+                # volatility must be case insensitive
+                SET volatility := 'immutable';
             };
         """)
 
@@ -2501,7 +2492,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                             '@value': 'aaaa',
                         },
                     ],
-                    'vol': 'IMMUTABLE',
+                    'vol': 'Immutable',
                 },
             ]
         )
@@ -2661,17 +2652,17 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                         'type': {
                             'name': 'std::int64'
                         },
-                        'typemod': 'SINGLETON'
+                        'typemod': 'SingletonType'
                     },
                     {
                         'name': 'right',
                         'type': {
                             'name': 'std::int64'
                         },
-                        'typemod': 'SINGLETON'}
+                        'typemod': 'SingletonType'}
                 ],
-                'operator_kind': 'INFIX',
-                'return_typemod': 'SINGLETON'
+                'operator_kind': 'Infix',
+                'return_typemod': 'SingletonType'
             }]
         )
 
@@ -2749,11 +2740,11 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 [
                     {
                         'name': 'test::!',
-                        'operator_kind': 'POSTFIX',
+                        'operator_kind': 'Postfix',
                     },
                     {
                         'name': 'test::!',
-                        'operator_kind': 'PREFIX',
+                        'operator_kind': 'Prefix',
                     }
                 ]
             )
@@ -2811,7 +2802,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         with self.assertRaisesRegex(
                 edgedb.InvalidOperatorDefinitionError,
                 r'cannot create the non-recursive '
-                r'`std::=\(l: array<std::int64>, '
+                r'`test::=\(l: array<std::int64>, '
                 r'r: array<std::int64>\)` operator: '
                 r'overloading a recursive operator '
                 r'`array<anytype> = array<anytype>` with a non-recursive one '
@@ -2820,7 +2811,13 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             # non-recursive version
             await self.con.execute('''
                 CREATE INFIX OPERATOR
-                std::`=` (l: array<int64>, r: array<int64>) -> std::bool {
+                test::`=` (l: array<anytype>, r: array<anytype>) -> std::bool {
+                    SET recursive := true;
+                    USING SQL EXPRESSION;
+                };
+
+                CREATE INFIX OPERATOR
+                test::`=` (l: array<int64>, r: array<int64>) -> std::bool {
                     USING SQL EXPRESSION;
                 };
             ''')
@@ -3669,6 +3666,28 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             []
         )
 
+    async def test_edgeql_ddl_annotation_12(self):
+        with self.assertRaisesRegex(
+            edgedb.UnknownModuleError,
+            "module 'bogus' is not in this schema",
+        ):
+            await self.con.execute("""
+                CREATE ABSTRACT ANNOTATION bogus::anno12;
+            """)
+
+    async def test_edgeql_ddl_annotation_13(self):
+        await self.con.execute("""
+            CREATE ABSTRACT ANNOTATION test::anno13;
+        """)
+
+        with self.assertRaisesRegex(
+            edgedb.UnknownModuleError,
+            "module 'bogus' is not in this schema",
+        ):
+            await self.con.execute("""
+                ALTER ABSTRACT ANNOTATION test::anno13 RENAME TO bogus::anno13;
+            """)
+
     async def test_edgeql_ddl_anytype_01(self):
         with self.assertRaisesRegex(
                 edgedb.InvalidPropertyTargetError,
@@ -4252,6 +4271,28 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 }],
             }]
         )
+
+    async def test_edgeql_ddl_describe_roles(self):
+        await self.con.execute("""
+            CREATE SUPERUSER ROLE base1;
+            CREATE SUPERUSER ROLE `base 2`;
+            CREATE SUPERUSER ROLE child1 EXTENDING base1;
+            CREATE SUPERUSER ROLE child2 EXTENDING `base 2`;
+            CREATE SUPERUSER ROLE child3 EXTENDING base1, child2 {
+                SET password := 'test'
+            };
+        """)
+        roles = next(iter(await self.con.query("DESCRIBE ROLES")))
+        base1 = roles.index('CREATE SUPERUSER ROLE `base1`;')
+        base2 = roles.index('CREATE SUPERUSER ROLE `base 2`;')
+        child1 = roles.index('CREATE SUPERUSER ROLE `child1`')
+        child2 = roles.index('CREATE SUPERUSER ROLE `child2`')
+        child3 = roles.index('CREATE SUPERUSER ROLE `child3`')
+        self.assertGreater(child1, base1, roles)
+        self.assertGreater(child2, base2, roles)
+        self.assertGreater(child3, child2, roles)
+        self.assertGreater(child3, base1, roles)
+        self.assertIn("SET password_hash := 'SCRAM-SHA-256$4096:", roles)
 
     async def test_edgeql_ddl_rename_01(self):
         await self.con.execute(r"""
@@ -6537,233 +6578,416 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             }]
         )
 
-    async def test_edgeql_ddl_describe_migration_json_01(self):
+    async def test_edgeql_ddl_naked_backlink_in_computable(self):
         await self.con.execute('''
-            START MIGRATION TO {
-                module default {
-                    type Type1 {
-                        property field1 -> str;
-                    };
+            SET MODULE test;
+            CREATE TYPE User {
+                CREATE PROPERTY name -> str {
+                    CREATE CONSTRAINT exclusive;
                 };
             };
+            CREATE TYPE Post {
+                CREATE LINK author -> User;
+            };
+            CREATE TYPE Video {
+                CREATE LINK author -> User;
+            };
+            ALTER TYPE User {
+                CREATE MULTI LINK authored := .<author;
+            };
+            INSERT User { name := 'Lars' };
+            INSERT Post { author := (SELECT User FILTER .name = 'Lars') };
+            INSERT Video { author := (SELECT User FILTER .name = 'Lars') };
         ''')
 
-        expected = {
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
-            'confirmed': [],
-            'complete': False,
-            'proposed': {
-                'statements': [{
-                    'text': (
-                        'CREATE TYPE default::Type1 {\n'
-                        '    CREATE OPTIONAL SINGLE PROPERTY field1'
-                        ' -> std::str;\n'
-                        '};'
-                    )
-                }],
-                'confidence': 1.0,
-                'operation_id': 'CREATE TYPE default::Type1',
-                'prompt': "did you create object type 'default::Type1'?",
-            },
-        }
-
-        result = await self.con.query_one(
+        await self.assert_query_result(
             '''
-                DESCRIBE CURRENT MIGRATION AS JSON;
+            WITH
+                User := (SELECT schema::ObjectType FILTER .name = 'test::User')
+            SELECT
+                User.pointers {
+                    target: {
+                        name
+                    }
+                }
+            FILTER
+                .name = 'authored'
             ''',
+            [{
+                'target': {
+                    'name': 'std::BaseObject',
+                }
+            }]
         )
 
-        self.assertEqual(json.loads(result), expected)
+        await self.assert_query_result(
+            '''
+            WITH MODULE test
+            SELECT _ := User.authored.__type__.name
+            ORDER BY _
+            ''',
+            ['test::Post', 'test::Video']
+        )
 
-    async def test_edgeql_ddl_describe_migration_json_02(self):
-        await self.con.execute('''
-            START MIGRATION TO {
-                module test {
+    async def test_edgeql_ddl_change_module_01(self):
+        await self.con.execute("""
+            CREATE MODULE foo;
+
+            CREATE TYPE test::Note {
+                CREATE PROPERTY note -> str;
+            };
+            ALTER TYPE test::Note RENAME TO foo::Note;
+            DROP TYPE foo::Note;
+        """)
+
+    async def test_edgeql_ddl_change_module_02(self):
+        await self.con.execute("""
+            CREATE MODULE foo;
+
+            CREATE TYPE test::Parent {
+                CREATE PROPERTY note -> str;
+            };
+            CREATE TYPE test::Sub EXTENDING test::Parent;
+            ALTER TYPE test::Parent RENAME TO foo::Parent;
+            DROP TYPE test::Sub;
+            DROP TYPE foo::Parent;
+        """)
+
+    async def test_edgeql_ddl_change_module_03(self):
+        await self.con.execute("""
+            CREATE MODULE foo;
+
+            CREATE TYPE test::Note {
+                CREATE PROPERTY note -> str {
+                    CREATE CONSTRAINT exclusive;
+                }
+            };
+            ALTER TYPE test::Note RENAME TO foo::Note;
+            DROP TYPE foo::Note;
+        """)
+
+    async def test_edgeql_ddl_change_module_04(self):
+        await self.con.execute("""
+            CREATE MODULE foo;
+
+            CREATE TYPE test::Tag;
+
+            CREATE TYPE test::Note {
+                CREATE SINGLE LINK tags -> test::Tag {
+                    ON TARGET DELETE DELETE SOURCE;
+                }
+            };
+
+            INSERT test::Note { tags := (INSERT test::Tag) };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE test::Tag RENAME TO foo::Tag;
+            DELETE foo::Tag FILTER true;
+        """)
+
+        await self.assert_query_result(
+            """SELECT test::Note;""",
+            [],
+        )
+
+        await self.con.execute("""
+            ALTER TYPE test::Note RENAME TO foo::Note;
+            DROP TYPE foo::Note;
+            DROP TYPE foo::Tag;
+        """)
+
+    async def _simple_rename_ref_test(
+        self,
+        ddl,
+        cleanup=None,
+        *,
+        rename_type,
+        rename_prop,
+        rename_module,
+        type_extra=0,
+        prop_extra=0,
+        type_refs=1,
+        prop_refs=1,
+    ):
+        """Driver for simple rename tests for objects with expr references.
+
+        Supports renaming a type, a property, or both. By default,
+        each is expected to be named once in the referencing object.
+
+        """
+        await self.con.execute(f"""
+            WITH MODULE test
+            CREATE TYPE Note {{
+                CREATE PROPERTY note -> str;
+            }};
+
+            WITH MODULE test
+            {ddl.lstrip()}
+        """)
+
+        type_rename = "RENAME TO Remark;" if rename_type else ""
+        prop_rename = (
+            "ALTER PROPERTY note RENAME TO remark;" if rename_prop else "")
+
+        await self.con.execute(f"""
+            WITH MODULE test
+            ALTER TYPE Note {{
+                {type_rename.lstrip()}
+                {prop_rename.lstrip()}
+            }}
+        """)
+        if rename_module:
+            await self.con.execute(f"""
+            CREATE MODULE foo;
+            ALTER TYPE test::Note RENAME TO foo::Note;
+            """)
+
+        else:
+            res = await self.con.query_one("""
+                DESCRIBE MODULE test
+            """)
+
+            total_type = 1 + type_refs
+            num_type_orig = 0 if rename_type else total_type
+            self.assertEqual(res.count("Note"), num_type_orig + type_extra)
+            self.assertEqual(res.count("Remark"), total_type - num_type_orig)
+            total_prop = 1 + prop_refs
+            num_prop_orig = 0 if rename_prop else total_prop
+            self.assertEqual(res.count("note"), num_prop_orig + type_extra)
+            self.assertEqual(res.count("remark"), total_prop - num_prop_orig)
+
+        if cleanup:
+            if rename_prop:
+                cleanup = cleanup.replace("note", "remark")
+            if rename_type:
+                cleanup = cleanup.replace("Note", "Remark")
+            if rename_module:
+                cleanup = cleanup.replace("test", "foo")
+            await self.con.execute(f"""
+                WITH MODULE test
+                {cleanup.lstrip()}
+            """)
+
+    async def _simple_rename_ref_tests(self, ddl, cleanup=None, **kwargs):
+        """Do the three interesting invocations of _simple_rename_ref_test"""
+        async with self._run_and_rollback():
+            await self._simple_rename_ref_test(
+                ddl, cleanup,
+                rename_type=False, rename_prop=True, rename_module=False,
+                **kwargs)
+        async with self._run_and_rollback():
+            await self._simple_rename_ref_test(
+                ddl, cleanup,
+                rename_type=True, rename_prop=False, rename_module=False,
+                **kwargs)
+        async with self._run_and_rollback():
+            await self._simple_rename_ref_test(
+                ddl, cleanup,
+                rename_type=True, rename_prop=True, rename_module=False,
+                **kwargs)
+        async with self._run_and_rollback():
+            await self._simple_rename_ref_test(
+                ddl, cleanup,
+                rename_type=False, rename_prop=False, rename_module=True,
+                **kwargs)
+
+    async def test_edgeql_ddl_rename_ref_function_01(self):
+        await self._simple_rename_ref_tests(
+            """
+            CREATE FUNCTION foo(x: Note) ->  str {
+                USING (SELECT ('Note note ' ++ x.note ++
+                               (SELECT Note.note LIMIT 1)))
+            }
+            """,
+            """DROP FUNCTION foo(x: test::Note);""",
+            type_extra=1,
+            prop_extra=1,
+            type_refs=2,
+            prop_refs=2,
+        )
+
+    async def test_edgeql_ddl_rename_ref_function_02(self):
+        # Test renaming two types that appear as function arguments at
+        # the same time.
+        await self.con.execute("""
+            WITH MODULE test
+            CREATE TYPE Note {
+                CREATE PROPERTY note -> str;
+            };
+
+            WITH MODULE test
+            CREATE TYPE Name {
+                CREATE PROPERTY name -> str;
+            };
+
+            WITH MODULE test
+            CREATE FUNCTION foo(x: Note, y: Name) -> str {
+                USING (SELECT (x.note ++ " " ++ y.name))
+            };
+        """)
+
+        await self.con.execute("""
+            WITH MODULE test
+            INSERT Note { note := "hello" }
+        """)
+        await self.con.execute("""
+            WITH MODULE test
+            INSERT Name { name := "world" }
+        """)
+
+        await self.con.execute("""
+            CREATE MIGRATION {
+                ALTER TYPE test::Note RENAME TO test::Remark;
+                ALTER TYPE test::Name RENAME TO test::Handle;
+            }
+            """)
+
+        res = await self.con.query_one("""
+            DESCRIBE MODULE test
+        """)
+
+        self.assertEqual(res.count("Note"), 0)
+        self.assertEqual(res.count("Name"), 0)
+        self.assertEqual(res.count("Remark"), 2)
+        self.assertEqual(res.count("Handle"), 2)
+
+        await self.assert_query_result(
+            '''
+                WITH MODULE test
+                SELECT foo(Remark, Handle);
+            ''',
+            ['hello world'],
+        )
+
+        await self.con.execute("""
+            WITH MODULE test
+            DROP FUNCTION foo(x: Remark, y: Handle);
+        """)
+
+    async def test_edgeql_ddl_rename_ref_function_03(self):
+        await self._simple_rename_ref_tests(
+            """
+            CREATE FUNCTION foo(x: str) -> Note {
+                USING (SELECT Note FILTER .note = x LIMIT 1)
+            }
+            """,
+            """DROP FUNCTION foo(x: str);""",
+            type_refs=2,
+        )
+
+    async def test_edgeql_ddl_rename_ref_default_01(self):
+        await self._simple_rename_ref_tests(
+            """
+            CREATE TYPE Object2 {
+                CREATE REQUIRED PROPERTY x -> str {
+                    SET default := (SELECT Note.note LIMIT 1)
+                }
+            };
+            """,
+            """ALTER TYPE Object2 DROP PROPERTY x;""",
+        )
+
+    async def test_edgeql_ddl_rename_ref_constraint_01(self):
+        await self.con.execute("""
+            WITH MODULE test
+            CREATE TYPE Note {
+                CREATE PROPERTY name -> str;
+                CREATE PROPERTY note -> str;
+                CREATE CONSTRAINT exclusive ON (
+                    (__subject__.name, __subject__.note));
+            };
+        """)
+
+        await self.con.execute("""
+            WITH MODULE test
+            ALTER TYPE Note {
+                ALTER PROPERTY note {
+                    RENAME TO remark;
                 };
-            };
-        ''')
-
-        expected = {
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
-            'confirmed': [],
-            'complete': True,
-            'proposed': None,
-        }
-
-        result = await self.con.query_one(
-            '''
-                DESCRIBE CURRENT MIGRATION AS JSON;
-            ''',
-        )
-
-        self.assertEqual(json.loads(result), expected)
-
-    async def test_edgeql_ddl_describe_migration_json_03(self):
-        await self.con.execute('''
-            START MIGRATION TO {
-                module test {
-                    type Type1 {
-                        property field1 -> str;
-                    };
+                ALTER PROPERTY name {
+                    RENAME TO callsign;
                 };
+            }
+        """)
+
+        res = await self.con.query_one("""
+            DESCRIBE MODULE test
+        """)
+
+        self.assertEqual(res.count("note"), 0)
+        self.assertEqual(res.count("remark"), 2)
+        self.assertEqual(res.count("name"), 0)
+        self.assertEqual(res.count("callsign"), 2)
+
+        await self.con.execute("""
+            ALTER TYPE test::Note
+            DROP CONSTRAINT exclusive ON ((
+                (__subject__.callsign, __subject__.remark)));
+        """)
+
+    async def test_edgeql_ddl_rename_ref_index_01(self):
+        await self._simple_rename_ref_tests(
+            """ALTER TYPE Note CREATE INDEX ON (.note);""",
+            """ALTER TYPE test::Note DROP INDEX ON (.note);""",
+            type_refs=0,
+        )
+
+    async def test_edgeql_ddl_rename_ref_default_02(self):
+        await self._simple_rename_ref_tests("""
+            CREATE TYPE Uses {
+                CREATE REQUIRED PROPERTY x -> str {
+                    SET default := (SELECT Note.note LIMIT 1)
+                }
             };
 
-            DECLARE SAVEPOINT migration_01;
-        ''')
-
-        expected_1 = {
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
-            'confirmed': [],
-            'complete': False,
-            'proposed': {
-                'statements': [{
-                    'text': (
-                        'CREATE TYPE test::Type1 {\n'
-                        '    CREATE OPTIONAL SINGLE PROPERTY field1'
-                        ' -> std::str;\n'
-                        '};'
-                    )
-                }],
-                'confidence': 1.0,
-                'operation_id': 'CREATE TYPE test::Type1',
-                'prompt': "did you create object type 'test::Type1'?",
-            },
-        }
-
-        result = await self.con.query_one(
-            '''
-                DESCRIBE CURRENT MIGRATION AS JSON;
-            ''',
-        )
-
-        self.assertEqual(json.loads(result), expected_1)
-
-        await self.con.execute('''
-            CREATE TYPE test::Type1 {
-                CREATE OPTIONAL SINGLE PROPERTY field1 -> std::str;
+            WITH MODULE test
+            CREATE TYPE Uses2 {
+                CREATE REQUIRED PROPERTY x -> str {
+                    SET default := (SELECT Note.note LIMIT 1)
+                }
             };
-        ''')
+        """, prop_refs=2, type_refs=2)
 
-        expected_2 = {
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
-            'confirmed': [
-                'CREATE TYPE test::Type1 {\n'
-                '    CREATE OPTIONAL SINGLE PROPERTY field1 -> std::str;\n'
-                '}'
-            ],
-            'complete': True,
-            'proposed': None,
-        }
-
-        result = await self.con.query_one(
-            '''
-                DESCRIBE CURRENT MIGRATION AS JSON;
-            ''',
-        )
-
-        self.assertEqual(json.loads(result), expected_2)
-
-        await self.con.execute('ROLLBACK TO SAVEPOINT migration_01;')
-
-        result = await self.con.query_one(
-            '''
-                DESCRIBE CURRENT MIGRATION AS JSON;
-            ''',
-        )
-
-        self.assertEqual(json.loads(result), expected_1)
-
-    async def test_edgeql_ddl_describe_migration_json_04(self):
-        self.maxDiff = None
-        await self.migrate('''
-            type Test;
-        ''')
-
-        await self.con.execute('''
-            START MIGRATION TO {
-                module test {
-                    type Test2;
-                    type Test3;
-                };
+    async def test_edgeql_ddl_rename_ref_computable_01(self):
+        await self._simple_rename_ref_tests(
+            """
+            ALTER TYPE Note {
+                CREATE PROPERTY x := .note ++ "!";
             };
-        ''')
-
-        expected = {
-            'parent': 'm1xh653zionj2aehqbh7x6km5lo3b2mjaftxdkvqoh3wluc3iv6k2a',
-            'confirmed': [],
-            'complete': False,
-            'proposed': {
-                'statements': [{
-                    'text': 'ALTER TYPE test::Test RENAME TO test::Test2;',
-                }],
-                'confidence': 1.0,
-                'operation_id': 'ALTER TYPE test::Test',
-                'prompt': (
-                    "did you rename object type 'test::Test' to 'test::Test2'?"
-                ),
-            },
-        }
-
-        result = await self.con.query_one(
-            '''
-                DESCRIBE CURRENT MIGRATION AS JSON;
-            ''',
+            """,
+            """ALTER TYPE test::Note DROP PROPERTY x;""",
+            type_refs=0,
         )
 
-        self.assertEqual(json.loads(result), expected)
-
-        await self.con.execute('''
-            ALTER CURRENT MIGRATION REJECT PROPOSED;
-        ''')
-
-        expected_1 = {
-            'parent': 'm1xh653zionj2aehqbh7x6km5lo3b2mjaftxdkvqoh3wluc3iv6k2a',
-            'confirmed': [],
-            'complete': False,
-            'proposed': {
-                'statements': [{
-                    'text': 'ALTER TYPE test::Test RENAME TO test::Test3;',
-                }],
-                'confidence': 1.0,
-                'operation_id': 'ALTER TYPE test::Test',
-                'prompt': (
-                    "did you rename object type 'test::Test' to 'test::Test3'?"
-                ),
-            },
-        }
-
-        result = await self.con.query_one(
-            '''
-                DESCRIBE CURRENT MIGRATION AS JSON;
-            ''',
+    async def test_edgeql_ddl_rename_ref_computable_02(self):
+        await self._simple_rename_ref_tests(
+            """
+            CREATE TYPE Foo {
+                CREATE PROPERTY foo -> str;
+                CREATE MULTI LINK x := (
+                    SELECT Note FILTER Note.note = Foo.foo);
+            };
+            """,
+            """ALTER TYPE Foo DROP LINK x;""",
+            type_refs=2,
         )
 
-        self.assertEqual(json.loads(result), expected_1)
-
-        await self.con.execute('''
-            ALTER TYPE test::Test RENAME TO test::Test3;
-        ''')
-
-        expected_2 = {
-            'parent': 'm1xh653zionj2aehqbh7x6km5lo3b2mjaftxdkvqoh3wluc3iv6k2a',
-            'confirmed': ['ALTER TYPE test::Test RENAME TO test::Test3'],
-            'complete': False,
-            'proposed': {
-                'statements': [{
-                    'text': 'CREATE TYPE test::Test2;',
-                }],
-                'confidence': 1.0,
-                'operation_id': 'CREATE TYPE test::Test2',
-                'prompt': (
-                    "did you create object type 'test::Test2'?"
-                ),
-            },
-        }
-
-        result = await self.con.query_one(
-            '''
-                DESCRIBE CURRENT MIGRATION AS JSON;
-            ''',
+    async def test_edgeql_ddl_rename_ref_type_alias_01(self):
+        await self._simple_rename_ref_tests(
+            """CREATE ALIAS Alias := Note;""",
+            """DROP ALIAS Alias;""",
+            prop_refs=0,
         )
 
-        self.assertEqual(json.loads(result), expected_2)
+    async def test_edgeql_ddl_rename_ref_expr_alias_01(self):
+        await self._simple_rename_ref_tests(
+            """CREATE ALIAS Alias := (SELECT Note.note);""",
+            """DROP ALIAS Alias;""",
+        )
+
+    async def test_edgeql_ddl_rename_ref_shape_alias_01(self):
+        await self._simple_rename_ref_tests(
+            """CREATE ALIAS Alias := Note { command := .note ++ "!" };""",
+            """DROP ALIAS Alias;""",
+        )

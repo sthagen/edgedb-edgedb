@@ -25,9 +25,11 @@ from typing import *  # noqa
 from edb import edgeql
 from edb.edgeql import ast as qlast
 from edb.edgeql import declarative as s_decl
+from edb.server import defines
 
 from . import delta as sd
 from . import expr as s_expr
+from . import functions as s_func
 from . import migrations as s_migr
 from . import modules as s_mod
 from . import objects as so
@@ -134,10 +136,14 @@ def delta_schemas(
 
     schema_a_filters = list(schema_a_filters)
     schema_b_filters = list(schema_b_filters)
+    context = so.ComparisonContext(
+        generate_prompts=generate_prompts,
+        guidance=guidance,
+    )
 
     if schema_a is None:
         if include_std_diff:
-            schema_a = s_schema.Schema()
+            schema_a = s_schema.FlatSchema()
         else:
             schema_a = schema_b
 
@@ -205,25 +211,31 @@ def delta_schemas(
 
     if include_module_diff:
         for added_module in added_modules:
-            create = s_mod.CreateModule(
-                classname=added_module,
-                if_not_exists=True,
-            )
-            create.set_attribute_value('name', added_module)
-            create.set_attribute_value('builtin', False)
-            result.add(create)
+            if (
+                guidance is None
+                or (
+                    (s_mod.Module, added_module)
+                    not in guidance.banned_creations
+                )
+            ):
+                mod = schema_b.get_global(s_mod.Module, added_module, None)
+                assert mod is not None
+                create = mod.as_create_delta(
+                    schema=schema_b,
+                    context=context,
+                )
+                create.if_not_exists = True
+
+                result.add(create)
 
     objects = sd.DeltaRoot(canonical=True)
-    context = so.ComparisonContext(
-        generate_prompts=generate_prompts,
-        guidance=guidance,
-    )
 
     schemaclasses = [
         schemacls
         for schemacls in so.ObjectMeta.get_schema_metaclasses()
         if (
-            not issubclass(schemacls, (so.GlobalObject, s_mod.Module))
+            not issubclass(schemacls, (so.GlobalObject, s_mod.Module,
+                                       s_func.Parameter))
             and schemacls.get_ql_class() is not None
             and (
                 include_migrations
@@ -301,7 +313,21 @@ def delta_schemas(
 
     if include_module_diff:
         for dropped_module in dropped_modules:
-            result.add(s_mod.DeleteModule(classname=dropped_module))
+            if (
+                guidance is None
+                or (
+                    (s_mod.Module, dropped_module)
+                    not in guidance.banned_deletions
+                )
+            ):
+                mod = schema_a.get_global(s_mod.Module, dropped_module, None)
+                assert mod is not None
+                dropped = mod.as_delete_delta(
+                    schema=schema_a,
+                    context=context,
+                )
+
+                result.add(dropped)
 
     return result
 
@@ -335,12 +361,13 @@ def apply_sdl(
     # group declarations by module
     documents: Dict[str, List[qlast.DDL]] = defaultdict(list)
     # initialize the "default" module
-    documents['default'] = []
+    documents[defines.DEFAULT_MODULE_ALIAS] = []
     for decl in sdl_document.declarations:
         # declarations are either in a module block or fully-qualified
         if isinstance(decl, qlast.ModuleDeclaration):
             documents[decl.name.name].extend(decl.declarations)
         else:
+            assert decl.name.module is not None
             documents[decl.name.module].append(decl)
 
     ddl_stmts = s_decl.sdl_to_ddl(current_schema, documents)
@@ -406,6 +433,7 @@ def apply_ddl_script_ex(
     schema: s_schema.Schema,
     modaliases: Optional[Mapping[Optional[str], str]] = None,
     stdmode: bool = False,
+    internal_schema_mode: bool = False,
     testmode: bool = False,
 ) -> Tuple[s_schema.Schema, sd.DeltaRoot]:
 
@@ -420,6 +448,7 @@ def apply_ddl_script_ex(
             schema=schema,
             modaliases=modaliases,
             stdmode=stdmode,
+            internal_schema_mode=internal_schema_mode,
             testmode=testmode,
         )
 
@@ -438,7 +467,7 @@ def delta_from_ddl(
     schema_object_ids: Optional[
         Mapping[Tuple[str, Optional[str]], uuid.UUID]
     ]=None,
-    compat_ver: verutils.Version = None,
+    compat_ver: Optional[verutils.Version] = None,
 ) -> sd.DeltaRoot:
     _, cmd = _delta_from_ddl(
         ddl_stmt,
@@ -458,17 +487,19 @@ def _delta_from_ddl(
     schema: s_schema.Schema,
     modaliases: Mapping[Optional[str], str],
     stdmode: bool=False,
+    internal_schema_mode: bool=False,
     testmode: bool=False,
     schema_object_ids: Optional[
         Mapping[Tuple[str, Optional[str]], uuid.UUID]
     ]=None,
-    compat_ver: verutils.Version = None,
+    compat_ver: Optional[verutils.Version] = None,
 ) -> Tuple[s_schema.Schema, sd.DeltaRoot]:
     delta = sd.DeltaRoot()
     context = sd.CommandContext(
         modaliases=modaliases,
         schema=schema,
         stdmode=stdmode,
+        internal_schema_mode=internal_schema_mode,
         testmode=testmode,
         schema_object_ids=schema_object_ids,
         compat_ver=compat_ver,

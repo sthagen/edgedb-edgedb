@@ -68,6 +68,7 @@ class CardinalityModifier(s_enum.StrEnum):
 
 class DescribeGlobal(s_enum.StrEnum):
     Schema = 'SCHEMA'
+    DatabaseConfig = 'DATABASE CONFIG'
     SystemConfig = 'SYSTEM CONFIG'
     Roles = 'ROLES'
 
@@ -87,18 +88,18 @@ class Base(ast.AST):
 
 class OffsetLimitMixin(Base):
     __abstract_node__ = True
-    offset: Expr
-    limit: Expr
+    offset: typing.Optional[Expr]
+    limit: typing.Optional[Expr]
 
 
 class OrderByMixin(Base):
     __abstract_node__ = True
-    orderby: typing.List[SortExpr]
+    orderby: typing.Optional[typing.List[SortExpr]]
 
 
 class FilterMixin(Base):
     __abstract_node__ = True
-    where: Expr
+    where: typing.Optional[Expr]
 
 
 class OptionValue(Base):
@@ -155,8 +156,8 @@ class Clause(Base):
 
 class SortExpr(Clause):
     path: Expr
-    direction: SortOrder
-    nones_order: str
+    direction: typing.Optional[SortOrder]
+    nones_order: typing.Optional[str]
 
 
 class BaseAlias(Clause):
@@ -212,7 +213,7 @@ class BaseObjectRef(Base):
 
 class ObjectRef(BaseObjectRef):
     name: str
-    module: str
+    module: typing.Optional[str]
     itemclass: typing.Optional[qltypes.SchemaObjectClass]
 
 
@@ -254,8 +255,8 @@ class Index(Base):
 
 
 class Slice(Base):
-    start: Expr
-    stop: Expr
+    start: typing.Optional[Expr]
+    stop: typing.Optional[Expr]
 
 
 class Indirection(Expr):
@@ -278,7 +279,7 @@ class FunctionCall(Expr):
     func: typing.Union[tuple, str]
     args: typing.List[Expr]
     kwargs: typing.Dict[str, Expr]
-    window: WindowSpec
+    window: typing.Optional[WindowSpec]
 
 
 class BaseConstant(Expr):
@@ -368,9 +369,9 @@ class TypeOp(TypeExpr):
 class FuncParam(Base):
     name: str
     type: TypeExpr
-    typemod: qltypes.TypeModifier = qltypes.TypeModifier.SINGLETON
+    typemod: qltypes.TypeModifier = qltypes.TypeModifier.SingletonType
     kind: qltypes.ParameterKind
-    default: Expr
+    default: typing.Optional[Expr]
 
 
 class IsOp(Expr):
@@ -385,8 +386,8 @@ class TypeIntersection(Base):
 
 class Ptr(Base):
     ptr: ObjectRef
-    direction: str
-    type: str
+    direction: typing.Optional[str]
+    type: typing.Optional[str]
 
 
 class Path(Expr):
@@ -420,7 +421,7 @@ class NamedTuple(Expr):
 
 
 class Tuple(Expr):
-    elements: typing.List[TupleElement]
+    elements: typing.List[Expr]
 
 
 class Array(Expr):
@@ -464,13 +465,13 @@ class Statement(Command, Expr):
 class SubjectMixin(Base):
     __abstract_node__ = True
     subject: Expr
-    subject_alias: str
+    subject_alias: typing.Optional[str]
 
 
 class ReturningMixin(Base):
     __abstract_node__ = True
     result: Expr
-    result_alias: str
+    result_alias: typing.Optional[str]
 
 
 class SelectClauseMixin(OrderByMixin, OffsetLimitMixin, FilterMixin):
@@ -494,8 +495,8 @@ class ShapeOperation(Base):
 class ShapeElement(OffsetLimitMixin, OrderByMixin, FilterMixin, Expr):
     expr: Path
     elements: typing.List[ShapeElement]
-    compexpr: Expr
-    cardinality: qltypes.SchemaCardinality
+    compexpr: typing.Optional[Expr]
+    cardinality: typing.Optional[qltypes.SchemaCardinality]
     required: bool = False
     operation: ShapeOperation = ShapeOperation(op=ShapeOp.ASSIGN)
 
@@ -586,7 +587,7 @@ class BasesMixin(DDL):
 
 
 class Position(DDL):
-    ref: ObjectRef
+    ref: typing.Optional[ObjectRef]
     position: str
 
 
@@ -612,7 +613,7 @@ class SetPropertyType(SetPointerType):
 
 
 class AlterAddInherit(DDLOperation, BasesMixin):
-    position: Position
+    position: typing.Optional[Position]
 
 
 class AlterDropInherit(DDLOperation, BasesMixin):
@@ -969,7 +970,8 @@ class CreateFunction(CreateObject, CallableObject):
     returning: TypeExpr
     code: FunctionCode
     nativecode: typing.Optional[Expr]
-    returning_typemod: qltypes.TypeModifier = qltypes.TypeModifier.SINGLETON
+    returning_typemod: qltypes.TypeModifier = \
+        qltypes.TypeModifier.SingletonType
 
 
 class AlterFunction(AlterObject, CallableObject):
@@ -996,7 +998,8 @@ class OperatorCommand(CallableObject):
 
 class CreateOperator(CreateObject, OperatorCommand):
     returning: TypeExpr
-    returning_typemod: qltypes.TypeModifier = qltypes.TypeModifier.SINGLETON
+    returning_typemod: qltypes.TypeModifier = \
+        qltypes.TypeModifier.SingletonType
     code: OperatorCode
 
 
@@ -1048,7 +1051,7 @@ class _Optional(Expr):
 class ConfigOp(Expr):
     __abstract_node__ = True
     name: ObjectRef
-    system: bool
+    scope: qltypes.ConfigScope
     backend_setting: str
 
 

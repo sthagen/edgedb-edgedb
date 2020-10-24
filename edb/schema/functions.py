@@ -57,13 +57,13 @@ def param_as_str(
     typemod = param.get_typemod(schema)
     default = param.get_default(schema)
 
-    if kind is not ft.ParameterKind.POSITIONAL:
+    if kind is not ft.ParameterKind.PositionalParam:
         ret.append(kind.to_edgeql())
         ret.append(' ')
 
     ret.append(f'{param.get_parameter_name(schema)}: ')
 
-    if typemod is not ft.TypeModifier.SINGLETON:
+    if typemod is not ft.TypeModifier.SingletonType:
         ret.append(typemod.to_edgeql())
         ret.append(' ')
 
@@ -93,9 +93,9 @@ def canonical_param_sort(
     for param in params:
         param_kind = param.get_kind(schema)
 
-        if param_kind is ft.ParameterKind.POSITIONAL:
+        if param_kind is ft.ParameterKind.PositionalParam:
             canonical_order.append(param)
-        elif param_kind is ft.ParameterKind.NAMED_ONLY:
+        elif param_kind is ft.ParameterKind.NamedOnlyParam:
             named.append(param)
         else:
             variadic = param
@@ -198,7 +198,7 @@ class ParameterDesc(ParameterLike):
 
         paramt_ast = astnode.type
 
-        if astnode.kind is ft.ParameterKind.VARIADIC:
+        if astnode.kind is ft.ParameterKind.VariadicParam:
             paramt_ast = qlast.TypeName(
                 maintype=qlast.ObjectRef(
                     name='array',
@@ -268,6 +268,17 @@ class ParameterDesc(ParameterLike):
             default=props.get('default'),
         )
 
+    def get_fqname(
+        self,
+        schema: s_schema.Schema,
+        func_fqname: sn.Name,
+    ) -> str:
+        return sn.Name(
+            module=func_fqname.module,
+            name=sn.get_specialized_name(
+                self.get_name(schema), func_fqname)
+        )
+
     def as_create_delta(
         self,
         schema: s_schema.Schema,
@@ -278,11 +289,7 @@ class ParameterDesc(ParameterLike):
         CreateParameter = sd.ObjectCommandMeta.get_command_class_or_die(
             sd.CreateObject, Parameter)
 
-        param_name = sn.Name(
-            module=func_fqname.module,
-            name=sn.get_specialized_name(
-                self.get_name(schema), func_fqname)
-        )
+        param_name = self.get_fqname(schema, func_fqname)
 
         cmd = CreateParameter(classname=param_name)
         cmd.set_attribute_value('name', param_name)
@@ -319,7 +326,11 @@ class ParameterDesc(ParameterLike):
         return cmd
 
 
-class Parameter(so.ObjectFragment, ParameterLike):
+class Parameter(
+    so.ObjectFragment,
+    ParameterLike,
+    qlkind=ft.SchemaObjectClass.PARAMETER,
+):
 
     num = so.SchemaField(
         int, compcoef=0.4)
@@ -332,7 +343,7 @@ class Parameter(so.ObjectFragment, ParameterLike):
 
     typemod = so.SchemaField(
         ft.TypeModifier,
-        default=ft.TypeModifier.SINGLETON,
+        default=ft.TypeModifier.SingletonType,
         coerce=True, compcoef=0.4)
 
     kind = so.SchemaField(
@@ -429,6 +440,17 @@ class ParameterCommand(
     referrer_context_class=CallableCommandContext
 ):
 
+    def get_ast(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        *,
+        parent_node: Optional[qlast.DDLOperation] = None,
+    ) -> Optional[qlast.DDLOperation]:
+        # ParameterCommand cannot have its own AST because it is a
+        # side-effect of a FunctionCommand.
+        return None
+
     def canonicalize_attributes(
         self,
         schema: s_schema.Schema,
@@ -458,6 +480,14 @@ class CreateParameter(ParameterCommand, sd.CreateObject[Parameter]):
 
 
 class DeleteParameter(ParameterCommand, sd.DeleteObject[Parameter]):
+    pass
+
+
+class RenameParameter(ParameterCommand, sd.RenameObject[Parameter]):
+    pass
+
+
+class AlterParameter(ParameterCommand, sd.AlterObject[Parameter]):
     pass
 
 
@@ -543,20 +573,20 @@ class FuncParameterList(so.ObjectList[Parameter], ParameterLikeList):
     ) -> Mapping[str, Parameter]:
         named = {}
         for param in self.objects(schema):
-            if param.get_kind(schema) is ft.ParameterKind.NAMED_ONLY:
+            if param.get_kind(schema) is ft.ParameterKind.NamedOnlyParam:
                 named[param.get_parameter_name(schema)] = param
 
         return types.MappingProxyType(named)
 
     def find_variadic(self, schema: s_schema.Schema) -> Optional[Parameter]:
         for param in self.objects(schema):
-            if param.get_kind(schema) is ft.ParameterKind.VARIADIC:
+            if param.get_kind(schema) is ft.ParameterKind.VariadicParam:
                 return param
         return None
 
     def has_required_params(self, schema: s_schema.Schema) -> bool:
         return any(
-            param.get_kind(schema) is not ft.ParameterKind.VARIADIC
+            param.get_kind(schema) is not ft.ParameterKind.VariadicParam
             and param.get_default(schema) is None
             for param in self.objects(schema)
         )
@@ -577,7 +607,7 @@ class FuncParameterList(so.ObjectList[Parameter], ParameterLikeList):
 class VolatilitySubject(so.Object):
 
     volatility = so.SchemaField(
-        ft.Volatility, default=ft.Volatility.VOLATILE,
+        ft.Volatility, default=ft.Volatility.Volatile,
         compcoef=0.4, coerce=True, allow_ddl_set=True)
 
 
@@ -714,9 +744,9 @@ class CallableObject(
 
             quals.append(pt_id)
             pk = param.get_kind(schema)
-            if pk is ft.ParameterKind.NAMED_ONLY:
+            if pk is ft.ParameterKind.NamedOnlyParam:
                 quals.append(f'$NO-{param.get_name(schema)}-{pt_id}$')
-            elif pk is ft.ParameterKind.VARIADIC:
+            elif pk is ft.ParameterKind.VariadicParam:
                 quals.append(f'$V$')
 
         return tuple(quals)
@@ -965,25 +995,28 @@ class Function(CallableObject, VolatilitySubject, s_abc.Function,
         qlast.Language, default=None, compcoef=0.4, coerce=True)
 
     from_function = so.SchemaField(
-        str, default=None, compcoef=0.4, introspectable=False)
+        str, default=None, compcoef=0.4)
 
     from_expr = so.SchemaField(
-        bool, default=False, compcoef=0.4, introspectable=False)
+        bool, default=False, compcoef=0.4)
 
     force_return_cast = so.SchemaField(
-        bool, default=False, compcoef=0.9, introspectable=False)
+        bool, default=False, compcoef=0.9)
 
     sql_func_has_out_params = so.SchemaField(
-        bool, default=False, compcoef=0.9, introspectable=False)
+        bool, default=False, compcoef=0.9)
 
     error_on_null_result = so.SchemaField(
-        str, default=None, compcoef=0.9, introspectable=False)
+        str, default=None, compcoef=0.9)
 
     initial_value = so.SchemaField(
         expr.Expression, default=None, compcoef=0.4, coerce=True)
 
     session_only = so.SchemaField(
         bool, default=False, compcoef=0.4, coerce=True, allow_ddl_set=True)
+
+    has_dml = so.SchemaField(
+        bool, default=False, allow_ddl_set=True)
 
     def has_inlined_defaults(self, schema: s_schema.Schema) -> bool:
         # This can be relaxed to just `language is EdgeQL` when we
@@ -1061,6 +1094,7 @@ class FunctionCommand(
         context: sd.CommandContext,
         field: so.Field[Any],
         value: expr.Expression,
+        track_schema_ref_exprs: bool=False,
     ) -> expr.Expression:
         if field.name == 'initial_value':
             return type(value).compiled(
@@ -1069,12 +1103,16 @@ class FunctionCommand(
                 options=qlcompiler.CompilerOptions(
                     allow_generic_type_output=True,
                     schema_object_context=self.get_schema_metaclass(),
+                    apply_query_rewrites=not context.stdmode,
+                    track_schema_ref_exprs=track_schema_ref_exprs,
                 ),
             )
         elif field.name == 'nativecode':
-            return self.compile_function(schema, context, value)
+            return self.compile_function(
+                schema, context, value, track_schema_ref_exprs)
         else:
-            return super().compile_expr_field(schema, context, field, value)
+            return super().compile_expr_field(
+                schema, context, field, value, track_schema_ref_exprs)
 
     def _get_attribute_value(
         self,
@@ -1104,6 +1142,7 @@ class FunctionCommand(
         schema: s_schema.Schema,
         context: sd.CommandContext,
         body: expr.Expression,
+        track_schema_ref_exprs: bool=False,
     ) -> expr.Expression:
         from edb.ir import ast as irast
 
@@ -1131,12 +1170,19 @@ class FunctionCommand(
                 # the body of a session_only function can contain calls to
                 # other session_only functions
                 session_mode=session_only,
+                apply_query_rewrites=not context.stdmode,
+                track_schema_ref_exprs=track_schema_ref_exprs,
             ),
         )
 
         ir = compiled.irast
         assert isinstance(ir, irast.Statement)
         schema = ir.schema
+
+        if ir.dml_exprs:
+            # DML inside function body detected. Right now is a good
+            # opportunity to raise exceptions or give warnings.
+            self.set_attribute_value('has_dml', True)
 
         return_type = self._get_attribute_value(schema, context, 'return_type')
         if (not ir.stype.issubclass(schema, return_type)
@@ -1151,7 +1197,7 @@ class FunctionCommand(
 
         return_typemod = self._get_attribute_value(
             schema, context, 'return_typemod')
-        if (return_typemod is not ft.TypeModifier.SET_OF
+        if (return_typemod is not ft.TypeModifier.SetOfType
                 and ir.cardinality.is_multi()):
             raise errors.InvalidFunctionDefinitionError(
                 f'return cardinality mismatch in function declared to return '
@@ -1300,7 +1346,7 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
                     context=self.source_context)
 
         if (language == qlast.Language.EdgeQL and
-                any(p.get_typemod(schema) is ft.TypeModifier.SET_OF
+                any(p.get_typemod(schema) is ft.TypeModifier.SetOfType
                     for p in params.objects(schema))):
             raise errors.UnsupportedFeatureError(
                 f'cannot create the `{signature}` function: '
@@ -1337,7 +1383,7 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
                         f'{p_type.get_displayname(schema)} cannot '
                         f'have a non-empty default value',
                         context=self.source_context)
-            elif (p.get_typemod(schema) is ft.TypeModifier.OPTIONAL and
+            elif (p.get_typemod(schema) is ft.TypeModifier.OptionalType and
                     irutils.is_empty(ir_default.expr)):
                 check_default_type = False
 
@@ -1411,7 +1457,7 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
         params = []
         for op in self.get_subcommands(type=ParameterCommand):
             props = op.get_resolved_attributes(schema, context)
-            num = props['num']
+            num: int = props['num']
             default = props.get('default')
             param = qlast.FuncParam(
                 name=Parameter.paramname_from_fullname(props['name']),
@@ -1561,7 +1607,7 @@ class DeleteFunction(DeleteCallableObject[Function], FunctionCommand):
         params = []
         for op in self.get_subcommands(type=ParameterCommand):
             props = op.get_orig_attributes(schema, context)
-            num = props['num']
+            num: int = props['num']
             param = qlast.FuncParam(
                 name=Parameter.paramname_from_fullname(props['name']),
                 type=utils.typeref_to_ast(schema, props['type']),
@@ -1596,7 +1642,9 @@ def get_params_symtable(
 
     for pi, p in enumerate(params.get_in_canonical_order(schema)):
         p_shortname = p.get_parameter_name(schema)
-        p_is_optional = p.get_typemod(schema) is not ft.TypeModifier.SINGLETON
+        p_is_optional = (
+            p.get_typemod(schema) is not ft.TypeModifier.SingletonType
+        )
         anchors[p_shortname] = qlast.TypeCast(
             expr=qlast.Parameter(
                 name=p_shortname,

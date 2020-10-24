@@ -34,7 +34,6 @@ from edb.schema import pointers as s_pointers
 from edb.schema import types as s_types
 
 from . import context
-from . import stmtctx
 
 
 def get_path_id(stype: s_types.Type, *,
@@ -83,14 +82,19 @@ def get_expression_path_id(
 
 def register_set_in_scope(
         ir_set: irast.Set, *,
-        path_scope: irast.ScopeTreeNode=None,
+        path_scope: Optional[irast.ScopeTreeNode]=None,
+        optional: bool=False,
         fence_points: FrozenSet[irast.PathId]=frozenset(),
         ctx: context.ContextLevel) -> List[irast.ScopeTreeNode]:
     if path_scope is None:
         path_scope = ctx.path_scope
 
+    if ctx.path_log is not None:
+        ctx.path_log.append(ir_set.path_id)
+
     return path_scope.attach_path(
         ir_set.path_id,
+        optional=optional,
         fence_points=fence_points,
         context=ir_set.context,
     )
@@ -128,17 +132,10 @@ def get_set_scope(
         return scope
 
 
-def mark_path_as_optional(
-        path_id: irast.PathId, *,
-        ctx: context.ContextLevel) -> None:
-    ctx.path_scope.mark_as_optional(path_id)
-
-
 def extend_path_id(
     path_id: irast.PathId,
     *,
     ptrcls: s_pointers.PointerLike,
-    include_descendants_in_ptrref: bool = False,
     direction: s_pointers.PointerDirection = (
         s_pointers.PointerDirection.Outbound),
     ns: AbstractSet[str] = frozenset(),
@@ -154,9 +151,7 @@ def extend_path_id(
         direction=direction,
         cache=ctx.env.ptr_ref_cache,
         typeref_cache=ctx.env.type_ref_cache,
-        include_descendants=include_descendants_in_ptrref,
     )
-    stmtctx.ensure_ptrref_cardinality(ptrcls, ptrref, ctx=ctx)
 
     return path_id.extend(ptrref=ptrref, direction=direction,
                           ns=ns, schema=ctx.env.schema)

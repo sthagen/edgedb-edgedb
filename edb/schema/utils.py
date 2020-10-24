@@ -50,7 +50,7 @@ def ast_objref_to_object_shell(
     nqname = node.name
     module = node.module
     if module is not None:
-        lname = sn.Name(module=module, name=nqname)
+        lname: str = sn.Name(module=module, name=nqname)
     else:
         lname = nqname
     obj = schema.get(lname, module_aliases=modaliases, default=None)
@@ -60,6 +60,7 @@ def ast_objref_to_object_shell(
     else:
         if obj is not None:
             actual_name = obj.get_name(schema)
+            assert isinstance(actual_name, sn.Name)
             module = actual_name.module
         else:
             aliased_module = modaliases.get(module)
@@ -91,12 +92,13 @@ def ast_objref_to_type_shell(
     nqname = node.name
     module = node.module
     if module is not None:
-        lname = sn.Name(module=module, name=nqname)
+        lname: str = sn.Name(module=module, name=nqname)
     else:
         lname = nqname
     obj = schema.get(lname, module_aliases=modaliases, default=None)
     if obj is not None:
         actual_name = obj.get_name(schema)
+        assert isinstance(actual_name, sn.Name)
         module = actual_name.module
     else:
         aliased_module = modaliases.get(module)
@@ -124,12 +126,28 @@ def ast_to_type_shell(
             and node.maintype.name == 'enum'):
         from . import scalars as s_scalars
 
-        return s_scalars.AnonymousEnumTypeShell(
-            elements=[
-                st.val.value
-                for st in cast(List[qlast.TypeExprLiteral], node.subtypes)
-            ],
-        )
+        assert node.subtypes
+
+        if isinstance(node.subtypes[0], qlast.TypeExprLiteral):
+            return s_scalars.AnonymousEnumTypeShell(
+                elements=[
+                    est.val.value
+                    for est in cast(List[qlast.TypeExprLiteral], node.subtypes)
+                ],
+            )
+        else:
+            elements: List[str] = []
+            for est in cast(List[qlast.TypeName], node.subtypes):
+                if (not isinstance(est, qlast.TypeName) or
+                        not isinstance(est.maintype, qlast.ObjectRef)):
+                    raise errors.EdgeQLSyntaxError(
+                        f'enums do not support mapped values',
+                        context=est.context,
+                    )
+                elements.append(est.maintype.name)
+            return s_scalars.AnonymousEnumTypeShell(
+                elements=elements
+            )
 
     elif node.subtypes is not None:
         from . import types as s_types
@@ -925,7 +943,7 @@ def get_config_type_shape(
 
             elem_path: List[qlast.Base] = []
 
-            if t is not stype:
+            if t != stype:
                 elem_path.append(
                     qlast.TypeIntersection(
                         type=qlast.TypeName(

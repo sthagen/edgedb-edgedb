@@ -100,6 +100,7 @@ class SchemaConstraintTableConstraint(ConstraintCommon, dbops.TableConstraint):
         origin_table_name,
         constraint,
         exprdata,
+        origin_exprdata,
         scope,
         type,
         schema,
@@ -108,6 +109,7 @@ class SchemaConstraintTableConstraint(ConstraintCommon, dbops.TableConstraint):
         dbops.TableConstraint.__init__(self, table_name, None)
         self._origin_table_name = origin_table_name
         self._exprdata = exprdata
+        self._origin_exprdata = origin_exprdata
         self._scope = scope
         self._type = type
 
@@ -185,8 +187,9 @@ class SchemaConstraintTableConstraint(ConstraintCommon, dbops.TableConstraint):
         errmsg = 'duplicate key value violates unique ' \
                  'constraint {constr}'.format(constr=constr_name)
 
-        for expr in self._exprdata:
+        for expr, origin_expr in zip(self._exprdata, self._origin_exprdata):
             exprdata = expr['exprdata']
+            origin_exprdata = origin_expr['exprdata']
 
             text = '''
                 PERFORM
@@ -205,7 +208,7 @@ class SchemaConstraintTableConstraint(ConstraintCommon, dbops.TableConstraint):
                           DETAIL = 'Key ({plain_expr}) already exists.';
                 END IF;
             '''.format(
-                plain_expr=exprdata['plain'],
+                plain_expr=origin_exprdata['plain'],
                 new_expr=exprdata['new'],
                 table=common.qname(*self.get_origin_table_name()),
                 constr=raw_constr_name,
@@ -324,19 +327,20 @@ class AlterTableRenameMultiConstraint(
             for i, _expr in enumerate(exprs):
                 old_name = c.numbered_constraint_name(i, quote=False)
                 new_name = nc.numbered_constraint_name(i, quote=False)
+                if old_name != new_name:
+                    ac = dbops.AlterTableRenameConstraintSimple(
+                        name=self.name, old_name=old_name, new_name=new_name)
 
-                ac = dbops.AlterTableRenameConstraintSimple(
-                    name=self.name, old_name=old_name, new_name=new_name)
-
-                self.add_command(ac)
+                    self.add_command(ac)
         else:
             old_name = c.constraint_name(quote=False)
             new_name = nc.constraint_name(quote=False)
 
-            ac = dbops.AlterTableRenameConstraintSimple(
-                name=self.name, old_name=old_name, new_name=new_name)
+            if old_name != new_name:
+                ac = dbops.AlterTableRenameConstraintSimple(
+                    name=self.name, old_name=old_name, new_name=new_name)
 
-            self.add_command(ac)
+                self.add_command(ac)
 
         return super().generate(block)
 
@@ -425,6 +429,9 @@ class AlterTableConstraintBase(dbops.AlterTableBaseMixin, dbops.CommandGroup):
 
         cname = constraint.raw_constraint_name()
         ncname = new_constr.raw_constraint_name()
+
+        if cname == ncname:
+            return ()
 
         ins_trigger_name = common.edgedb_name_to_pg_name(cname + '_instrigger')
         new_ins_trg_name = common.edgedb_name_to_pg_name(

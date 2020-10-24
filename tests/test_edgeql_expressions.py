@@ -2542,6 +2542,11 @@ class TestExpressions(tb.QueryTestCase):
         )
 
         await self.assert_query_result(
+            r'''SELECT {(1, 2), (3, 4.5)} FILTER true;''',
+            [[1, 2], [3, 4.5]],
+        )
+
+        await self.assert_query_result(
             r'''SELECT {(3, 4.5), (1, 2.0)};''',
             [[3, 4.5], [1, 2]],
         )
@@ -2689,17 +2694,14 @@ class TestExpressions(tb.QueryTestCase):
                     A := (
                         SELECT ObjectType
                         FILTER ObjectType.name ILIKE 'schema::a%'
-                               AND NOT .is_internal
                     ),
                     D := (
                         SELECT ObjectType
                         FILTER ObjectType.name ILIKE 'schema::d%'
-                               AND NOT .is_internal
                     ),
                     O := (
                         SELECT ObjectType
                         FILTER ObjectType.name ILIKE 'schema::o%'
-                               AND NOT .is_internal
                     )
                 SELECT _ := {A, D, O}.name
                 ORDER BY _;

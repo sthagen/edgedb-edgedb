@@ -27,6 +27,7 @@ import textwrap
 
 from collections import defaultdict
 from edb import errors
+from edb.common import context as pctx
 
 from edb.ir import ast as irast
 from edb.ir import typeutils
@@ -42,8 +43,10 @@ from edb.schema import objtypes as s_objtypes
 from edb.schema import pointers as s_pointers
 from edb.schema import pseudo as s_pseudo
 from edb.schema import types as s_types
+from edb.schema import constraints as s_constr
 
 from edb.edgeql import ast as qlast
+from edb.edgeql import utils as qlutils
 from edb.edgeql import qltypes
 
 from . import astutils
@@ -57,9 +60,6 @@ from . import viewgen
 from . import schemactx
 from . import stmtctx
 from . import typegen
-
-if TYPE_CHECKING:
-    from edb.schema import constraints as s_constr
 
 
 @dispatch.compile.register(qlast.SelectQuery)
@@ -110,79 +110,90 @@ def compile_SelectQuery(
 def compile_ForQuery(
         qlstmt: qlast.ForQuery, *, ctx: context.ContextLevel) -> irast.Set:
     with ctx.subquery() as sctx:
-        stmt = irast.SelectStmt()
+        stmt = irast.SelectStmt(context=qlstmt.context)
         init_stmt(stmt, qlstmt, ctx=sctx, parent_ctx=ctx)
 
-        with sctx.newscope(fenced=True) as scopectx:
-            iterator_ctx = None
-            if (ctx.expr_exposed and ctx.iterator_ctx is not None
-                    and ctx.iterator_ctx is not sctx):
-                iterator_ctx = ctx.iterator_ctx
+        # As an optimization, if the iterator is a singleton set, use
+        # the element directly.
+        iterator = qlstmt.iterator
+        if isinstance(iterator, qlast.Set) and len(iterator.elements) == 1:
+            iterator = iterator.elements[0]
 
-            if iterator_ctx is not None:
-                iterator_scope_parent = iterator_ctx.path_scope
-                path_id_ns = iterator_ctx.path_id_namespace
-            else:
-                iterator_scope_parent = sctx.path_scope
-                path_id_ns = sctx.path_id_namespace
+        # Compile the iterator
+        iterator_ctx = None
+        if (ctx.expr_exposed and ctx.iterator_ctx is not None
+                and ctx.iterator_ctx is not sctx):
+            iterator_ctx = ctx.iterator_ctx
 
-            iterator = qlstmt.iterator
-            if isinstance(iterator, qlast.Set) and len(iterator.elements) == 1:
-                iterator = iterator.elements[0]
+        ictx = iterator_ctx or sctx
 
-            iterator_view = stmtctx.declare_view(
-                iterator, qlstmt.iterator_alias,
-                path_id_namespace=path_id_ns, ctx=scopectx)
+        iterator_view = stmtctx.declare_view(
+            iterator, qlstmt.iterator_alias,
+            path_id_namespace=ictx.path_id_namespace,
+            ctx=ictx)
 
-            iterator_stmt = setgen.new_set_from_set(
-                iterator_view, preserve_scope_ns=True, ctx=scopectx)
+        iterator_stmt = setgen.new_set_from_set(
+            iterator_view, preserve_scope_ns=True, ctx=sctx)
+        stmt.iterator_stmt = iterator_stmt
 
-            iterator_type = setgen.get_set_type(iterator_stmt, ctx=ctx)
-            anytype = iterator_type.find_any(ctx.env.schema)
-            if anytype is not None:
-                raise errors.QueryError(
-                    'FOR statement has iterator of indeterminate type',
-                    context=ctx.env.type_origins.get(anytype),
-                )
+        iterator_type = setgen.get_set_type(iterator_stmt, ctx=ctx)
+        anytype = iterator_type.find_any(ctx.env.schema)
+        if anytype is not None:
+            raise errors.QueryError(
+                'FOR statement has iterator of indeterminate type',
+                context=ctx.env.type_origins.get(anytype),
+            )
 
-            if iterator_ctx is not None and iterator_ctx.stmt is not None:
-                iterator_ctx.stmt.hoisted_iterators.append(iterator_stmt)
+        if iterator_ctx is not None and iterator_ctx.stmt is not None:
+            iterator_ctx.stmt.hoisted_iterators.append(iterator_stmt)
 
-            stmt.iterator_stmt = iterator_stmt
-
-            view_scope_info = scopectx.path_scope_map[iterator_view]
-            iterator_scope = view_scope_info.path_scope
-
-            for cb in view_scope_info.tentative_work:
-                stmtctx.at_stmt_fini(cb, ctx=ctx)
-
-            view_scope_info.tentative_work[:] = []
+        view_scope_info = sctx.path_scope_map[iterator_view]
 
         pathctx.register_set_in_scope(
             iterator_stmt,
-            path_scope=iterator_scope_parent,
+            path_scope=ictx.path_scope,
             ctx=sctx,
         )
+
         # Iterator symbol is, by construction, outside of the scope
         # of the UNION argument, but is perfectly legal to be referenced
         # inside a factoring fence that is an immediate child of this
         # scope.
-        iterator_scope_parent.factoring_allowlist.add(
+        ictx.path_scope.factoring_allowlist.add(
             stmt.iterator_stmt.path_id)
         sctx.iterator_path_ids |= {stmt.iterator_stmt.path_id}
-        node = iterator_scope_parent.find_descendant(iterator_stmt.path_id)
+        node = ictx.path_scope.find_descendant(iterator_stmt.path_id)
         if node is not None:
-            node.attach_subtree(iterator_scope)
+            # If the body contains DML, then we need to prohibit
+            # correlation between the iterator and the enclosing
+            # query, since the correlation imposes compilation issues
+            # we aren't willing to tackle.
+            # Do this by sticking the iterator subtree onto a branch
+            # with a factoring fence.
+            if qlutils.contains_dml(qlstmt.result):
+                node = node.attach_branch()
+                node.factoring_fence = True
+                node = node.attach_branch()
 
-        stmt.result = compile_result_clause(
-            qlstmt.result,
-            view_scls=ctx.view_scls,
-            view_rptr=ctx.view_rptr,
-            result_alias=qlstmt.result_alias,
-            view_name=ctx.toplevel_result_view_name,
-            forward_rptr=True,
-            ctx=sctx)
+            node.attach_subtree(view_scope_info.path_scope,
+                                context=iterator.context)
 
+        # Compile the body
+        with sctx.newscope(fenced=True) as bctx:
+            stmt.result = setgen.scoped_set(
+                compile_result_clause(
+                    qlstmt.result,
+                    view_scls=ctx.view_scls,
+                    view_rptr=ctx.view_rptr,
+                    result_alias=qlstmt.result_alias,
+                    view_name=ctx.toplevel_result_view_name,
+                    forward_rptr=True,
+                    ctx=bctx,
+                ),
+                ctx=bctx,
+            )
+
+        # Inject an implicit limit if appropriate
         if ((ctx.expr_exposed or sctx.stmt is ctx.toplevel_stmt)
                 and ctx.implicit_limit):
             stmt.limit = setgen.ensure_set(
@@ -247,13 +258,13 @@ def compile_insert_unless_conflict(
         )
 
     ptr = ptr.get_nearest_non_derived_parent(schema)
-    if ptr.get_cardinality(schema) != qltypes.SchemaCardinality.ONE:
+    if ptr.get_cardinality(schema) != qltypes.SchemaCardinality.One:
         raise errors.QueryError(
             'ON CONFLICT property must be a SINGLE property',
             context=constraint_spec.context,
         )
 
-    exclusive_constr: s_constr.Constraint = schema.get('std::exclusive')
+    exclusive_constr = schema.get('std::exclusive', type=s_constr.Constraint)
     ex_cnstrs = [c for c in ptr.get_constraints(schema).objects(schema)
                  if c.issubclass(schema, exclusive_constr)]
 
@@ -333,8 +344,11 @@ def compile_InsertQuery(
             context=expr.context,
         )
 
+    # Record this node in the list of potential DML expressions.
+    ctx.env.dml_exprs.append(expr)
+
     with ctx.subquery() as ictx:
-        stmt = irast.InsertStmt()
+        stmt = irast.InsertStmt(context=expr.context)
         init_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
 
         subject = dispatch.compile(expr.subject, ctx=ictx)
@@ -416,8 +430,11 @@ def compile_UpdateQuery(
             context=expr.context,
         )
 
+    # Record this node in the list of potential DML expressions.
+    ctx.env.dml_exprs.append(expr)
+
     with ctx.subquery() as ictx:
-        stmt = irast.UpdateStmt()
+        stmt = irast.UpdateStmt(context=expr.context)
         init_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
 
         subject = dispatch.compile(expr.subject, ctx=ictx)
@@ -484,8 +501,11 @@ def compile_DeleteQuery(
             context=expr.context,
         )
 
+    # Record this node in the list of potential DML expressions.
+    ctx.env.dml_exprs.append(expr)
+
     with ctx.subquery() as ictx:
-        stmt = irast.DeleteStmt()
+        stmt = irast.DeleteStmt(context=expr.context)
         # Expand the DELETE from sugar into full DELETE (SELECT ...)
         # form, if there's any additional clauses.
         if any([expr.where, expr.orderby, expr.offset, expr.limit]):
@@ -576,7 +596,7 @@ def compile_DescribeStmt(
         stmt = irast.SelectStmt()
         init_stmt(stmt, ql, ctx=ictx, parent_ctx=ctx)
 
-        if ql.object == qlast.DescribeGlobal.Schema:
+        if ql.object is qlast.DescribeGlobal.Schema:
             if ql.language is qltypes.DescribeLanguage.DDL:
                 # DESCRIBE SCHEMA
                 text = s_ddl.ddl_text_from_schema(
@@ -596,7 +616,20 @@ def compile_DescribeStmt(
                 ctx=ictx,
             )
 
-        elif ql.object == qlast.DescribeGlobal.SystemConfig:
+        elif ql.object is qlast.DescribeGlobal.DatabaseConfig:
+            if ql.language is qltypes.DescribeLanguage.DDL:
+                function_call = dispatch.compile(
+                    qlast.FunctionCall(
+                        func=('cfg', '_describe_database_config_as_ddl'),
+                    ),
+                    ctx=ictx)
+                assert isinstance(function_call, irast.Set), function_call
+                stmt.result = function_call
+            else:
+                raise errors.QueryError(
+                    f'cannot describe config as {ql.language}')
+
+        elif ql.object is qlast.DescribeGlobal.SystemConfig:
             if ql.language is qltypes.DescribeLanguage.DDL:
                 function_call = dispatch.compile(
                     qlast.FunctionCall(
@@ -608,7 +641,8 @@ def compile_DescribeStmt(
             else:
                 raise errors.QueryError(
                     f'cannot describe config as {ql.language}')
-        elif ql.object == qlast.DescribeGlobal.Roles:
+
+        elif ql.object is qlast.DescribeGlobal.Roles:
             if ql.language is qltypes.DescribeLanguage.DDL:
                 function_call = dispatch.compile(
                     qlast.FunctionCall(
@@ -620,6 +654,7 @@ def compile_DescribeStmt(
             else:
                 raise errors.QueryError(
                     f'cannot describe roles as {ql.language}')
+
         else:
             assert isinstance(ql.object, qlast.ObjectRef), ql.object
             modules = []
@@ -806,7 +841,8 @@ def compile_Shape(
     if not isinstance(expr_stype, s_objtypes.ObjectType):
         raise errors.QueryError(
             f'shapes cannot be applied to '
-            f'{expr_stype.get_verbosename(ctx.env.schema)}'
+            f'{expr_stype.get_verbosename(ctx.env.schema)}',
+            context=shape.context,
         )
     view_type = viewgen.process_view(
         stype=expr_stype, path_id=expr.path_id,
@@ -870,7 +906,8 @@ def init_stmt(
 
     irstmt.parent_stmt = parent_ctx.stmt
 
-    process_with_block(qlstmt, ctx=ctx, parent_ctx=parent_ctx)
+    irstmt.bindings = process_with_block(
+        qlstmt, ctx=ctx, parent_ctx=parent_ctx)
 
 
 def fini_stmt(
@@ -915,6 +952,9 @@ def fini_stmt(
     type_override = view if view is not None else None
     result = setgen.scoped_set(
         irstmt, type_override=type_override, path_id=path_id, ctx=ctx)
+    if irstmt.context and not result.context:
+        result = setgen.new_set_from_set(
+            result, context=irstmt.context, ctx=ctx)
 
     if view is not None:
         parent_ctx.view_sets[view] = result
@@ -924,7 +964,9 @@ def fini_stmt(
 
 def process_with_block(
         edgeql_tree: qlast.Statement, *,
-        ctx: context.ContextLevel, parent_ctx: context.ContextLevel) -> None:
+        ctx: context.ContextLevel,
+        parent_ctx: context.ContextLevel) -> List[irast.Set]:
+    results = []
     for with_entry in edgeql_tree.aliases:
         if isinstance(with_entry, qlast.ModuleAliasDecl):
             ctx.modaliases[with_entry.alias] = with_entry.module
@@ -932,15 +974,19 @@ def process_with_block(
         elif isinstance(with_entry, qlast.AliasedExpr):
             with ctx.new() as scopectx:
                 scopectx.expr_exposed = False
-                stmtctx.declare_view(
-                    with_entry.expr,
-                    with_entry.alias,
-                    must_be_used=True,
-                    ctx=scopectx)
+                results.append(
+                    stmtctx.declare_view(
+                        with_entry.expr,
+                        with_entry.alias,
+                        must_be_used=True,
+                        ctx=scopectx)
+                )
 
         else:
             raise RuntimeError(
                 f'unexpected expression in WITH block: {with_entry}')
+
+    return results
 
 
 def compile_result_clause(
@@ -1019,7 +1065,8 @@ def compile_result_clause(
             result_alias=result_alias,
             view_scls=view_scls,
             compile_views=ctx.stmt is ctx.toplevel_stmt,
-            ctx=sctx)
+            ctx=sctx,
+            parser_context=result.context)
 
         ctx.partial_path_prefix = ir_result
 
@@ -1037,6 +1084,7 @@ def compile_query_subject(
         is_insert: bool=False,
         is_update: bool=False,
         is_delete: bool=False,
+        parser_context: Optional[pctx.ParserContext]=None,
         ctx: context.ContextLevel) -> irast.Set:
 
     expr_stype = setgen.get_set_type(expr, ctx=ctx)
@@ -1091,7 +1139,8 @@ def compile_query_subject(
         if not isinstance(expr_stype, s_objtypes.ObjectType):
             raise errors.QueryError(
                 f'shapes cannot be applied to '
-                f'{expr_stype.get_verbosename(ctx.env.schema)}'
+                f'{expr_stype.get_verbosename(ctx.env.schema)}',
+                context=parser_context,
             )
 
         view_scls = viewgen.process_view(
@@ -1113,7 +1162,12 @@ def compile_query_subject(
 
     if compile_views:
         rptr = view_rptr.rptr if view_rptr is not None else None
-        viewgen.compile_view_shapes(expr, rptr=rptr, ctx=ctx)
+        if is_update:
+            with ctx.new() as subctx:
+                subctx.compiling_update_shape = True
+                viewgen.compile_view_shapes(expr, rptr=rptr, ctx=subctx)
+        else:
+            viewgen.compile_view_shapes(expr, rptr=rptr, ctx=ctx)
 
     if (shape is not None or view_scls is not None) and len(expr.path_id) == 1:
         ctx.class_view_overrides[expr.path_id.target.id] = expr_stype

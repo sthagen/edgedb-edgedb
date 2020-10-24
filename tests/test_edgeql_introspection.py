@@ -164,7 +164,7 @@ class TestIntrospection(tb.QueryTestCase):
                 'is_abstract': False,
                 'pointers': [{
                     'name': 'todo',
-                    'cardinality': 'MANY',
+                    'cardinality': 'Many',
                 }]
             }]
         )
@@ -191,19 +191,19 @@ class TestIntrospection(tb.QueryTestCase):
                 'links': [{
                     'name': '__type__',
                     'target': {'name': 'schema::Type'},
-                    'cardinality': 'ONE',
+                    'cardinality': 'One',
                 }, {
                     'name': 'issue',
                     'target': {'name': 'test::Issue'},
-                    'cardinality': 'ONE',
+                    'cardinality': 'One',
                 }, {
                     'name': 'owner',
                     'target': {'name': 'test::User'},
-                    'cardinality': 'ONE',
+                    'cardinality': 'One',
                 }, {
                     'name': 'parent',
                     'target': {'name': 'test::Comment'},
-                    'cardinality': 'ONE',
+                    'cardinality': 'One',
                 }]
             }]
         )
@@ -219,7 +219,7 @@ class TestIntrospection(tb.QueryTestCase):
                 FILTER
                     ObjectType.name LIKE 'test::%'
                     AND
-                    ObjectType.links.cardinality = <Cardinality>'MANY'
+                    ObjectType.links.cardinality = <Cardinality>'Many'
                 ORDER BY ObjectType.name;
             """,
             [
@@ -247,7 +247,7 @@ class TestIntrospection(tb.QueryTestCase):
                 FILTER
                     `ObjectType`.name LIKE 'test::%'
                     AND
-                    ObjectType.links.cardinality = <Cardinality>'MANY'
+                    ObjectType.links.cardinality = <Cardinality>'Many'
                 ORDER BY `ObjectType`.name;
             """,
             [
@@ -489,14 +489,14 @@ class TestIntrospection(tb.QueryTestCase):
                 'params': [
                     {
                         'num': 0,
-                        'kind': 'POSITIONAL',
+                        'kind': 'PositionalParam',
                         'type': {
                             'type': 'schema::PseudoType',
                         }
                     },
                     {
                         'num': 1,
-                        'kind': 'VARIADIC',
+                        'kind': 'VariadicParam',
                         'type': {
                             'type': 'schema::Array',
                             'element_type': {
@@ -583,7 +583,7 @@ class TestIntrospection(tb.QueryTestCase):
                                         '@value': '10000'
                                     }
                                 ],
-                                'return_typemod': 'SINGLETON',
+                                'return_typemod': 'SingletonType',
                                 'return_type': {'name': 'std::bool'},
                                 'errmessage':
                                     '{__subject__} must be no longer than '
@@ -600,7 +600,7 @@ class TestIntrospection(tb.QueryTestCase):
                                 'annotations': {},
                                 'subject': {'name': 'id'},
                                 'params': {},
-                                'return_typemod': 'SINGLETON',
+                                'return_typemod': 'SingletonType',
                                 'return_type': {'name': 'std::bool'},
                                 'errmessage':
                                     '{__subject__} violates exclusivity '
@@ -653,7 +653,7 @@ class TestIntrospection(tb.QueryTestCase):
                                 '@value': "['v1','v2']"
                             }
                         ],
-                        'return_typemod': 'SINGLETON',
+                        'return_typemod': 'SingletonType',
                         'return_type': {'name': 'std::bool'},
                         'errmessage':
                             "{__subject__} must be one of: {vals}."
@@ -702,15 +702,15 @@ class TestIntrospection(tb.QueryTestCase):
                     ],
                     "params": [
                         {
-                            "kind": "POSITIONAL",
+                            "kind": "PositionalParam",
                             "name": "s",
                             "num": 0,
-                            "typemod": "SET OF",
+                            "typemod": "SetOfType",
                             "type": {"name": "anytype"},
                             "default": None
                         }
                     ],
-                    "return_typemod": "SINGLETON",
+                    "return_typemod": "SingletonType",
                     "return_type": {
                         "name": "std::int64",
                         "element_types": [],
@@ -725,7 +725,7 @@ class TestIntrospection(tb.QueryTestCase):
                         }
                     ],
                     "params": [],
-                    "return_typemod": "SINGLETON",
+                    "return_typemod": "SingletonType",
                     "return_type": {
                         "element_types": [
                             {"name": "major",
@@ -733,7 +733,7 @@ class TestIntrospection(tb.QueryTestCase):
                             {"name": "minor",
                              "type": {"name": "std::int64"}},
                             {"name": "stage",
-                             "type": {"name": "sys::version_stage"}},
+                             "type": {"name": "sys::VersionStage"}},
                             {"name": "stage_no",
                              "type": {"name": "std::int64"}},
                             {"name": "local",
@@ -785,15 +785,15 @@ class TestIntrospection(tb.QueryTestCase):
             [
                 {
                     'name': 'std::datetime_current',
-                    'volatility': 'VOLATILE'
+                    'volatility': 'Volatile'
                 },
                 {
                     'name': 'std::datetime_of_transaction',
-                    'volatility': 'STABLE'
+                    'volatility': 'Stable'
                 },
                 {
                     'name': 'std::re_match',
-                    'volatility': 'IMMUTABLE'
+                    'volatility': 'Immutable'
                 }
             ]
         )
@@ -834,7 +834,7 @@ class TestIntrospection(tb.QueryTestCase):
                             'type': {'name': 'std::duration'},
                         },
                     ],
-                    'volatility': 'STABLE'
+                    'volatility': 'Stable'
                 },
                 {
                     'name': 'std::+',
@@ -848,7 +848,7 @@ class TestIntrospection(tb.QueryTestCase):
                             'type': {'name': 'std::duration'},
                         },
                     ],
-                    'volatility': 'IMMUTABLE'
+                    'volatility': 'Immutable'
                 }
             ]
         )
@@ -872,12 +872,12 @@ class TestIntrospection(tb.QueryTestCase):
                 {
                     'from_type': {'name': 'std::datetime'},
                     'to_type': {'name': 'std::str'},
-                    'volatility': 'STABLE'
+                    'volatility': 'Stable'
                 },
                 {
                     'from_type': {'name': 'std::duration'},
                     'to_type': {'name': 'std::str'},
-                    'volatility': 'IMMUTABLE'
+                    'volatility': 'Immutable'
                 }
             ]
         )
@@ -1228,12 +1228,10 @@ class TestIntrospection(tb.QueryTestCase):
                         name,
                         required,
                     }
-                    FILTEr NOT .is_internal
                     ORDER BY .name
                 }
                 FILTER
                     .name IN {'schema::CallableObject', 'schema::Parameter'}
-                    AND NOT .is_internal
                 ORDER BY .name;
             ''',
             [

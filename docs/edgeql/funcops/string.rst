@@ -49,20 +49,20 @@ String
     * - :eql:func:`str_title`
       - :eql:func-desc:`str_title`
 
-    * - :eql:func:`str_lpad`
-      - :eql:func-desc:`str_lpad`
+    * - :eql:func:`str_pad_start`
+      - :eql:func-desc:`str_pad_start`
 
-    * - :eql:func:`str_rpad`
-      - :eql:func-desc:`str_rpad`
+    * - :eql:func:`str_pad_end`
+      - :eql:func-desc:`str_pad_end`
 
     * - :eql:func:`str_trim`
       - :eql:func-desc:`str_trim`
 
-    * - :eql:func:`str_ltrim`
-      - :eql:func-desc:`str_ltrim`
+    * - :eql:func:`str_trim_start`
+      - :eql:func-desc:`str_trim_start`
 
-    * - :eql:func:`str_rtrim`
-      - :eql:func-desc:`str_rtrim`
+    * - :eql:func:`str_trim_end`
+      - :eql:func-desc:`str_trim_end`
 
     * - :eql:func:`str_repeat`
       - :eql:func-desc:`str_repeat`
@@ -241,9 +241,10 @@ String
 ----------
 
 
-.. eql:function:: std::str_lpad(string: str, n: int64, fill: str = ' ') -> str
+.. eql:function:: std::str_pad_start(string: str, n: int64, fill: str = ' ') \
+                    -> str
 
-    Return the input *string* left-padded to the length *n*.
+    Return the input *string* padded at the start to the length *n*.
 
     If the *string* is longer than *n*, then it is truncated to the
     first *n* characters. Otherwise, the *string* is padded on the
@@ -252,20 +253,21 @@ String
 
     .. code-block:: edgeql-repl
 
-        db> SELECT str_lpad('short', 10);
+        db> SELECT str_pad_start('short', 10);
         {'     short'}
-        db> SELECT str_lpad('much too long', 10);
+        db> SELECT str_pad_start('much too long', 10);
         {'much too l'}
-        db> SELECT str_lpad('short', 10, '.:');
+        db> SELECT str_pad_start('short', 10, '.:');
         {'.:.:.short'}
 
 
 ----------
 
 
-.. eql:function:: std::str_rpad(string: str, n: int64, fill: str = ' ') -> str
+.. eql:function:: std::str_pad_end(string: str, n: int64, fill: str = ' ') \
+                    -> str
 
-    Return the input *string* right-padded to the length *n*.
+    Return the input *string* padded at the end to the length *n*.
 
     If the *string* is longer than *n*, then it is truncated to the
     first *n* characters. Otherwise, the *string* is padded on the
@@ -274,20 +276,20 @@ String
 
     .. code-block:: edgeql-repl
 
-        db> SELECT str_rpad('short', 10);
+        db> SELECT str_pad_end('short', 10);
         {'short     '}
-        db> SELECT str_rpad('much too long', 10);
+        db> SELECT str_pad_end('much too long', 10);
         {'much too l'}
-        db> SELECT str_rpad('short', 10, '.:');
+        db> SELECT str_pad_end('short', 10, '.:');
         {'short.:.:.'}
 
 
 ----------
 
 
-.. eql:function:: std::str_ltrim(string: str, trim: str = ' ') -> str
+.. eql:function:: std::str_trim_start(string: str, trim: str = ' ') -> str
 
-    Return the input *string* with all leftmost *trim* characters removed.
+    Return the input string with all *trim* characters removed from its start.
 
     If the *trim* specifies more than one character they will be
     removed from the beginning of the *string* regardless of the order
@@ -295,24 +297,24 @@ String
 
     .. code-block:: edgeql-repl
 
-        db> SELECT str_ltrim('     data');
+        db> SELECT str_trim_start('     data');
         {'data'}
-        db> SELECT str_ltrim('.....data', '.:');
+        db> SELECT str_trim_start('.....data', '.:');
         {'data'}
-        db> SELECT str_ltrim(':::::data', '.:');
+        db> SELECT str_trim_start(':::::data', '.:');
         {'data'}
-        db> SELECT str_ltrim(':...:data', '.:');
+        db> SELECT str_trim_start(':...:data', '.:');
         {'data'}
-        db> SELECT str_ltrim('.:.:.data', '.:');
+        db> SELECT str_trim_start('.:.:.data', '.:');
         {'data'}
 
 
 ----------
 
 
-.. eql:function:: std::str_rtrim(string: str, trim: str = ' ') -> str
+.. eql:function:: std::str_trim_end(string: str, trim: str = ' ') -> str
 
-    Return the input *string* with all rightmost *trim* characters removed.
+    Return the input string with all *trim* characters removed from its end.
 
     If the *trim* specifies more than one character they will be
     removed from the end of the *string* regardless of the order
@@ -320,15 +322,15 @@ String
 
     .. code-block:: edgeql-repl
 
-        db> SELECT str_rtrim('data     ');
+        db> SELECT str_trim_end('data     ');
         {'data'}
-        db> SELECT str_rtrim('data.....', '.:');
+        db> SELECT str_trim_end('data.....', '.:');
         {'data'}
-        db> SELECT str_rtrim('data:::::', '.:');
+        db> SELECT str_trim_end('data:::::', '.:');
         {'data'}
-        db> SELECT str_rtrim('data:...:', '.:');
+        db> SELECT str_trim_end('data:...:', '.:');
         {'data'}
-        db> SELECT str_rtrim('data.:.:.', '.:');
+        db> SELECT str_trim_end('data.:.:.', '.:');
         {'data'}
 
 
@@ -337,7 +339,7 @@ String
 
 .. eql:function:: std::str_trim(string: str, trim: str = ' ') -> str
 
-    Return the input *string* with *trim* characters removed from both ends.
+    Return the input string with *trim* characters removed from both ends.
 
     If the *trim* specifies more than one character they will be
     removed from both ends of the *string* regardless of the order
@@ -452,7 +454,7 @@ String
 
     Given an input *string* and a regular expression :ref:`pattern
     <string_regexp>` replace matching substrings with the replacement
-    string *sub*. Optional :ref:`flag <string_regexp_flags>` argument
+    string *sub*. Optional :ref:`flag <string_regexp_flags>` arguments
     can be used to specify additional regular expression flags. Return
     the string resulting from substring replacement.
 
@@ -551,7 +553,7 @@ String
         {'-123.45'}
 
     When converting :eql:type:`json`, this function can take
-    ``'pretty'`` as the optional *fmt* argument to produce
+    ``'pretty'`` as the optional *fmt* argument to produce a
     pretty-formatted JSON string.
 
     See also :eql:func:`to_json`.
@@ -578,6 +580,11 @@ String
         db> SELECT to_str(['one', 'two', 'three'], ', ');
         {'one, two, three'}
 
+    .. warning::
+
+        There's a deprecated version of ``std::to_str`` which operates
+        on arrays, however :eql:func:`array_join` should be used instead.
+
 
 ----------
 
@@ -589,8 +596,8 @@ Regular Expressions
 
 EdgeDB supports Regular expressions (REs), as defined in POSIX 1003.2.
 They come in two forms: BRE (basic RE) and ERE (extended RE). In
-addition to that EdgeDB supports certain common extensions to the
-POSIX standard commonly known as ARE (advanced RE). More details about
+addition, EdgeDB supports certain common extensions to the POSIX
+standard commonly known as ARE (advanced RE). More details about
 BRE, ERE, and ARE support can be found in `PostgreSQL documentation`_.
 
 
@@ -857,9 +864,9 @@ Number formatting options
 | 0          | digit position (will not be dropped, even if        |
 |            | insignificant)                                      |
 +------------+-----------------------------------------------------+
-| .          | period)  decimal point                              |
+| .          | (period)  decimal point                             |
 +------------+-----------------------------------------------------+
-| ,          | comma)   group (thousands) separator                |
+| ,          | (comma)   group (thousands) separator               |
 +------------+-----------------------------------------------------+
 | PR         | negative value in angle brackets                    |
 +------------+-----------------------------------------------------+

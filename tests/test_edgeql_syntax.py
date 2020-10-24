@@ -1966,7 +1966,6 @@ aa';
 
     def test_edgeql_syntax_cast_07(self):
         """
-        SELECT <tuple<>>$1;
         SELECT <tuple<Foo, int, str>>$1;
         SELECT <std::tuple<obj: Foo, count: int, name: str>>$1;
         """
@@ -1991,6 +1990,14 @@ aa';
 
         SELECT <tuple<Foo, int, str>>$1;
         SELECT <std::tuple<obj: Foo, count: int, name: str>>$1;
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  "must have at least one argument",
+                  line=2, col=22)
+    def test_edgeql_syntax_cast_10(self):
+        """
+        SELECT <tuple<>>$1;
         """
 
     def test_edgeql_syntax_with_01(self):
@@ -3068,6 +3075,27 @@ aa';
         CREATE SCALAR TYPE myenum EXTENDING enum<'foo', 'bar'>;
         """
 
+    def test_edgeql_syntax_ddl_scalar_04(self):
+        """
+        CREATE SCALAR TYPE myenum EXTENDING enum<foo, bar>;
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  "mixing string type literals and type names",
+                  line=2, col=50)
+    def test_edgeql_syntax_ddl_scalar_05(self):
+        """
+        CREATE SCALAR TYPE myenum EXTENDING enum<'foo', bar>;
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  "mixing named and unnamed subtype",
+                  line=2, col=50)
+    def test_edgeql_syntax_ddl_scalar_06(self):
+        """
+        CREATE SCALAR TYPE myenum EXTENDING enum<baz: int64, bar>;
+        """
+
     def test_edgeql_syntax_ddl_annotation_01(self):
         """
         CREATE ABSTRACT ANNOTATION std::paramtypes;
@@ -3819,18 +3847,25 @@ aa';
         """
         CONFIGURE SYSTEM SET foo := (SELECT User);
         CONFIGURE SESSION SET foo := (SELECT User);
+        CONFIGURE CURRENT DATABASE SET foo := (SELECT User);
         CONFIGURE SYSTEM SET cfg::foo := (SELECT User);
         CONFIGURE SESSION SET cfg::foo := (SELECT User);
+        CONFIGURE CURRENT DATABASE SET cfg::foo := (SELECT User);
         CONFIGURE SYSTEM RESET foo;
         CONFIGURE SESSION RESET foo;
+        CONFIGURE CURRENT DATABASE RESET foo;
         CONFIGURE SYSTEM RESET cfg::foo;
         CONFIGURE SESSION RESET cfg::foo;
+        CONFIGURE CURRENT DATABASE RESET cfg::foo;
         CONFIGURE SYSTEM INSERT Foo {bar := (SELECT 1)};
         CONFIGURE SESSION INSERT Foo {bar := (SELECT 1)};
+        CONFIGURE CURRENT DATABASE INSERT Foo {bar := (SELECT 1)};
         CONFIGURE SYSTEM INSERT cfg::Foo {bar := (SELECT 1)};
         CONFIGURE SESSION INSERT cfg::Foo {bar := (SELECT 1)};
+        CONFIGURE CURRENT DATABASE INSERT cfg::Foo {bar := (SELECT 1)};
         CONFIGURE SYSTEM RESET Foo FILTER (.bar = 2);
         CONFIGURE SESSION RESET Foo FILTER (.bar = 2);
+        CONFIGURE CURRENT DATABASE RESET Foo FILTER (.bar = 2);
         """
 
     def test_edgeql_syntax_ddl_alias_01(self):

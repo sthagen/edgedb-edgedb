@@ -291,3 +291,27 @@ class TestEdgeQLAdvancedTypes(tb.QueryTestCase):
                 }],
             }]
         )
+
+    async def test_edgeql_advtypes_union_opaque_narrowing_nop(self):
+        await self.con.execute("""
+            INSERT A { name := 'aaa' };
+            INSERT S { name := 'sss', s := 'sss', l_a := A };
+        """)
+
+        await self.assert_query_result(
+            'SELECT A.<l_a[IS R].name',
+            ['sss'],
+        )
+
+    async def test_edgeql_advtypes_intersection_with_comp(self):
+        await self.con.execute("""
+            INSERT A { name := 'aaa' };
+        """)
+
+        await self.assert_query_result(
+            """
+            WITH Rc := R
+            SELECT Rc[IS A].name
+            """,
+            ['aaa'],
+        )

@@ -207,7 +207,7 @@ class ReferencedObject(so.DerivableObject):
             parent_cmd.add(cmd)
             schema = delta.apply(schema, context)
 
-        derived: ReferencedT = schema.get(derived_name)
+        derived = cast(ReferencedT, schema.get(derived_name))
 
         return schema, derived
 
@@ -271,7 +271,6 @@ class ReferencedInheritingObject(
         bool,
         default=False,
         compcoef=None,
-        introspectable=False,
         inheritable=False,
         ephemeral=True,
     )
@@ -429,6 +428,26 @@ class StronglyReferencedObjectCommand(
 class ReferencedObjectCommand(ReferencedObjectCommandBase[ReferencedT]):
 
     @classmethod
+    def _classname_from_ast_and_referrer(cls,
+                                         schema: s_schema.Schema,
+                                         referrer_name: sn.SchemaName,
+                                         astnode: qlast.NamedDDL,
+                                         context: sd.CommandContext
+                                         ) -> sn.Name:
+        base_ref = utils.ast_to_object_shell(
+            astnode.name,
+            modaliases=context.modaliases,
+            schema=schema,
+            metaclass=cls.get_schema_metaclass(),
+        )
+
+        base_name = base_ref.name
+        quals = cls._classname_quals_from_ast(
+            schema, astnode, base_name, referrer_name, context)
+        pnn = sn.get_specialized_name(base_name, referrer_name, *quals)
+        return sn.Name(name=pnn, module=referrer_name.module)
+
+    @classmethod
     def _classname_from_ast(cls,
                             schema: s_schema.Schema,
                             astnode: qlast.NamedDDL,
@@ -440,18 +459,9 @@ class ReferencedObjectCommand(ReferencedObjectCommandBase[ReferencedT]):
         if parent_ctx is not None:
             assert isinstance(parent_ctx.op, sd.QualifiedObjectCommand)
             referrer_name = parent_ctx.op.classname
-            base_ref = utils.ast_to_object_shell(
-                astnode.name,
-                modaliases=context.modaliases,
-                schema=schema,
-                metaclass=cls.get_schema_metaclass(),
+            name = cls._classname_from_ast_and_referrer(
+                schema, referrer_name, astnode, context
             )
-
-            base_name = base_ref.name
-            quals = cls._classname_quals_from_ast(
-                schema, astnode, base_name, referrer_name, context)
-            pnn = sn.get_specialized_name(base_name, referrer_name, *quals)
-            name = sn.Name(name=pnn, module=referrer_name.module)
 
         assert isinstance(name, sn.Name)
         return name
@@ -967,6 +977,9 @@ class CreateReferencedInheritingObject(
 
                     self.set_attribute_value('bases', bases)
 
+                if referrer.get_is_derived(schema):
+                    self.set_attribute_value('is_derived', True)
+
         schema = super()._create_begin(schema, context)
 
         if referrer_ctx is not None and not context.canonical:
@@ -1446,3 +1459,15 @@ class AlterOwned(
         cmd = super()._cmd_tree_from_ast(schema, astnode, context)
         cmd.set_attribute_value('is_owned', astnode.owned)
         return cmd
+
+    def _apply_field_ast(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        node: qlast.DDLOperation,
+        op: sd.AlterObjectProperty,
+    ) -> None:
+        if op.property == 'is_owned':
+            node.owned = op.new_value
+        else:
+            super()._apply_field_ast(schema, context, node, op)

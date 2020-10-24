@@ -39,10 +39,11 @@ from . import structure as sr_struct
 
 
 def parse_into(
-    schema: s_schema.Schema,
+    base_schema: s_schema.Schema,
+    schema: s_schema.FlatSchema,
     data: Sequence[str],
     schema_class_layout: Dict[Type[s_obj.Object], sr_struct.SchemaTypeLayout],
-) -> s_schema.Schema:
+) -> s_schema.FlatSchema:
     """Parse JSON-encoded schema objects and populate the schema with them.
 
     Args:
@@ -80,7 +81,7 @@ def parse_into(
     for entry_json in data:
         entry = json.loads(entry_json)
         _, _, clsname = entry['_tname'].rpartition('::')
-        mcls = s_obj.ObjectMeta.get_schema_metaclass(clsname)
+        mcls = s_obj.ObjectMeta.maybe_get_schema_class(clsname)
         if mcls is None:
             raise ValueError(
                 f'unexpected type in schema reflection: {clsname}')
@@ -125,7 +126,7 @@ def parse_into(
                     if newobj is not None:
                         val = newobj[0]
                     else:
-                        val = schema.get_by_id(refid)
+                        val = base_schema.get_by_id(refid)
                     objdata[fn] = val
                     refs_to[val.id][mcls, fn][objid] = None
 
@@ -134,8 +135,8 @@ def parse_into(
                     if issubclass(ftype, s_obj.ObjectDict):
                         refids = ftype._container(
                             uuidgen.UUID(e['value']) for e in v)
-                        val = ftype(refids, _private_init=True)
-                        val._keys = tuple(e['name'] for e in v)
+                        refkeys = tuple(e['name'] for e in v)
+                        val = ftype(refids, refkeys, _private_init=True)
                     else:
                         refids = ftype._container(
                             uuidgen.UUID(e['id']) for e in v)

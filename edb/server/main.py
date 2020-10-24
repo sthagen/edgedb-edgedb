@@ -35,6 +35,7 @@ import socket
 import sys
 import tempfile
 import typing
+import warnings
 
 import uvloop
 
@@ -137,9 +138,13 @@ def _init_cluster(cluster, args: ServerConfig) -> bool:
         'default_database_user': args.default_database_user,
         'testmode': args.testmode,
         'insecure': args.insecure,
+        'bootstrap_script': args.bootstrap_script,
+        'bootstrap_command': args.bootstrap_command,
     }
 
-    need_restart = asyncio.run(bootstrap.bootstrap(cluster, bootstrap_args))
+    need_restart = asyncio.run(
+        bootstrap.ensure_bootstrapped(cluster, bootstrap_args)
+    )
 
     global _server_initialized
     _server_initialized = True
@@ -185,6 +190,23 @@ def _run_server(cluster, args: ServerConfig,
     # actually were run.
     from . import server
 
+    if args.bootstrap_script:
+        with open(args.bootstrap_script) as f:
+            bootstrap_script_text = f.read()
+    elif args.bootstrap_command:
+        bootstrap_script_text = args.bootstrap_command
+    else:
+        bootstrap_script_text = None
+
+    if bootstrap_script_text is not None:
+        bootstrap_script = server.StartupScript(
+            text=bootstrap_script_text,
+            database=args.default_database,
+            user=args.default_database_user,
+        )
+    else:
+        bootstrap_script = None
+
     ss = server.Server(
         loop=loop,
         cluster=cluster,
@@ -196,29 +218,33 @@ def _run_server(cluster, args: ServerConfig,
         auto_shutdown=args.auto_shutdown,
         echo_runtime_info=args.echo_runtime_info,
         max_protocol=args.max_protocol,
+        startup_script=bootstrap_script,
     )
 
     loop.run_until_complete(ss.init())
 
-    try:
-        loop.run_until_complete(ss.start())
-    except Exception:
-        loop.run_until_complete(ss.stop())
-        raise
-
-    loop.add_signal_handler(signal.SIGTERM, terminate_server, ss, loop)
-
-    # Notify systemd that we've started up.
-    _sd_notify('READY=1')
-
-    try:
-        loop.run_forever()
-    finally:
+    if args.bootstrap_only:
+        loop.run_until_complete(ss.run_startup_script_and_exit())
+    else:
         try:
-            logger.info('Shutting down.')
+            loop.run_until_complete(ss.start())
+        except Exception:
             loop.run_until_complete(ss.stop())
+            raise
+
+        loop.add_signal_handler(signal.SIGTERM, terminate_server, ss, loop)
+
+        # Notify systemd that we've started up.
+        _sd_notify('READY=1')
+
+        try:
+            loop.run_forever()
         finally:
-            _sd_notify('STOPPING=1')
+            try:
+                logger.info('Shutting down.')
+                loop.run_until_complete(ss.stop())
+            finally:
+                _sd_notify('STOPPING=1')
 
 
 def run_server(args: ServerConfig):
@@ -260,7 +286,7 @@ def run_server(args: ServerConfig):
         specified_runstate_dir: Optional[pathlib.Path]
         if args.runstate_dir:
             specified_runstate_dir = args.runstate_dir
-        elif args.bootstrap:
+        elif args.bootstrap_only:
             # When bootstrapping a new EdgeDB instance it is often necessary
             # to avoid using the main runstate dir due to lack of permissions,
             # possibility of conflict with another running instance, etc.
@@ -294,7 +320,11 @@ def run_server(args: ServerConfig):
                 cluster.stop()
                 cluster.start(port=cluster_port)
 
-            if not args.bootstrap:
+            if (
+                not args.bootstrap_only
+                or args.bootstrap_script
+                or args.bootstrap_command
+            ):
                 if args.data_dir:
                     cluster.set_connection_params(
                         pgconnparams.ConnectionParameters(
@@ -384,7 +414,9 @@ class ServerConfig(typing.NamedTuple):
     postgres_dsn: str
     log_level: str
     log_to: str
-    bootstrap: bool
+    bootstrap_only: bool
+    bootstrap_command: str
+    bootstrap_script: pathlib.Path
     default_database: str
     default_database_user: str
     devmode: bool
@@ -461,7 +493,10 @@ _server_options = [
               'or "stderr"'),
         type=str, metavar='DEST', default='stderr'),
     click.option(
-        '--bootstrap', is_flag=True,
+        '--bootstrap', is_flag=True, hidden=True,
+        help='bootstrap the database cluster and exit'),
+    click.option(
+        '--bootstrap-only', is_flag=True,
         help='bootstrap the database cluster and exit'),
     click.option(
         '--default-database', type=str, default=getpass.getuser(),
@@ -469,6 +504,16 @@ _server_options = [
     click.option(
         '--default-database-user', type=str, default=getpass.getuser(),
         help='the name of the default database owner'),
+    click.option(
+        '--bootstrap-command', metavar="QUERIES",
+        help='run the commands when initializing the database. '
+             'Queries are executed by default user within default '
+             'database. May be used with or without `--bootstrap-only`.'),
+    click.option(
+        '--bootstrap-script', type=PathPath(), metavar="PATH",
+        help='run the script when initializing the database. '
+             'Script run by default user within default database. '
+             'May be used with or without `--bootstrap-only`.'),
     click.option(
         '--devmode/--no-devmode',
         help='enable or disable the development mode',
@@ -527,7 +572,7 @@ def server_options(func):
     return func
 
 
-def server_main(*, insecure=False, **kwargs):
+def server_main(*, insecure=False, bootstrap, **kwargs):
     logsetup.setup_logging(kwargs['log_level'], kwargs['log_to'])
     exceptions.install_excepthook()
 
@@ -538,9 +583,14 @@ def server_main(*, insecure=False, **kwargs):
     if kwargs['devmode'] is not None:
         devmode.enable_dev_mode(kwargs['devmode'])
 
+    if bootstrap:
+        warnings.warn(
+            "Option `--bootstrap` is deprecated, use `--bootstrap-only`",
+            DeprecationWarning,
+        )
+        kwargs['bootstrap_only'] = True
+
     if kwargs['temp_dir']:
-        if kwargs['bootstrap']:
-            abort('--temp-data-dir is incompatible with --bootstrap')
         if kwargs['data_dir']:
             abort('--temp-data-dir is incompatible with --data-dir/-D')
         if kwargs['runstate_dir']:

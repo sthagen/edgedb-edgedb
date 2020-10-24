@@ -32,6 +32,7 @@ from edb.common import uuidgen
 
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
+from edb.edgeql import compiler as qlcompiler
 
 from . import abc as s_abc
 from . import delta as sd
@@ -83,7 +84,7 @@ class Type(
         default=None, coerce=True, compcoef=0.909)
 
     # For a type representing an expression alias, this would contain the
-    # expressoin type.  Non-alias types have None here.
+    # expression type.  Non-alias types have None here.
     expr_type = so.SchemaField(
         ExprType,
         default=None, compcoef=0.909)
@@ -105,12 +106,12 @@ class Type(
     # The OID by which the backend refers to the type.
     backend_id = so.SchemaField(
         int,
-        default=None, inheritable=False, introspectable=False)
+        default=None, inheritable=False)
 
     def is_blocking_ref(
         self, schema: s_schema.Schema, reference: so.Object
     ) -> bool:
-        return reference is not self.get_rptr(schema)
+        return reference != self.get_rptr(schema)
 
     def derive_subtype(
         self: TypeT,
@@ -382,6 +383,7 @@ class Type(
                     o.as_shell(schema) for o in union_of.objects(schema)
                 ],
                 module=name.module,
+                opaque=self.get_is_opaque_union(schema),
             )
         elif intersection_of := self.get_intersection_of(schema):
             assert isinstance(self, so.QualifiedObject)
@@ -434,7 +436,7 @@ class InheritingType(so.DerivableInheritingObject, Type):
 
         if ancestor is None:
             return -1
-        elif ancestor is self:
+        elif ancestor == self:
             return 0
         else:
             ancestors = list(self.get_ancestors(schema).objects(schema))
@@ -521,9 +523,20 @@ class TypeExprShell(TypeShell):
 
 class UnionTypeShell(TypeExprShell):
 
+    def __init__(
+        self,
+        components: Iterable[TypeShell],
+        module: str,
+        opaque: bool = False,
+    ) -> None:
+        self.components = tuple(components)
+        self.module = module
+        self.opaque = opaque
+
     def resolve(self, schema: s_schema.Schema) -> Type:
         components = self.resolve_components(schema)
-        type_id, _ = get_union_type_id(schema, components, module=self.module)
+        type_id, _ = get_union_type_id(
+            schema, components, opaque=self.opaque, module=self.module)
         return schema.get_by_id(type_id, type=Type)
 
     def get_name(
@@ -533,6 +546,7 @@ class UnionTypeShell(TypeExprShell):
         _, name = get_union_type_id(
             schema,
             self.components,
+            opaque=self.opaque,
             module=self.module,
         )
         return name
@@ -548,6 +562,7 @@ class UnionTypeShell(TypeExprShell):
         type_id, name = get_union_type_id(
             schema,
             self.components,
+            opaque=self.opaque,
             module=self.module,
         )
 
@@ -555,7 +570,13 @@ class UnionTypeShell(TypeExprShell):
         cmd.set_attribute_value('id', type_id)
         cmd.set_attribute_value('name', name)
         cmd.set_attribute_value('components', tuple(self.components))
+        cmd.set_attribute_value('is_opaque_union', self.opaque)
         return cmd
+
+    def __repr__(self) -> str:
+        dn = 'UnionType'
+        comps = ' | '.join(repr(c) for c in self.components)
+        return f'<{type(self).__name__} {dn}({comps}) at 0x{id(self):x}>'
 
 
 class CompoundTypeCommandContext(sd.ObjectCommandContext[InheritingType]):
@@ -586,6 +607,7 @@ class CreateUnionType(sd.CreateObject[InheritingType], CompoundTypeCommand):
             new_schema, union_type = utils.get_union_type(
                 schema,
                 components,
+                opaque=self.get_attribute_value('is_opaque_union') or False,
                 module=self.classname.module,
             )
 
@@ -840,7 +862,7 @@ class Collection(Type, s_abc.Collection):
         self,
         schema: s_schema.Schema,
         *,
-        view_name: str = None,
+        view_name: Optional[str] = None,
     ) -> sd.Command:
         raise NotImplementedError
 
@@ -1117,7 +1139,7 @@ class Array(
 
         st = self.get_element_type(schema)
         schema, stm = st.material_type(schema)
-        if stm is not st:
+        if stm != st:
             return self.__class__.from_subtypes(
                 schema,
                 [stm],
@@ -1127,7 +1149,7 @@ class Array(
             return (schema, self)
 
     def as_colltype_delete_delta(
-        self, schema: s_schema.Schema, *, view_name: str = None
+        self, schema: s_schema.Schema, *, view_name: Optional[str] = None
     ) -> Union[DeleteArray, DeleteArrayExprAlias]:
         cmd: Union[DeleteArray, DeleteArrayExprAlias]
         if view_name is None:
@@ -1243,7 +1265,11 @@ class CollectionExprAlias(so.QualifiedObject, Collection):
         return 'view'
 
 
-class ArrayExprAlias(CollectionExprAlias, Array):
+class ArrayExprAlias(
+    CollectionExprAlias,
+    Array,
+    qlkind=qltypes.SchemaObjectClass.ALIAS,
+):
     pass
 
 
@@ -1636,7 +1662,7 @@ class Tuple(
 
         for st_name, st in self.iter_subtypes(schema):
             schema, stm = st.material_type(schema)
-            if stm is not st:
+            if stm != st:
                 new_material_type = True
             subtypes[st_name] = stm
 
@@ -1647,7 +1673,7 @@ class Tuple(
             return schema, self
 
     def as_colltype_delete_delta(
-        self, schema: s_schema.Schema, *, view_name: str = None
+        self, schema: s_schema.Schema, *, view_name: Optional[str] = None
     ) -> Union[DeleteTuple, DeleteTupleExprAlias]:
         cmd: Union[DeleteTuple, DeleteTupleExprAlias]
         if view_name is None:
@@ -1774,7 +1800,11 @@ class TupleTypeShell(CollectionTypeShell):
         return cmd
 
 
-class TupleExprAlias(CollectionExprAlias, Tuple):
+class TupleExprAlias(
+    CollectionExprAlias,
+    Tuple,
+    qlkind=qltypes.SchemaObjectClass.ALIAS,
+):
     pass
 
 
@@ -1830,15 +1860,18 @@ def generate_array_type_id(
 
 def get_union_type_id(
     schema: s_schema.Schema,
-    components: typing.Iterable[Union[Type, TypeShell]], *,
-    module: typing.Optional[str]=None,
+    components: typing.Iterable[Union[Type, TypeShell]],
+    *,
+    opaque: bool = False,
+    module: typing.Optional[str] = None,
 ) -> typing.Tuple[uuid.UUID, s_name.Name]:
 
     component_ids = sorted(str(t.get_id(schema)) for t in components)
-    name = s_name.Name(
-        name=f"({' | '.join(component_ids)})",
-        module=module or '__derived__',
-    )
+    if opaque:
+        name = f"(opaque: {' | '.join(component_ids)})"
+    else:
+        name = f"({' | '.join(component_ids)})"
+    name = s_name.Name(name=name, module=module or '__derived__')
 
     return generate_type_id(name), name
 
@@ -1874,6 +1907,7 @@ def ensure_schema_type_expr_type(
         type_id, type_name = get_union_type_id(
             schema,
             components,
+            opaque=type_shell.opaque,
             module=module,
         )
     elif isinstance(type_shell, IntersectionTypeShell):
@@ -1915,8 +1949,37 @@ class TypeCommand(sd.ObjectCommand[TypeT]):
     ) -> Optional[qlast.DDLOperation]:
         if self.get_attribute_value('expr'):
             return None
+        elif (
+            (union_of := self.get_attribute_value('union_of')) is not None
+            and union_of.items
+        ):
+            return None
+        elif (
+            (int_of := self.get_attribute_value('intersection_of')) is not None
+            and int_of.items
+        ):
+            return None
         else:
             return super().get_ast(schema, context, parent_node=parent_node)
+
+    def compile_expr_field(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        field: so.Field[Any],
+        value: s_expr.Expression,
+        track_schema_ref_exprs: bool=False,
+    ) -> s_expr.Expression:
+        assert field.name == 'expr'
+        return type(value).compiled(
+            value,
+            schema=schema,
+            options=qlcompiler.CompilerOptions(
+                modaliases=context.modaliases,
+                in_ddl_context_name='type definition',
+                track_schema_ref_exprs=track_schema_ref_exprs,
+            ),
+        )
 
     def _create_begin(
         self, schema: s_schema.Schema, context: sd.CommandContext

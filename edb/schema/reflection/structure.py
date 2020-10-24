@@ -96,6 +96,7 @@ def _run_ddl(
         ddl_text,
         schema=schema,
         stdmode=True,
+        internal_schema_mode=True,
     )
 
     delta.update(cmd.get_subcommands())
@@ -338,7 +339,8 @@ def generate_structure(
                 delta=delta,
             )
 
-            schema_objtype = schema.get(rschema_name)
+            schema_objtype = schema.get(
+                rschema_name, type=s_objtypes.ObjectType)
         else:
             ex_bases = schema_objtype.get_bases(schema).names(schema)
             _, added_bases = s_inh.delta_bases(ex_bases, bases)
@@ -722,7 +724,7 @@ def generate_structure(
                     SchemaFieldDesc(
                         fieldname=refdict.attr,
                         type=shadow_tgt,
-                        cardinality=qltypes.SchemaCardinality.MANY,
+                        cardinality=qltypes.SchemaCardinality.Many,
                         properties=prop_layout,
                         is_refdict=True,
                     )

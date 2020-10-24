@@ -21,7 +21,6 @@
 
 from __future__ import annotations
 from typing import *
-from typing_extensions import Protocol  # type: ignore
 
 import collections
 import dataclasses
@@ -97,9 +96,6 @@ class StatementMetadata:
 class ScopeInfo:
     path_scope: irast.ScopeTreeNode
     pinned_path_id_ns: Optional[FrozenSet[str]] = None
-    tentative_work: List[CompletionWorkCallback] = (
-        dataclasses.field(default_factory=list)
-    )
 
 
 @dataclasses.dataclass
@@ -109,36 +105,6 @@ class ComputableInfo:
     context: ContextLevel
     path_id: irast.PathId
     path_id_ns: Optional[irast.WeakNamespace]
-    shape_op: qlast.ShapeOp
-
-
-class CompletionWorkCallback(Protocol):
-
-    def __call__(
-        self,
-        *,
-        ctx: ContextLevel,
-    ) -> None:
-        ...
-
-
-class PointerCardinalityCallback(Protocol):
-
-    def __call__(
-        self,
-        ptrcls: s_pointers.PointerLike,
-        *,
-        ctx: ContextLevel,
-    ) -> None:
-        ...
-
-
-class PendingCardinality(NamedTuple):
-
-    specified_cardinality: Optional[qltypes.Cardinality]
-    source_ctx: Optional[parsing.ParserContext]
-    callbacks: List[PointerCardinalityCallback]
-    is_mut_assignment: bool
     shape_op: qlast.ShapeOp
 
 
@@ -200,11 +166,6 @@ class Environment:
     inferred_types: Dict[irast.Base, s_types.Type]
     """A dictionary of all expressions and their inferred schema types."""
 
-    inferred_cardinality: Dict[
-        Tuple[irast.Base, irast.ScopeTreeNode],
-        qltypes.Cardinality]
-    """A dictionary of all expressions and their inferred cardinality."""
-
     inferred_volatility: Dict[
         irast.Base,
         qltypes.Volatility]
@@ -216,10 +177,28 @@ class Environment:
     ]
     """Object output or modification shapes."""
 
+    pointer_derivation_map: Dict[
+        s_pointers.Pointer,
+        List[s_pointers.Pointer],
+    ]
+    """A parent: children mapping of derived pointer classes."""
+
+    pointer_specified_info: Dict[
+        s_pointers.Pointer,
+        Tuple[Optional[qltypes.SchemaCardinality], bool,
+              Optional[parsing.ParserContext]],
+    ]
+    """Cardinality/source context for pointers with unclear cardinality."""
+
     view_shapes_metadata: Dict[s_types.Type, irast.ViewShapeMetadata]
 
     schema_refs: Set[s_obj.Object]
     """A set of all schema objects referenced by an expression."""
+
+    schema_ref_exprs: Optional[Dict[s_obj.Object, Set[qlast.Base]]]
+    """Map from all schema objects referenced to the ast referants.
+
+    This is used for rewriting expressions in the schema after a rename. """
 
     created_schema_objects: Set[s_obj.Object]
     """A set of all schema objects derived by this compilation."""
@@ -227,6 +206,11 @@ class Environment:
     # Caches for costly operations in edb.ir.typeutils
     ptr_ref_cache: PointerRefCache
     type_ref_cache: Dict[irtyputils.TypeRefCacheKey, irast.TypeRef]
+
+    dml_exprs: List[qlast.Base]
+    """A list of DML expressions (statements and DML-containing
+    functions) that appear in a function body.
+    """
 
     def __init__(
         self,
@@ -247,20 +231,30 @@ class Environment:
         self.set_types = {}
         self.type_origins = {}
         self.inferred_types = {}
-        self.inferred_cardinality = {}
         self.inferred_volatility = {}
         self.view_shapes = collections.defaultdict(list)
         self.view_shapes_metadata = collections.defaultdict(
             irast.ViewShapeMetadata)
         self.schema_refs = set()
+        self.schema_ref_exprs = {} if options.track_schema_ref_exprs else None
         self.created_schema_objects = set()
         self.ptr_ref_cache = PointerRefCache()
         self.type_ref_cache = {}
+        self.dml_exprs = []
+        self.pointer_derivation_map = collections.defaultdict(list)
+        self.pointer_specified_info = {}
+
+    def add_schema_ref(
+            self, sobj: s_obj.Object, expr: Optional[qlast.Base]) -> None:
+        self.schema_refs.add(sobj)
+        if self.schema_ref_exprs is not None and expr:
+            self.schema_ref_exprs.setdefault(sobj, set()).add(expr)
 
     @overload
     def get_track_schema_object(  # NoQA: F811
         self,
         name: str,
+        expr: Optional[qlast.Base],
         *,
         modaliases: Optional[Mapping[Optional[str], str]] = None,
         type: Optional[Type[s_obj.Object]] = None,
@@ -274,6 +268,7 @@ class Environment:
     def get_track_schema_object(  # NoQA: F811
         self,
         name: str,
+        expr: Optional[qlast.Base],
         *,
         modaliases: Optional[Mapping[Optional[str], str]] = None,
         type: Optional[Type[s_obj.Object]] = None,
@@ -286,6 +281,7 @@ class Environment:
     def get_track_schema_object(  # NoQA: F811
         self,
         name: str,
+        expr: Optional[qlast.Base],
         *,
         modaliases: Optional[Mapping[Optional[str], str]] = None,
         type: Optional[Type[s_obj.Object]] = None,
@@ -293,11 +289,12 @@ class Environment:
         label: Optional[str] = None,
         condition: Optional[Callable[[s_obj.Object], bool]] = None,
     ) -> Optional[s_obj.Object]:
-        sobj = self.schema.get(name, module_aliases=modaliases, type=type,
-                               condition=condition, label=label,
-                               default=default)
+        sobj = self.schema.get(
+            name, module_aliases=modaliases, type=type,
+            condition=condition, label=label,
+            default=default)
         if sobj is not None and sobj is not default:
-            self.schema_refs.add(sobj)
+            self.add_schema_ref(sobj, expr)
 
             if (
                 isinstance(sobj, s_types.Type)
@@ -311,13 +308,15 @@ class Environment:
                     scls_type=s_aliases.Alias,
                     field_name='type',
                 )
-                self.schema_refs.update(alias_objs)
+                for obj in alias_objs:
+                    self.add_schema_ref(obj, expr)
 
         return sobj
 
     def get_track_schema_type(
         self,
         name: str,
+        expr: Optional[qlast.Base]=None,
         *,
         modaliases: Optional[Mapping[Optional[str], str]] = None,
         default: Union[None, s_obj.Object, s_obj.NoDefaultT] = s_obj.NoDefault,
@@ -326,7 +325,7 @@ class Environment:
     ) -> s_types.Type:
 
         stype = self.get_track_schema_object(
-            name, modaliases=modaliases, default=default, label=label,
+            name, expr, modaliases=modaliases, default=default, label=label,
             condition=condition, type=s_types.Type,
         )
 
@@ -368,6 +367,9 @@ class ContextLevel(compiler.ContextLevel):
 
     view_sets: Dict[s_types.Type, irast.Set]
     """A dictionary of IR expressions for views declared in the query."""
+
+    type_rewrites: Dict[s_types.Type, irast.Set]
+    """Access policy rewrites for schema-level types."""
 
     aliased_views: ChainMap[str, Optional[s_types.Type]]
     """A dictionary of views aliased in a statement body."""
@@ -414,21 +416,6 @@ class ContextLevel(compiler.ContextLevel):
 
     view_map: ChainMap[irast.PathId, irast.Set]
     """Set translation map.  Used for views."""
-
-    completion_work: List[CompletionWorkCallback]
-    """A list of callbacks to execute when the whole query has been seen."""
-
-    pending_cardinality: Dict[
-        s_pointers.PointerLike,
-        PendingCardinality,
-    ]
-    """A set of derived pointers for which the cardinality is not yet known."""
-
-    pointer_derivation_map: Dict[
-        s_pointers.Pointer,
-        List[s_pointers.Pointer],
-    ]
-    """A parent: children mapping of derived pointer classes."""
 
     path_scope: irast.ScopeTreeNode
     """Path scope tree, with per-lexical-scope levels."""
@@ -478,18 +465,21 @@ class ContextLevel(compiler.ContextLevel):
     defining_view: Optional[s_types.Type]
     """Whether a view is currently being defined (as opposed to be compiled)"""
 
+    compiling_update_shape: bool
+    """Whether an UPDATE shape is currently being compiled."""
+
     in_conditional: Optional[parsing.ParserContext]
     """Whether currently in a conditional branch."""
 
     in_temp_scope: bool
     """Whether currently in a temporary scope."""
 
-    tentative_work: List[CompletionWorkCallback]
-    """Callbacks that rely on scope and scheduled tentatively."""
-
     disable_shadowing: Set[Union[s_obj.Object, s_pointers.PseudoPointer]]
     """A set of schema objects for which the shadowing rewrite should be
        disabled."""
+
+    path_log: Optional[List[irast.PathId]]
+    """An optional list of path ids added to the scope tree in this context."""
 
     def __init__(
         self,
@@ -509,13 +499,11 @@ class ContextLevel(compiler.ContextLevel):
             self.anchors = {}
             self.modaliases = {}
             self.stmt_metadata = {}
-            self.completion_work = []
-            self.pending_cardinality = {}
-            self.pointer_derivation_map = collections.defaultdict(list)
 
             self.source_map = {}
             self.view_nodes = {}
             self.view_sets = {}
+            self.type_rewrites = {}
             self.aliased_views = collections.ChainMap()
             self.must_use_views = {}
             self.expr_view_cache = {}
@@ -529,7 +517,7 @@ class ContextLevel(compiler.ContextLevel):
             self.pending_stmt_full_path_id_namespace = frozenset()
             self.banned_paths = set()
             self.view_map = collections.ChainMap()
-            self.path_scope = irast.new_scope_tree()
+            self.path_scope = env.path_scope
             self.path_scope_map = {}
             self.iterator_ctx = None
             self.iterator_path_ids = frozenset()
@@ -548,23 +536,22 @@ class ContextLevel(compiler.ContextLevel):
             self.special_computables_in_mutation_shape = frozenset()
             self.empty_result_type_hint = None
             self.defining_view = None
+            self.compiling_update_shape = False
             self.in_conditional = None
             self.in_temp_scope = False
-            self.tentative_work = []
             self.disable_shadowing = set()
+            self.path_log = None
 
         else:
             self.env = prevlevel.env
             self.derived_target_module = prevlevel.derived_target_module
             self.aliases = prevlevel.aliases
             self.stmt_metadata = prevlevel.stmt_metadata
-            self.completion_work = prevlevel.completion_work
-            self.pending_cardinality = prevlevel.pending_cardinality
-            self.pointer_derivation_map = prevlevel.pointer_derivation_map
 
             self.source_map = prevlevel.source_map
             self.view_nodes = prevlevel.view_nodes
             self.view_sets = prevlevel.view_sets
+            self.type_rewrites = prevlevel.type_rewrites
             self.must_use_views = prevlevel.must_use_views
             self.expr_view_cache = prevlevel.expr_view_cache
             self.shape_type_cache = prevlevel.shape_type_cache
@@ -578,6 +565,8 @@ class ContextLevel(compiler.ContextLevel):
                 prevlevel.pending_stmt_full_path_id_namespace
             self.banned_paths = prevlevel.banned_paths
             self.view_map = prevlevel.view_map
+            if prevlevel.path_scope is None:
+                prevlevel.path_scope = self.env.path_scope
             self.path_scope = prevlevel.path_scope
             self.path_scope_map = prevlevel.path_scope_map
             self.scope_id_ctr = prevlevel.scope_id_ctr
@@ -593,10 +582,11 @@ class ContextLevel(compiler.ContextLevel):
                 prevlevel.special_computables_in_mutation_shape
             self.empty_result_type_hint = prevlevel.empty_result_type_hint
             self.defining_view = prevlevel.defining_view
+            self.compiling_update_shape = prevlevel.compiling_update_shape
             self.in_conditional = prevlevel.in_conditional
             self.in_temp_scope = prevlevel.in_temp_scope
-            self.tentative_work = prevlevel.tentative_work
             self.disable_shadowing = prevlevel.disable_shadowing
+            self.path_log = prevlevel.path_log
 
             if mode == ContextSwitchMode.SUBQUERY:
                 self.anchors = prevlevel.anchors.copy()
@@ -656,32 +646,20 @@ class ContextLevel(compiler.ContextLevel):
 
             if mode in {ContextSwitchMode.NEWFENCE_TEMP,
                         ContextSwitchMode.NEWSCOPE_TEMP}:
-                if prevlevel.path_scope is None:
-                    prevlevel.path_scope = self.env.path_scope
-
-                self.path_scope = prevlevel.path_scope.copy()
+                # Make a copy of the entire tree and set path_scope to
+                # be the copy of the current node. Stash the root in
+                # an attribute to keep it from being freed, since
+                # scope tree parent pointers are weak pointers.
+                self._stash, self.path_scope = self.path_scope.copy_all()
                 self.in_temp_scope = True
-                self.tentative_work = list(prevlevel.tentative_work)
 
             if mode in {ContextSwitchMode.NEWFENCE,
                         ContextSwitchMode.NEWFENCE_TEMP}:
-                if prevlevel.path_scope is None:
-                    prevlevel.path_scope = self.env.path_scope
-
-                self.path_scope = prevlevel.path_scope.attach_fence()
+                self.path_scope = self.path_scope.attach_fence()
 
             if mode in {ContextSwitchMode.NEWSCOPE,
                         ContextSwitchMode.NEWSCOPE_TEMP}:
-                if prevlevel.path_scope is None:
-                    prevlevel.path_scope = self.env.path_scope
-
-                self.path_scope = prevlevel.path_scope.attach_branch()
-
-    def on_pop(self, prevlevel: Optional[ContextLevel]) -> None:
-        if (prevlevel is not None
-                and self.mode in {ContextSwitchMode.NEWFENCE_TEMP,
-                                  ContextSwitchMode.NEWSCOPE_TEMP}):
-            prevlevel.path_scope.remove_subtree(self.path_scope)
+                self.path_scope = self.path_scope.attach_branch()
 
     def subquery(self) -> compiler.CompilerContextManager[ContextLevel]:
         return self.new(ContextSwitchMode.SUBQUERY)

@@ -168,6 +168,9 @@ class AnyTupleRef(TypeRef):
 class BasePointerRef(ImmutableBase):
     __abstract_node__ = True
 
+    # Hide descendants to reduce noise
+    __ast_hidden__ = {'descendants'}
+
     # cardinality fields need to be mutable for lazy cardinality inference.
     __ast_mutable_fields__ = frozenset(('dir_cardinality', 'out_cardinality'))
 
@@ -183,6 +186,7 @@ class BasePointerRef(ImmutableBase):
     material_ptr: BasePointerRef
     descendants: typing.FrozenSet[BasePointerRef]
     union_components: typing.Set[BasePointerRef]
+    intersection_components: typing.Set[BasePointerRef]
     union_is_concrete: bool
     has_properties: bool
     is_derived: bool
@@ -201,8 +205,19 @@ class BasePointerRef(ImmutableBase):
             return self.out_source
 
     @property
+    def dir_source(self) -> TypeRef:
+        if self.direction is s_pointers.PointerDirection.Outbound:
+            return self.out_source
+        else:
+            return self.out_target
+
+    @property
     def required(self) -> bool:
         return self.out_cardinality.to_schema_value()[0]
+
+    @property
+    def is_inbound(self) -> bool:
+        return self.direction is self.direction.Inbound
 
 
 class PointerRef(BasePointerRef):
@@ -248,7 +263,7 @@ class TupleIndirectionLink(s_pointers.PseudoPointer):
         self,
         schema: s_schema.Schema
     ) -> qltypes.SchemaCardinality:
-        return qltypes.SchemaCardinality.ONE
+        return qltypes.SchemaCardinality.One
 
     def singular(
         self,
@@ -343,7 +358,7 @@ class TypeIntersectionLink(s_pointers.PseudoPointer):
     ) -> bool:
         if direction is s_pointers.PointerDirection.Outbound:
             return (self.get_cardinality(schema) is
-                    qltypes.SchemaCardinality.ONE)
+                    qltypes.SchemaCardinality.One)
         else:
             return True
 
@@ -404,6 +419,7 @@ class Set(Base):
     anchor: typing.Optional[str]
     show_as_anchor: typing.Optional[str]
     shape: typing.List[typing.Tuple[Set, qlast.ShapeOp]]
+    is_binding: bool
 
     def __repr__(self) -> str:
         return f'<ir.Set \'{self.path_id}\' at 0x{id(self):x}>'
@@ -442,6 +458,8 @@ class Statement(Command):
     view_shapes_metadata: typing.Dict[so.Object, ViewShapeMetadata]
     schema: s_schema.Schema
     schema_refs: typing.FrozenSet[so.Object]
+    schema_ref_exprs: typing.Optional[
+        typing.Dict[so.Object, typing.Set[qlast.Base]]]
     new_coll_types: typing.FrozenSet[s_types.Collection]
     scope_tree: ScopeTreeNode
     source_map: typing.Dict[s_pointers.Pointer,
@@ -449,6 +467,8 @@ class Statement(Command):
                                          compiler.ContextLevel,
                                          PathId,
                                          typing.Optional[WeakNamespace]]]
+    dml_exprs: typing.List[qlast.Base]
+    type_rewrites: typing.Dict[uuid.UUID, Set]
 
 
 class TypeIntrospection(ImmutableExpr):
@@ -687,12 +707,15 @@ class TypeCast(ImmutableExpr):
 
 class Stmt(Expr):
     __abstract_node__ = True
+    # Hide parent_stmt to reduce debug spew and to hide it from find_children
+    __ast_hidden__ = {'parent_stmt'}
+
     name: str
     result: Set
-    cardinality: qltypes.Cardinality
     parent_stmt: typing.Optional[Stmt]
     iterator_stmt: typing.Optional[Set]
     hoisted_iterators: typing.List[Set]
+    bindings: typing.List[Set]
 
 
 class FilteredStmt(Stmt):
@@ -752,7 +775,7 @@ class SessionStateCmd(Command):
 class ConfigCommand(Command):
     __abstract_node__ = True
     name: str
-    system: bool
+    scope: qltypes.ConfigScope
     cardinality: qltypes.SchemaCardinality
     requires_restart: bool
     backend_setting: str

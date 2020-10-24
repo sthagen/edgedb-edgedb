@@ -23,21 +23,28 @@
 CREATE MODULE schema;
 
 CREATE SCALAR TYPE schema::Cardinality
-    EXTENDING enum<'ONE', 'MANY'>;
+    EXTENDING enum<One, Many>;
 
 CREATE SCALAR TYPE schema::TargetDeleteAction
-    EXTENDING enum<'RESTRICT', 'DELETE SOURCE', 'ALLOW', 'DEFERRED RESTRICT'>;
+    EXTENDING enum<Restrict, DeleteSource, Allow, DeferredRestrict>;
 
 CREATE SCALAR TYPE schema::OperatorKind
-    EXTENDING enum<'INFIX', 'POSTFIX', 'PREFIX', 'TERNARY'>;
+    EXTENDING enum<Infix, Postfix, Prefix, Ternary>;
 
 CREATE SCALAR TYPE schema::Volatility
-    EXTENDING enum<'IMMUTABLE', 'STABLE', 'VOLATILE'>;
+    EXTENDING enum<Immutable, Stable, Volatile>;
+
+CREATE SCALAR TYPE schema::ParameterKind
+    EXTENDING enum<VariadicParam, NamedOnlyParam, PositionalParam>;
+
+CREATE SCALAR TYPE schema::TypeModifier
+    EXTENDING enum<SetOfType, OptionalType, SingletonType>;
+
 
 # Base type for all schema entities.
 CREATE ABSTRACT TYPE schema::Object EXTENDING std::BaseObject {
     CREATE REQUIRED PROPERTY name -> std::str;
-    CREATE REQUIRED PROPERTY is_internal -> std::bool {
+    CREATE REQUIRED PROPERTY internal -> std::bool {
         SET default := false;
     };
     CREATE REQUIRED PROPERTY builtin -> std::bool {
@@ -140,8 +147,8 @@ EXTENDING schema::SubclassableObject {
 
 CREATE TYPE schema::Parameter EXTENDING schema::Object {
     CREATE REQUIRED LINK type -> schema::Type;
-    CREATE REQUIRED PROPERTY typemod -> std::str;
-    CREATE REQUIRED PROPERTY kind -> std::str;
+    CREATE REQUIRED PROPERTY typemod -> schema::TypeModifier;
+    CREATE REQUIRED PROPERTY kind -> schema::ParameterKind;
     CREATE REQUIRED PROPERTY num -> std::int64;
     CREATE PROPERTY default -> std::str;
 };
@@ -155,7 +162,7 @@ CREATE ABSTRACT TYPE schema::CallableObject
     };
 
     CREATE LINK return_type -> schema::Type;
-    CREATE PROPERTY return_typemod -> std::str;
+    CREATE PROPERTY return_typemod -> schema::TypeModifier;
 };
 
 
@@ -163,7 +170,7 @@ CREATE ABSTRACT TYPE schema::VolatilitySubject EXTENDING schema::Object {
     CREATE PROPERTY volatility -> schema::Volatility {
         # NOTE: this default indicates the default value in the python
         # implementation, but is not itself a source of truth
-        SET default := 'VOLATILE';
+        SET default := 'Volatile';
     };
 };
 

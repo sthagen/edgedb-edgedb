@@ -36,14 +36,25 @@ class TestEdgeQLIRScopeTree(tb.BaseEdgeQLCompilerTest):
     SCHEMA = os.path.join(os.path.dirname(__file__), 'schemas',
                           'cards.esdl')
 
-    UUID_RE = re.compile(
-        r'[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}'
-        r'-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
+    UNION_NAME_RE = re.compile(
+        r'''
+            (?:opaque:\s)?
+            ([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}
+                           -[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})
+            (\s \| \s \1)*
+        ''',
+        re.X,
     )
 
     def run_test(self, *, source, spec, expected):
         qltree = qlparser.parse(source)
-        ir = compiler.compile_ast_to_ir(qltree, self.schema)
+        ir = compiler.compile_ast_to_ir(
+            qltree,
+            self.schema,
+            options=compiler.CompilerOptions(
+                apply_query_rewrites=False,
+            )
+        )
 
         root = ir.scope_tree
         if len(root.children) != 1:
@@ -55,7 +66,7 @@ class TestEdgeQLIRScopeTree(tb.BaseEdgeQLCompilerTest):
 
         scope_tree = next(iter(root.children))
 
-        path_scope = self.UUID_RE.sub(
+        path_scope = self.UNION_NAME_RE.sub(
             '@SID@',
             textwrap.indent(scope_tree.pformat(), '    '),
         )
@@ -235,7 +246,7 @@ class TestEdgeQLIRScopeTree(tb.BaseEdgeQLCompilerTest):
 
 % OK %
         "FENCE": {
-            "(test::Card)",
+            "(test::Card) [OPT]",
             "(test::Card).>element[IS std::str] [OPT]",
             "FENCE": {
                 "(test::Card).>cost[IS std::int64]"
@@ -275,9 +286,9 @@ class TestEdgeQLIRScopeTree(tb.BaseEdgeQLCompilerTest):
 
 % OK %
         "FENCE": {
-            "(__derived__::expr~51)",
+            "(__derived__::expr~3)",
             "FENCE": {
-                "(__derived__::expr~51).>foo[IS std::str]"
+                "(__derived__::expr~3).>foo[IS std::str]"
             },
             "FENCE": {
                 "(schema::Type)"
@@ -660,22 +671,24 @@ class TestEdgeQLIRScopeTree(tb.BaseEdgeQLCompilerTest):
         } FILTER .name = 'Alice'
 
 % OK %
+    "FENCE": {
+        "(test::User)",
         "FENCE": {
-            "(test::User)",
+            "(__derived__::__derived__|letter@w~1)",
+            "(test::User).>select_deck[IS test::Card]",
             "FENCE": {
-                "(__derived__::__derived__|letter@w~1)",
-                "(test::User).>select_deck[IS test::Card]",
                 "FENCE": {
                     "(test::User).>deck[IS test::Card]",
                     "FENCE": {
                         "(test::User).>deck[IS test::Card].>name[IS std::str]"
                     }
                 }
-            },
-            "FENCE": {
-                "(test::User).>name[IS std::str]"
             }
+        },
+        "FENCE": {
+            "(test::User).>name[IS std::str]"
         }
+    }
         """
 
     def test_edgeql_ir_scope_tree_26(self):
@@ -695,25 +708,27 @@ class TestEdgeQLIRScopeTree(tb.BaseEdgeQLCompilerTest):
         } FILTER .name = 'Alice'
 
 % OK %
+    "FENCE": {
+        "(test::User)",
         "FENCE": {
-            "(test::User)",
+            "(__derived__::__derived__|letter@w~1)",
+            "(test::User).>select_deck[IS test::Card]",
             "FENCE": {
                 "(__derived__::__derived__|foo@w~2)": {
                     "FENCE": {
                         "(test::User).>deck[IS test::Card]",
                         "FENCE": {
-                            "(test::User).>deck[IS test::Card]\
-.>name[IS std::str]"
+                            "(test::User).>deck[IS test::Card].>\
+name[IS std::str]"
                         }
                     }
-                },
-                "(__derived__::__derived__|letter@w~1)",
-                "(test::User).>select_deck[IS test::Card]"
-            },
-            "FENCE": {
-                "(test::User).>name[IS std::str]"
+                }
             }
+        },
+        "FENCE": {
+            "(test::User).>name[IS std::str]"
         }
+    }
         """
 
     def test_edgeql_ir_scope_tree_27(self):

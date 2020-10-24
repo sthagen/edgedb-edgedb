@@ -73,6 +73,34 @@ def new_set(
     Absolutely all ir.Set instances must be created using this
     constructor.
     """
+    if (
+        stype not in ctx.type_rewrites
+        and isinstance(stype, s_objtypes.ObjectType)
+        and ctx.env.options.apply_query_rewrites
+        and (filters := stype.get_access_policy_filters(ctx.env.schema))
+    ):
+        qry = qlast.SelectQuery(
+            result=qlast.Path(
+                steps=[s_utils.name_to_ast_ref(stype.get_name(ctx.env.schema))]
+            ),
+        )
+        for f in filters:
+            assert isinstance(f.qlast, qlast.Expr)
+            qry.where = astutils.extend_binop(qry.where, f.qlast)
+
+        with ctx.detached() as subctx:
+            subctx.expr_exposed = False
+            # This is a global rewrite operation that is done once
+            # per type, and so we don't really care if we're in a
+            # temporary scope or not.
+            subctx.path_scope = subctx.env.path_scope.root
+            subctx.in_temp_scope = False
+            # Put a placeholder to prevent recursion.
+            subctx.type_rewrites[stype] = irast.Set()
+            filtered_set = dispatch.compile(qry, ctx=subctx)
+            assert isinstance(filtered_set, irast.Set)
+            subctx.type_rewrites[stype] = filtered_set
+
     typeref = typegen.type_to_typeref(stype, env=ctx.env)
     ir_set = ircls(typeref=typeref, **kwargs)
     ctx.env.set_types[ir_set] = stype
@@ -107,6 +135,8 @@ def new_set_from_set(
         path_id: Optional[irast.PathId]=None,
         stype: Optional[s_types.Type]=None,
         rptr: Optional[irast.Pointer]=None,
+        context: Optional[parsing.ParserContext]=None,
+        is_binding: Optional[bool]=None,
         ctx: context.ContextLevel) -> irast.Set:
     """Create a new ir.Set from another ir.Set.
 
@@ -123,13 +153,18 @@ def new_set_from_set(
         stype = get_set_type(ir_set, ctx=ctx)
     if rptr is None:
         rptr = ir_set.rptr
+    if context is None:
+        context = ir_set.context
+    if is_binding is None:
+        is_binding = ir_set.is_binding
     return new_set(
         path_id=path_id,
         path_scope_id=ir_set.path_scope_id,
         stype=stype,
         expr=ir_set.expr,
         rptr=rptr,
-        context=ir_set.context,
+        context=context,
+        is_binding=is_binding,
         ircls=type(ir_set),
         ctx=ctx,
     )
@@ -241,6 +276,7 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
                         preserve_scope_ns=(
                             view_scope_info.pinned_path_id_ns is not None
                         ),
+                        is_binding=True,
                         ctx=ctx,
                     )
 
@@ -334,7 +370,7 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
 
             else:
                 path_tip = ptr_step_set(
-                    path_tip, source=source, ptr_name=ptr_name,
+                    path_tip, expr=step, source=source, ptr_name=ptr_name,
                     direction=direction,
                     ignore_computable=True,
                     source_context=step.context, ctx=ctx)
@@ -385,11 +421,6 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
 
                 extra_scopes[scope_set] = context.ScopeInfo(
                     path_scope=subctx.path_scope,
-                    tentative_work=[
-                        cb
-                        for cb in subctx.tentative_work
-                        if cb not in ctx.tentative_work
-                    ],
                 )
 
         for key_path_id in path_tip.path_id.iter_weak_namespace_prefixes():
@@ -454,11 +485,6 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
         fence.fenced = True
 
     for ir_set, scope_info in extra_scopes.items():
-        for cb in scope_info.tentative_work:
-            stmtctx.at_stmt_fini(cb, ctx=ctx)
-
-        scope_info.tentative_work[:] = []
-
         nodes = tuple(
             node for node in ctx.path_scope.find_descendants(ir_set.path_id)
         )
@@ -529,6 +555,7 @@ def resolve_special_anchor(
 def ptr_step_set(
         path_tip: irast.Set, *,
         source: s_obj.Object,
+        expr: Optional[qlast.Base],
         ptr_name: str,
         direction: PtrDir = PtrDir.Outbound,
         source_context: parsing.ParserContext,
@@ -537,6 +564,7 @@ def ptr_step_set(
     ptrcls = resolve_ptr(
         source,
         ptr_name,
+        track_ref=expr,
         direction=direction,
         source_context=source_context,
         ctx=ctx)
@@ -555,7 +583,7 @@ def resolve_ptr(
         s_pointers.PointerDirection.Outbound
     ),
     source_context: Optional[parsing.ParserContext] = None,
-    track_ref: bool = True,
+    track_ref: Optional[Union[qlast.Base, Literal[False]]],
     ctx: context.ContextLevel,
 ) -> s_pointers.Pointer:
 
@@ -571,18 +599,18 @@ def resolve_ptr(
 
         if ptr is not None:
             ref = ptr.get_nearest_non_derived_parent(ctx.env.schema)
-            if track_ref:
-                ctx.env.schema_refs.add(ref)
+            if track_ref is not False:
+                ctx.env.add_schema_ref(ref, track_ref)
 
     else:
         ptrs = near_endpoint.getrptrs(ctx.env.schema, pointer_name,
                                       sources=far_endpoints)
         if ptrs:
-            if track_ref:
-                ctx.env.schema_refs.update(
-                    p.get_nearest_non_derived_parent(ctx.env.schema)
-                    for p in ptrs
-                )
+            if track_ref is not False:
+                for p in ptrs:
+                    ctx.env.add_schema_ref(
+                        p.get_nearest_non_derived_parent(ctx.env.schema),
+                        track_ref)
 
             opaque = (
                 direction is s_pointers.PointerDirection.Inbound
@@ -636,9 +664,9 @@ def extend_path(
     direction: PtrDir = PtrDir.Outbound,
     *,
     ignore_computable: bool = False,
-    hoist_iterators: bool = False,
     unnest_fence: bool = False,
     same_computable_scope: bool = False,
+    srcctx: Optional[parsing.ParserContext]=None,
     ctx: context.ContextLevel,
 ) -> irast.Set:
     """Return a Set node representing the new path tip."""
@@ -657,19 +685,18 @@ def extend_path(
 
         src_path_id = source_set.path_id
 
-    expr_type = get_set_type(source_set, ctx=ctx).get_expr_type(ctx.env.schema)
     path_id = pathctx.extend_path_id(
         src_path_id,
         ptrcls=ptrcls,
         direction=direction,
         ns=ctx.path_id_namespace,
-        include_descendants_in_ptrref=expr_type is s_types.ExprType.Update,
         ctx=ctx,
     )
 
     target = ptrcls.get_far_endpoint(ctx.env.schema, direction)
     assert isinstance(target, s_types.Type)
-    target_set = new_set(stype=target, path_id=path_id, ctx=ctx)
+    target_set = new_set(
+        stype=target, path_id=path_id, context=srcctx, ctx=ctx)
 
     ptr = irast.Pointer(
         source=source_set,
@@ -684,8 +711,8 @@ def extend_path(
         target_set = computable_ptr_set(
             ptr,
             unnest_fence=unnest_fence,
-            hoist_iterators=hoist_iterators,
             same_computable_scope=same_computable_scope,
+            srcctx=srcctx,
             ctx=ctx,
         )
 
@@ -707,7 +734,7 @@ def _is_computable_ptr(
     return (
         ptrcls.is_pure_computable(ctx.env.schema)
         or (
-            ctx.env.options.introspection_schema_rewrites
+            ctx.env.options.apply_query_rewrites
             and ptrcls not in ctx.disable_shadowing
             and bool(ptrcls.get_schema_reflection_default(ctx.env.schema))
         )
@@ -756,7 +783,7 @@ def type_intersection_set(
     arg_type = get_set_type(source_set, ctx=ctx)
 
     result = schemactx.apply_intersection(arg_type, stype, ctx=ctx)
-    if result.stype is arg_type:
+    if result.stype == arg_type:
         return source_set
 
     poly_set = new_set(stype=result.stype, ctx=ctx)
@@ -777,6 +804,20 @@ def type_intersection_set(
             if component_endpoint.issubclass(ctx.env.schema, stype):
                 assert isinstance(component, irast.PointerRef)
                 rptr_specialization.append(component)
+            elif stype.issubclass(ctx.env.schema, component_endpoint):
+                assert isinstance(stype, s_objtypes.ObjectType)
+                narrow_ptr = stype.getptr(
+                    ctx.env.schema, component.shortname.name)
+                assert narrow_ptr is not None
+                rptr_specialization.append(
+                    irtyputils.ptrref_from_ptrcls(
+                        schema=ctx.env.schema,
+                        ptrcls=narrow_ptr,
+                        direction=rptr.direction,
+                        cache=ctx.env.ptr_ref_cache,
+                        typeref_cache=ctx.env.type_ref_cache,
+                    ),
+                )
 
     ptrcls = irast.TypeIntersectionLink(
         arg_type,
@@ -788,7 +829,7 @@ def type_intersection_set(
         # The type intersection cannot increase the cardinality
         # of the input set, so semantically, the cardinality
         # of the type intersection "link" is, at most, ONE.
-        cardinality=qltypes.SchemaCardinality.ONE,
+        cardinality=qltypes.SchemaCardinality.One,
     )
 
     ptrref = irtyputils.ptrref_from_ptrcls(
@@ -944,8 +985,8 @@ def computable_ptr_set(
     rptr: irast.Pointer,
     *,
     unnest_fence: bool=False,
-    hoist_iterators: bool=False,
     same_computable_scope: bool=False,
+    srcctx: Optional[parsing.ParserContext]=None,
     ctx: context.ContextLevel,
 ) -> irast.Set:
     """Return ir.Set for a pointer defined as a computable."""
@@ -986,7 +1027,7 @@ def computable_ptr_set(
     except KeyError:
         comp_expr = ptrcls.get_expr(ctx.env.schema)
         schema_qlexpr: Optional[qlast.Expr] = None
-        if comp_expr is None and ctx.env.options.introspection_schema_rewrites:
+        if comp_expr is None and ctx.env.options.apply_query_rewrites:
             schema_deflt = ptrcls.get_schema_reflection_default(ctx.env.schema)
             if schema_deflt is not None:
                 assert isinstance(ptrcls, s_pointers.Pointer)
@@ -1062,15 +1103,17 @@ def computable_ptr_set(
         source_path_id,
         ptrcls=ptrcls,
         ns=ctx.path_id_namespace,
-        ctx=ctx)
+        ctx=ctx,
+    )
 
     result_stype = ptrcls.get_target(ctx.env.schema)
+    base_object = ctx.env.schema.get('std::BaseObject', type=s_types.Type)
     with newctx() as subctx:
         subctx.disable_shadowing.add(ptrcls)
-        subctx.view_scls = result_stype
-        assert isinstance(source_scls, s_sources.Source)
+        if result_stype != base_object:
+            subctx.view_scls = result_stype
         subctx.view_rptr = context.ViewRPtr(
-            source_scls, ptrcls=ptrcls, rptr=rptr)
+            source_scls, ptrcls=ptrcls, rptr=rptr)  # type: ignore
         subctx.anchors[qlast.Source().name] = source_set
         subctx.empty_result_type_hint = ptrcls.get_target(ctx.env.schema)
         subctx.partial_path_prefix = source_set
@@ -1084,34 +1127,9 @@ def computable_ptr_set(
         comp_ir_set = ensure_set(
             dispatch.compile(qlexpr, ctx=subctx), ctx=subctx)
 
-    comp_ir_set_copy = new_set_from_set(comp_ir_set, ctx=ctx)
-    pending_cardinality = ctx.pending_cardinality.get(ptrcls)
-    if pending_cardinality is not None:
-        stmtctx.get_pointer_cardinality_later(
-            ptrcls=ptrcls,
-            irexpr=comp_ir_set_copy,
-            specified_card=pending_cardinality.specified_cardinality,
-            is_mut_assignment=pending_cardinality.is_mut_assignment,
-            shape_op=pending_cardinality.shape_op,
-            source_ctx=pending_cardinality.source_ctx,
-            ctx=ctx,
-        )
-
-    if (
-        pending_cardinality is None
-        or pending_cardinality.shape_op is not qlast.ShapeOp.SUBTRACT
-    ):
-        # When doing subtraction in shapes, the cardinality of the
-        # expression being subtracted does not matter.
-        stmtctx.enforce_pointer_cardinality(
-            ptrcls,
-            comp_ir_set_copy,
-            singletons={source_path_id},
-            ctx=ctx,
-        )
-
     comp_ir_set = new_set_from_set(
-        comp_ir_set, path_id=result_path_id, rptr=rptr, ctx=ctx)
+        comp_ir_set, path_id=result_path_id, rptr=rptr, context=srcctx,
+        ctx=ctx)
 
     rptr.target = comp_ir_set
 

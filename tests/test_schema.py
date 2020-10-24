@@ -210,7 +210,7 @@ _123456789_123456789_123456789 -> str
         obj = schema.get('test::Object')
         self.assertEqual(
             obj.getptr(schema, 'foo_plus_bar').get_cardinality(schema),
-            qltypes.SchemaCardinality.ONE)
+            qltypes.SchemaCardinality.One)
 
     def test_schema_computable_cardinality_inference_02(self):
         schema = self.load_schema("""
@@ -225,7 +225,7 @@ _123456789_123456789_123456789 -> str
         obj = schema.get('test::Object')
         self.assertEqual(
             obj.getptr(schema, 'foo_plus_bar').get_cardinality(schema),
-            qltypes.SchemaCardinality.MANY)
+            qltypes.SchemaCardinality.Many)
 
     @tb.must_fail(errors.SchemaDefinitionError,
                   "possibly more than one element returned by an expression "
@@ -417,6 +417,7 @@ _123456789_123456789_123456789 -> str
         schema = self.run_ddl(schema, '''
             CREATE FUNCTION
             test::my_contains(arr: array<anytype>, val: anytype) -> bool {
+                SET volatility := 'STABLE';
                 USING (
                     SELECT contains(arr, val)
                 );
@@ -1323,7 +1324,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 }
             }
 
-            scalar type unit extending enum<'ml', 'g', 'oz'>;
+            scalar type unit extending enum<ml, g, oz>;
 
             type Recipe extending Named {
                 multi link ingredients -> Ingredient {
@@ -1856,6 +1857,13 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 SELECT 1
             $$
         }
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_get_migration_35(self):
+        schema = r'''
+            function bar() -> str using(SELECT <str>Object.id LIMIT 1);
         '''
 
         self._assert_migration_consistency(schema)
@@ -4060,6 +4068,100 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             };
         """])
 
+    def test_schema_migrations_equivalence_rename_refs_01(self):
+        self._assert_migration_equivalence([r"""
+            type Note {
+                required property remark -> str;
+                constraint exclusive on (__subject__.remark);
+            };
+        """, r"""
+            type Note {
+                required property note -> str;
+                constraint exclusive on (__subject__.note);
+            };
+        """])
+
+    def test_schema_migrations_equivalence_rename_refs_02(self):
+        self._assert_migration_equivalence([r"""
+            type Note {
+                required property remark -> str;
+            };
+
+            type User {
+                property x -> str {
+                    default := (SELECT Note.remark LIMIT 1)
+                }
+            };
+        """, r"""
+            type Note {
+                required property note -> str;
+            };
+
+            type User {
+                property x -> str {
+                    default := (SELECT Note.note LIMIT 1)
+                }
+            };
+        """])
+
+    def test_schema_migrations_equivalence_rename_refs_03(self):
+        self._assert_migration_equivalence([r"""
+            type Remark {
+                required property note -> str;
+            };
+
+            function foo(x: Remark) -> str using ( SELECT x.note );
+        """, r"""
+            type Note {
+                required property note -> str;
+            };
+
+            function foo(x: Note) -> str using ( SELECT x.note );
+        """])
+
+    def test_schema_migrations_equivalence_rename_refs_04(self):
+        self._assert_migration_equivalence([r"""
+            type Note {
+                required property note -> str;
+                index on (.note);
+            };
+        """, r"""
+            type Note {
+                required property remark -> str;
+                index on (.remark);
+            };
+        """])
+
+    def test_schema_migrations_equivalence_rename_refs_05(self):
+        self._assert_migration_equivalence([r"""
+            type Note {
+                required property note -> str;
+                property foo := .note ++ "!";
+            };
+        """, r"""
+            type Remark {
+                required property remark -> str;
+                property foo := .remark ++ "!";
+            };
+        """])
+
+    def test_schema_migrations_equivalence_rename_refs_06(self):
+        self._assert_migration_equivalence([r"""
+            type Note {
+                required property note -> str;
+            };
+            alias Alias1 := Note;
+            alias Alias2 := (SELECT Note.note);
+            alias Alias3 := Note { command := .note ++ "!" };
+        """, r"""
+            type Remark {
+                required property remark -> str;
+            };
+            alias Alias1 := Remark;
+            alias Alias2 := (SELECT Remark.remark);
+            alias Alias3 := Remark { command := .remark ++ "!" };
+        """])
+
 
 class TestDescribe(tb.BaseSchemaLoadTest):
     """Test the DESCRIBE command."""
@@ -4160,7 +4262,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             """
             type test::Child extending test::Parent, test::Parent2 {
                 annotation test::anno := 'annotated';
-                overloaded link foo extending test::f -> test::Foo {
+                overloaded single link foo extending test::f -> test::Foo {
                     annotation test::anno := 'annotated link';
                     constraint std::exclusive {
                         annotation test::anno := 'annotated constraint';
@@ -4234,7 +4336,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 volatility := 'IMMUTABLE';
                 annotation std::description := 'Return the array made from all
                     of the input set elements.';
-                using sql;
+                using sql function 'array_agg';
             };
             """,
 
@@ -5256,7 +5358,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             #     volatility := 'IMMUTABLE';
             #     annotation std::description := 'Generalized boolean `AND`
                       applied to the set of *values*.';
-            #     using sql
+            #     using sql function 'bool_and'
             # ;};
             """,
 

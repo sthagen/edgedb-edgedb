@@ -42,8 +42,8 @@ class GlobalCompilerOptions:
     #: Allow writing to protected pointers in INSERT.
     allow_writing_protected_pointers: bool = False
 
-    #: Whether to apply various introspection query rewrites.
-    introspection_schema_rewrites: bool = True
+    #: Whether to apply various query rewrites, including access policy.
+    apply_query_rewrites: bool = True
 
     #: Enables constant folding optimization (enabled by default).
     constant_folding: bool = True
@@ -56,6 +56,9 @@ class GlobalCompilerOptions:
 
     #: Use material types for pointer targets in schema views.
     schema_view_mode: bool = False
+
+    #: Whether to track which subexpressions reference each schema object.
+    track_schema_ref_exprs: bool = False
 
     #: If the expression is being processed in the context of a certain
     #: schema object, i.e. a constraint expression, or a pointer default,

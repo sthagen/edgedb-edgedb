@@ -207,13 +207,10 @@ import re
 import lxml.etree
 import pygments.lexers.special
 
-from edb.edgeql.pygments import EdgeQLLexer
+from edb.common import debug
 
-from edb.edgeql.parser import parser as edgeql_parser
-from edb.edgeql import ast as ql_ast
-from edb.edgeql import codegen as ql_gen
-from edb.edgeql import qltypes
-from edb.common import markup  # NoQA
+from edb.tools.pygments.edgeql import EdgeQLLexer
+
 from edb.testbase import protocol
 
 from docutils import nodes as d_nodes
@@ -685,6 +682,16 @@ class EQLFunctionDirective(BaseEQLDirective):
     ]
 
     def handle_signature(self, sig, signode):
+        if debug.flags.disable_docs_edgeql_validation:
+            signode['eql-fullname'] = fullname = sig.split('(')[0]
+            signode['eql-signature'] = sig
+            return fullname
+
+        from edb.edgeql.parser import parser as edgeql_parser
+        from edb.edgeql import ast as ql_ast
+        from edb.edgeql import codegen as ql_gen
+        from edb.edgeql import qltypes
+
         parser = edgeql_parser.EdgeQLBlockParser()
         try:
             astnode = parser.parse(
@@ -728,9 +735,9 @@ class EQLFunctionDirective(BaseEQLDirective):
         signode += s_nodes.desc_name(fullname, fullname)
 
         ret_repr = ql_gen.EdgeQLSourceGenerator.to_source(astnode.returning)
-        if astnode.returning_typemod is qltypes.TypeModifier.SET_OF:
+        if astnode.returning_typemod is qltypes.TypeModifier.SetOfType:
             ret_repr = f'SET OF {ret_repr}'
-        elif astnode.returning_typemod is qltypes.TypeModifier.OPTIONAL:
+        elif astnode.returning_typemod is qltypes.TypeModifier.OptionalType:
             ret_repr = f'OPTIONAL {ret_repr}'
         signode += s_nodes.desc_returns(ret_repr, ret_repr)
 
@@ -748,6 +755,15 @@ class EQLConstraintDirective(BaseEQLDirective):
     ]
 
     def handle_signature(self, sig, signode):
+        if debug.flags.disable_docs_edgeql_validation:
+            signode['eql-fullname'] = fullname = re.split(r'\(| ', sig)[0]
+            signode['eql-signature'] = sig
+            return fullname
+
+        from edb.edgeql.parser import parser as edgeql_parser
+        from edb.edgeql import ast as ql_ast
+        from edb.edgeql import codegen as ql_gen
+
         parser = edgeql_parser.EdgeQLBlockParser()
         try:
             astnode = parser.parse(

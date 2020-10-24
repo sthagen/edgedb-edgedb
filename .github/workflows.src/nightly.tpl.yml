@@ -3,8 +3,8 @@ name: Build Test and Publish Nightly Packages
 on:
   schedule:
     - cron: "0 0 * * *"
-  repository_dispatch:
-    types: ["nightly-build"]
+  workflow_dispatch:
+    inputs: {}
   push:
     branches:
       - nightly
@@ -169,13 +169,12 @@ jobs:
         PKG_PLATFORM_VERSION: "<< tgt.platform_version >>"
         PKG_VERSION_SLOT: "${{ steps.describe.outputs.version-slot }}"
 
+    <% if tgt.name == 'debian-buster' %>
     - uses: actions/checkout@v2
       with:
         repository: edgedb/edgedb-docker
         ref: master
         path: dockerfile
-    <% if tgt.name == 'debian-stretch' %>
-
     - name: Publish Docker Image
       uses: elgohr/Publish-Docker-Github-Action@2.6
       with:

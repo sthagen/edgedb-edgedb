@@ -272,7 +272,7 @@ def _get_set_rvar(
                 rvars = process_set_as_func_enumerate(ir_set, stmt, ctx=ctx)
             else:
                 rvars = process_set_as_enumerate(ir_set, stmt, ctx=ctx)
-        elif any(pm is qltypes.TypeModifier.SET_OF
+        elif any(pm is qltypes.TypeModifier.SetOfType
                  for pm in ir_set.expr.params_typemods):
             # Call to an aggregate function.
             rvars = process_set_as_agg_expr(ir_set, stmt, ctx=ctx)
@@ -765,12 +765,12 @@ def process_set_as_path(
             # we have an opportunity to opmimize the target join by
             # directly replacing the target type.
             with ctx.new() as subctx:
-                subctx.join_target_type_filter = (
-                    subctx.join_target_type_filter.copy())
-                subctx.join_target_type_filter[ir_source] = ir_set.typeref
+                subctx.intersection_narrowing = (
+                    subctx.intersection_narrowing.copy())
+                subctx.intersection_narrowing[ir_source] = ir_set
                 source_rvar = get_set_rvar(ir_source, ctx=subctx)
 
-            stmt.view_path_id_map[ir_set.path_id] = ir_source.path_id
+            pathctx.put_path_id_map(stmt, ir_set.path_id, ir_source.path_id)
             relctx.include_rvar(stmt, source_rvar, ir_set.path_id, ctx=ctx)
 
         else:
@@ -794,13 +794,23 @@ def process_set_as_path(
             else:
                 target_typeref = ptrref.out_target
 
-            poly_rvar = relctx.new_root_rvar(
-                ir_set,
-                typeref=target_typeref,
+            poly_rvar = relctx.range_for_typeref(
+                target_typeref,
+                path_id=ir_set.path_id,
                 ctx=ctx,
             )
+
             prefix_path_id = ir_set.path_id.src_path()
             assert prefix_path_id is not None, 'expected a path'
+            pathctx.put_rvar_path_output(
+                rvar=poly_rvar,
+                path_id=prefix_path_id,
+                aspect='identity',
+                var=pathctx.get_rvar_path_identity_var(
+                    poly_rvar, ir_set.path_id, env=ctx.env,
+                ),
+                env=ctx.env,
+            )
             pathctx.put_rvar_path_bond(poly_rvar, prefix_path_id)
             relctx.include_rvar(stmt, poly_rvar, ir_set.path_id, ctx=ctx)
             int_rvar = pgast.IntersectionRangeVar(
@@ -810,12 +820,22 @@ def process_set_as_path(
                 ]
             )
 
-            stmt.view_path_id_map[ir_set.path_id] = ir_source.path_id
+            if isinstance(source_rvar.query, pgast.Query):
+                pathctx.put_path_id_map(
+                    source_rvar.query, ir_set.path_id, ir_source.path_id)
 
             for aspect in ('source', 'value'):
                 pathctx.put_path_rvar(
                     stmt,
                     ir_source.path_id,
+                    source_rvar,
+                    aspect=aspect,
+                    env=ctx.env,
+                )
+
+                pathctx.put_path_rvar(
+                    stmt,
+                    ir_set.path_id,
                     int_rvar,
                     aspect=aspect,
                     env=ctx.env,
@@ -958,9 +978,7 @@ def process_set_as_path(
 
         # Target set range.
         if irtyputils.is_object(ir_set.typeref):
-            typeref = ctx.join_target_type_filter.get(ir_set, ir_set.typeref)
-            target_rvar = relctx.new_root_rvar(
-                ir_set, typeref=typeref, ctx=ctx)
+            target_rvar = relctx.new_root_rvar(ir_set, ctx=ctx)
 
             main_rvar = SetRVar(
                 target_rvar,
@@ -1035,18 +1053,27 @@ def process_set_as_subquery(
         semi_join = False
 
         if inner_id != outer_id:
-            ctx.rel.view_path_id_map[outer_id] = inner_id
+            pathctx.put_path_id_map(ctx.rel, outer_id, inner_id)
 
         if ir_source is not None:
-            if is_scalar_path and newctx.volatility_ref is None:
+            if (
+                is_scalar_path
+                and ir_source.path_id != ctx.current_insert_path_id
+            ):
                 # This is a computable pointer.  In order to ensure that
                 # the volatile functions in the pointer expression are called
                 # the necessary number of times, we must inject a
                 # "volatility reference" into function expressions.
                 # The volatility_ref is the identity of the pointer source.
-                newctx.volatility_ref = relctx.maybe_get_path_var(
-                    stmt, path_id=ir_source.path_id, aspect='identity',
-                    ctx=ctx)
+
+                # If the source is an insert that we are in the middle
+                # of doing, we don't have a volatility ref to add, so
+                # skip it based on the current_insert_path_id check.
+                path_id = ir_source.path_id
+                newctx.volatility_ref += (
+                    lambda: relctx.maybe_get_path_var(
+                        stmt, path_id=path_id, aspect='identity',
+                        ctx=ctx),)
             elif not is_scalar_path and not source_is_visible:
                 path_scope = relctx.get_scope(ir_set, ctx=newctx)
                 if (path_scope is None or
@@ -1175,12 +1202,12 @@ def process_set_as_setop(
 
         with newctx.subrel() as _, _.newscope() as scopectx:
             larg = scopectx.rel
-            larg.view_path_id_map[ir_set.path_id] = left.path_id
+            pathctx.put_path_id_map(larg, ir_set.path_id, left.path_id)
             dispatch.visit(left, ctx=scopectx)
 
         with newctx.subrel() as _, _.newscope() as scopectx:
             rarg = scopectx.rel
-            rarg.view_path_id_map[ir_set.path_id] = right.path_id
+            pathctx.put_path_id_map(rarg, ir_set.path_id, right.path_id)
             dispatch.visit(right, ctx=scopectx)
 
     with ctx.subrel() as subctx:
@@ -1207,7 +1234,7 @@ def process_set_as_distinct(
     with ctx.subrel() as subctx:
         subqry = subctx.rel
         arg = expr.args[0].expr
-        subqry.view_path_id_map[ir_set.path_id] = arg.path_id
+        pathctx.put_path_id_map(subqry, ir_set.path_id, arg.path_id)
         dispatch.visit(arg, ctx=subctx)
         subrvar = relctx.rvar_for_rel(
             subqry, typeref=arg.typeref, lateral=True, ctx=subctx)
@@ -1287,7 +1314,7 @@ def process_set_as_ifelse(
     else:
         with ctx.subrel() as _, _.newscope() as subctx:
             larg = subctx.rel
-            larg.view_path_id_map[ir_set.path_id] = if_expr.path_id
+            pathctx.put_path_id_map(larg, ir_set.path_id, if_expr.path_id)
             dispatch.visit(if_expr, ctx=subctx)
 
             larg.where_clause = astutils.extend_binop(
@@ -1297,7 +1324,7 @@ def process_set_as_ifelse(
 
         with ctx.subrel() as _, _.newscope() as subctx:
             rarg = subctx.rel
-            rarg.view_path_id_map[ir_set.path_id] = else_expr.path_id
+            pathctx.put_path_id_map(rarg, ir_set.path_id, else_expr.path_id)
             dispatch.visit(else_expr, ctx=subctx)
 
             rarg.where_clause = astutils.extend_binop(
@@ -1420,7 +1447,8 @@ def process_set_as_coalesce(
 
                     with sub2ctx.subrel() as scopectx:
                         larg = scopectx.rel
-                        larg.view_path_id_map[ir_set.path_id] = left_ir.path_id
+                        pathctx.put_path_id_map(
+                            larg, ir_set.path_id, left_ir.path_id)
                         dispatch.visit(left_ir, ctx=scopectx)
 
                         lvar = pathctx.get_path_value_var(
@@ -1439,8 +1467,8 @@ def process_set_as_coalesce(
 
                     with sub2ctx.subrel() as scopectx:
                         rarg = scopectx.rel
-                        rarg.view_path_id_map[ir_set.path_id] = \
-                            right_ir.path_id
+                        pathctx.put_path_id_map(
+                            rarg, ir_set.path_id, right_ir.path_id)
                         dispatch.visit(right_ir, ctx=scopectx)
 
                     marker = sub2ctx.env.aliases.get('m')
@@ -1516,7 +1544,7 @@ def process_set_as_tuple(
         for element in expr.elements:
             path_id = element.path_id
             if path_id != element.val.path_id:
-                stmt.view_path_id_map[path_id] = element.val.path_id
+                pathctx.put_path_id_map(stmt, path_id, element.val.path_id)
 
             dispatch.visit(element.val, ctx=subctx)
             elements.append(pgast.TupleElementBase(path_id=path_id))
@@ -1586,7 +1614,7 @@ def process_set_as_type_cast(
     is_json_cast = expr.to_type.id == s_obj.get_known_type_id('std::json')
 
     with ctx.new() as subctx:
-        ctx.rel.view_path_id_map[ir_set.path_id] = inner_set.path_id
+        pathctx.put_path_id_map(ctx.rel, ir_set.path_id, inner_set.path_id)
 
         if (is_json_cast
                 and (irtyputils.is_collection(inner_set.typeref)
@@ -1652,8 +1680,8 @@ def process_set_as_type_introspection(
         ir_set.typeref, ir_set.path_id, ctx=ctx)
     pathctx.put_rvar_path_bond(type_rvar, ir_set.path_id)
     clsname = pgast.StringConstant(val=str(typeref.id))
-    nameref = astutils.get_column(type_rvar, 'id', nullable=False)
-
+    nameref = pathctx.get_rvar_path_identity_var(
+        type_rvar, ir_set.path_id, env=ctx.env)
     condition = astutils.new_binop(nameref, clsname, op='=')
     substmt = pgast.SelectStmt()
     relctx.include_rvar(substmt, type_rvar, ir_set.path_id, ctx=ctx)
@@ -1955,18 +1983,8 @@ def _compile_func_epilogue(
     expr = ir_set.expr
     assert isinstance(expr, irast.FunctionCall)
 
-    if (ctx.volatility_ref is not None and
-            ctx.volatility_ref is not context.NO_VOLATILITY and
-            expr.volatility is qltypes.Volatility.VOLATILE):
-        # Apply the volatility reference.
-        # See the comment in process_set_as_subquery().
-        func_rel.where_clause = astutils.extend_binop(
-            func_rel.where_clause,
-            pgast.NullTest(
-                arg=ctx.volatility_ref,
-                negated=True,
-            )
-        )
+    if expr.volatility is qltypes.Volatility.Volatile:
+        relctx.apply_volatility_ref(func_rel, ctx=ctx)
 
     pathctx.put_path_var_if_not_exists(
         func_rel, ir_set.path_id, set_expr, aspect='value', env=ctx.env)
@@ -1978,7 +1996,7 @@ def _compile_func_epilogue(
                         pull_namespace=False, aspects=aspects, ctx=ctx)
 
     if (ir_set.path_id.is_tuple_path()
-            and expr.typemod is qltypes.TypeModifier.SET_OF):
+            and expr.typemod is qltypes.TypeModifier.SetOfType):
         # Functions returning a set of tuples are compiled with an
         # explicit coldeflist, so the result is represented as a
         # TupleVar as opposed to an opaque record datum, so
@@ -2069,7 +2087,7 @@ def process_set_as_func_expr(
             name = common.get_function_backend_name(
                 expr.func_shortname, expr.func_module_id)
 
-        if expr.typemod is qltypes.TypeModifier.SET_OF:
+        if expr.typemod is qltypes.TypeModifier.SetOfType:
             set_expr = _process_set_func(
                 ir_set, func_name=name, args=args, ctx=newctx)
         else:

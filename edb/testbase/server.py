@@ -30,10 +30,12 @@ import inspect
 import json
 import math
 import os
+import pathlib
 import pprint
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 import uuid
 
@@ -50,6 +52,11 @@ from edb.server import defines as edgedb_defines
 from edb.common import taskgroup
 
 from edb.testbase import serutils
+
+
+if TYPE_CHECKING:
+    DatabaseName = str
+    SetupScript = str
 
 
 def get_test_cases(tests):
@@ -577,24 +584,29 @@ class OldCLITestCaseMixin:
 
 class CLITestCaseMixin:
 
-    def run_cli(self, *args, input: Optional[str]=None):
+    def run_cli(self, *args, input: Optional[str] = None) -> None:
         conn_args = self.get_connect_args()
+        self.run_cli_on_connection(conn_args, *args, input=input)
 
-        cmd_args = (
+    @classmethod
+    def run_cli_on_connection(
+        cls, conn_args: Dict[str, Any], *args, input: Optional[str] = None
+    ) -> None:
+        cmd_args = [
             '--host', conn_args['host'],
             '--port', str(conn_args['port']),
-            '--user', conn_args['user'],
-        ) + args
-
-        if conn_args['password']:
-            cmd_args = ('--password-from-stdin',) + cmd_args
+        ]
+        if conn_args.get('user'):
+            cmd_args += ['--user', conn_args['user']]
+        if conn_args.get('password'):
+            cmd_args += ['--password-from-stdin']
             if input is not None:
                 input = f"{conn_args['password']}\n{input}"
             else:
                 input = f"{conn_args['password']}\n"
-
+        cmd_args += args
         subprocess.run(
-            ('edgedb',) + cmd_args,
+            ['edgedb'] + cmd_args,
             input=input.encode() if input else None,
             check=True,
             capture_output=True,
@@ -879,8 +891,105 @@ class QueryTestCase(BaseQueryTestCase):
     BASE_TEST_CLASS = True
 
 
-def get_test_cases_setup(cases):
-    result = []
+class DumpCompatTestCaseMeta(TestCaseMeta):
+
+    def __new__(
+        mcls,
+        name,
+        bases,
+        ns,
+        *,
+        dump_subdir=None,
+        check_method=None,
+    ):
+        if not name.startswith('Test'):
+            return super().__new__(mcls, name, bases, ns)
+
+        if dump_subdir is None:
+            raise TypeError(
+                f'{name}: missing required "dump_subdir" class argument')
+
+        if check_method is None:
+            raise TypeError(
+                f'{name}: missing required "check_method" class argument')
+
+        mod = sys.modules[ns['__module__']]
+        dumps_dir = pathlib.Path(mod.__file__).parent / 'dumps' / dump_subdir
+
+        async def check_dump_restore_compat(self, *, dumpfn: pathlib.Path):
+
+            dbname = f"{type(self).__name__}_{dumpfn.stem}"
+            await self.con.execute(f'CREATE DATABASE `{dbname}`')
+            try:
+                self.run_cli('-d', dbname, 'restore', str(dumpfn))
+                con2 = await self.connect(database=dbname)
+            except Exception:
+                await self.con.execute(f'DROP DATABASE `{dbname}`')
+                raise
+
+            oldcon = self.__class__.con
+            self.__class__.con = con2
+            try:
+                await check_method(self)
+            finally:
+                self.__class__.con = oldcon
+                await con2.aclose()
+                await self.con.execute(f'DROP DATABASE `{dbname}`')
+
+        for entry in dumps_dir.iterdir():
+            if not entry.is_file() or not entry.name.endswith(".dump"):
+                continue
+
+            mcls.add_method(
+                f'test_{dump_subdir}_restore_compatibility_{entry.stem}',
+                ns,
+                functools.partial(check_dump_restore_compat, dumpfn=entry),
+            )
+
+        return super().__new__(mcls, name, bases, ns)
+
+
+class DumpCompatTestCase(
+    ConnectedTestCase,
+    CLITestCaseMixin,
+    metaclass=DumpCompatTestCaseMeta,
+):
+    BASE_TEST_CLASS = True
+
+
+class StableDumpTestCase(QueryTestCase, CLITestCaseMixin):
+
+    BASE_TEST_CLASS = True
+    ISOLATED_METHODS = False
+    STABLE_DUMP = True
+
+    async def check_dump_restore(self, check_method):
+        dbname = self.get_database_name()
+        with tempfile.NamedTemporaryFile() as f:
+            self.run_cli('-d', dbname, 'dump', f.name)
+
+            await self.con.execute(f'CREATE DATABASE {dbname}_restored')
+            try:
+                self.run_cli('-d', f'{dbname}_restored', 'restore', f.name)
+                con2 = await self.connect(database=f'{dbname}_restored')
+            except Exception:
+                await self.con.execute(f'DROP DATABASE {dbname}_restored')
+                raise
+
+        oldcon = self.con
+        self.__class__.con = con2
+        try:
+            await check_method(self)
+        finally:
+            self.__class__.con = oldcon
+            await con2.aclose()
+            await self.con.execute(f'DROP DATABASE {dbname}_restored')
+
+
+def get_test_cases_setup(
+    cases: Iterable[unittest.TestCase]
+) -> List[Tuple[unittest.TestCase, DatabaseName, SetupScript]]:
+    result: List[Tuple[unittest.TestCase, DatabaseName, SetupScript]] = []
 
     for case in cases:
         if not hasattr(case, 'get_setup_script'):

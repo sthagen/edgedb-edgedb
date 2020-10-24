@@ -45,18 +45,33 @@ from . import dbview
 logger = logging.getLogger('edb.server')
 
 
+class StartupScript(NamedTuple):
+
+    text: str
+    database: str
+    user: str
+
+
 class Server:
 
     _ports: List[baseport.Port]
     _sys_conf_ports: Mapping[config.ConfigType, baseport.Port]
 
-    def __init__(self, *, loop, cluster, runstate_dir,
-                 internal_runstate_dir,
-                 max_backend_connections,
-                 nethost, netport,
-                 auto_shutdown: bool=False,
-                 echo_runtime_info: bool = False,
-                 max_protocol: Tuple[int, int]):
+    def __init__(
+        self,
+        *,
+        loop,
+        cluster,
+        runstate_dir,
+        internal_runstate_dir,
+        max_backend_connections,
+        nethost,
+        netport,
+        auto_shutdown: bool=False,
+        echo_runtime_info: bool = False,
+        max_protocol: Tuple[int, int],
+        startup_script: Optional[StartupScript] = None,
+    ):
 
         self._loop = loop
 
@@ -87,6 +102,8 @@ class Server:
 
         self._echo_runtime_info = echo_runtime_info
 
+        self._startup_script = startup_script
+
     async def init(self):
         self._dbindex = await dbview.DatabaseIndex.init(self)
         self._populate_sys_auth()
@@ -94,10 +111,12 @@ class Server:
         cfg = self._dbindex.get_sys_config()
 
         if not self._mgmt_host_addr:
-            self._mgmt_host_addr = cfg.get('listen_addresses') or 'localhost'
+            self._mgmt_host_addr = (
+                config.lookup('listen_addresses', cfg) or 'localhost')
 
         if not self._mgmt_port_no:
-            self._mgmt_port_no = cfg.get('listen_port', defines.EDGEDB_PORT)
+            self._mgmt_port_no = (
+                config.lookup('listen_port', cfg) or defines.EDGEDB_PORT)
 
         self._mgmt_port = self._new_port(
             mng_port.ManagementPort,
@@ -105,12 +124,13 @@ class Server:
             netport=self._mgmt_port_no,
             auto_shutdown=self._auto_shutdown,
             max_protocol=self._mgmt_protocol_max,
+            startup_script=self._startup_script,
         )
 
     def _populate_sys_auth(self):
-        self._sys_auth = tuple(sorted(
-            self._dbindex.get_sys_config().get('auth', ()),
-            key=lambda a: a.priority))
+        cfg = self._dbindex.get_sys_config()
+        auth = config.lookup('auth', cfg) or ()
+        self._sys_auth = tuple(sorted(auth, key=lambda a: a.priority))
 
     def _get_pgaddr(self):
         return self._cluster.get_connection_spec()
@@ -280,6 +300,15 @@ class Server:
         self._ports.append(port)
         return port
 
+    async def run_startup_script_and_exit(self):
+        """Run the script specified in *startup_script* and exit immediately"""
+        if self._startup_script is None:
+            raise AssertionError('startup script is not defined')
+
+        ql_parser.preload()
+        await self._mgmt_port.run_startup_script_and_exit()
+        return
+
     async def start(self):
         # Make sure that EdgeQL parser is preloaded; edgecon might use
         # it to restore config values.
@@ -291,8 +320,9 @@ class Server:
                 g.create_task(port.start())
 
         sys_config = self._dbindex.get_sys_config()
-        if 'ports' in sys_config:
-            for portconf in sys_config['ports']:
+        ports = config.lookup('ports', sys_config)
+        if ports:
+            for portconf in ports:
                 await self._start_portconf(portconf, suppress_errors=True)
 
         self._serving = True

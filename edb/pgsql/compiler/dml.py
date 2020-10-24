@@ -35,8 +35,6 @@ from __future__ import annotations
 import collections
 from typing import *
 
-from edb import errors
-
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
 
@@ -116,11 +114,9 @@ def init_dml_stmt(
                     component = component.material_type
 
                 typerefs.append(component)
-                if component.descendants:
-                    typerefs.extend(component.descendants)
+                typerefs.extend(irtyputils.get_typeref_descendants(component))
 
-        if top_typeref.descendants:
-            typerefs.extend(top_typeref.descendants)
+        typerefs.extend(irtyputils.get_typeref_descendants(top_typeref))
 
     dml_map = {}
 
@@ -372,8 +368,12 @@ def fini_dml_stmt(
     # referencing this class yields the expected results.
     dml_stack = get_dml_stmt_stack(ir_stmt, ctx=ctx)
     if isinstance(ir_stmt, irast.InsertStmt):
+        # The union CTE might have a SELECT from an ELSE clause, which
+        # we don't actually want to include.
+        assert len(parts.dml_ctes) == 1
+        cte = next(iter(parts.dml_ctes.values()))[0]
         relctx.add_type_rel_overlay(
-            ir_stmt.subject.typeref, 'union', union_cte,
+            ir_stmt.subject.typeref, 'union', cte,
             dml_stmts=dml_stack, path_id=ir_stmt.subject.path_id, ctx=ctx)
     elif isinstance(ir_stmt, irast.DeleteStmt):
         relctx.add_type_rel_overlay(
@@ -419,17 +419,9 @@ def get_dml_range(
     ir_qual_expr = ir_stmt.where
     ir_qual_card = ir_stmt.where_card
 
-    with ctx.newscope() as scopectx, scopectx.newrel() as subctx:
+    with ctx.newrel() as subctx:
         subctx.expr_exposed = False
         range_stmt = subctx.rel
-
-        # init_stmt() has associated all top-level paths with
-        # the main query, which is at the very bottom.
-        # Hoist that scope to the modification range statement
-        # instead.
-        for path_id, stmt in ctx.path_scope.items():
-            if stmt is ctx.rel or path_id == ir_stmt.subject.path_id:
-                scopectx.path_scope[path_id] = range_stmt
 
         merge_iterator(ctx.enclosing_cte_iterator, range_stmt, ctx=subctx)
 
@@ -439,10 +431,13 @@ def get_dml_range(
             range_stmt, target_ir_set.path_id, env=subctx.env)
 
         if ir_qual_expr is not None:
-            range_stmt.where_clause = astutils.extend_binop(
-                range_stmt.where_clause,
-                clauses.compile_filter_clause(
-                    ir_qual_expr, ir_qual_card, ctx=subctx))
+            with subctx.new() as wctx:
+                clauses.setup_iterator_volatility(target_ir_set,
+                                                  is_cte=True, ctx=wctx)
+                range_stmt.where_clause = astutils.extend_binop(
+                    range_stmt.where_clause,
+                    clauses.compile_filter_clause(
+                        ir_qual_expr, ir_qual_card, ctx=wctx))
 
         range_cte = pgast.CommonTableExpr(
             query=range_stmt,
@@ -472,16 +467,13 @@ def compile_iterator_ctes(
         if iterator_set.path_id in seen:
             continue
 
-        with ctx.newrel() as sctx, sctx.newscope() as ictx:
+        with ctx.newrel() as ictx:
             ictx.path_scope[iterator_set.path_id] = ictx.rel
 
             # Correlate with enclosing iterators
             merge_iterator(last_iterator, ictx.rel, ctx=ictx)
-            if last_iterator is not None:
-                ictx.volatility_ref = pathctx.get_path_identity_var(
-                    ictx.rel,
-                    last_iterator.path_id,
-                    env=ictx.env)
+            clauses.setup_iterator_volatility(last_iterator, is_cte=True,
+                                              ctx=ictx)
 
             clauses.compile_iterator_expr(ictx.rel, iterator_set, ctx=ictx)
             ictx.rel.path_id = iterator_set.path_id
@@ -672,14 +664,16 @@ def compile_insert_else_body(
 
         subject_id = ir_stmt.subject.path_id
 
-        with ctx.newrel() as sctx, sctx.newscope() as ictx:
+        with ctx.newrel() as ictx:
             ictx.path_scope[subject_id] = ictx.rel
 
             merge_iterator(ctx.enclosing_cte_iterator, ictx.rel, ctx=ictx)
+            clauses.setup_iterator_volatility(ctx.enclosing_cte_iterator,
+                                              is_cte=True, ctx=ictx)
 
             pathctx.put_path_bond(ictx.rel, subject_id)
             dispatch.compile(else_select, ctx=ictx)
-            ictx.rel.view_path_id_map[subject_id] = else_select.path_id
+            pathctx.put_path_id_map(ictx.rel, subject_id, else_select.path_id)
 
             else_select_cte = pgast.CommonTableExpr(
                 query=ictx.rel,
@@ -689,7 +683,7 @@ def compile_insert_else_body(
 
         else_select_rvar = relctx.rvar_for_rel(else_select_cte, ctx=ctx)
 
-        with ctx.newrel() as sctx, sctx.newscope() as ictx:
+        with ctx.newrel() as ictx:
             ictx.path_scope[subject_id] = ictx.rel
 
             relctx.include_rvar(ictx.rel, else_select_rvar,
@@ -698,8 +692,9 @@ def compile_insert_else_body(
             ictx.enclosing_cte_iterator = pgast.IteratorCTE(
                 path_id=else_select.path_id, cte=else_select_cte,
                 parent=ictx.enclosing_cte_iterator)
+            ictx.volatility_ref = ()
             dispatch.compile(else_branch, ctx=ictx)
-            ictx.rel.view_path_id_map[subject_id] = else_branch.path_id
+            pathctx.put_path_id_map(ictx.rel, subject_id, else_branch.path_id)
 
             assert else_cte_rvar
             else_branch_cte = else_cte_rvar[0]
@@ -724,13 +719,16 @@ def compile_insert_shape_element(
             insvalctx.force_optional.add(shape_el.path_id)
 
         if iterator_id is not None:
-            insvalctx.volatility_ref = iterator_id
+            id = iterator_id
+            insvalctx.volatility_ref = (lambda: id,)
         else:
             # Single inserts have no need for forced
             # computable volatility, and, furthermore,
             # we do not have a valid identity reference
             # anyway.
-            insvalctx.volatility_ref = context.NO_VOLATILITY
+            insvalctx.volatility_ref = ()
+
+        insvalctx.current_insert_path_id = ir_stmt.subject.path_id
 
         dispatch.visit(shape_el, ctx=insvalctx)
 
@@ -774,9 +772,11 @@ def process_update_body(
 
         for shape_el, shape_op in ir_stmt.subject.shape:
             ptrref = shape_el.rptr.ptrref
+            assert isinstance(ptrref, irast.PointerRef)
+            actual_ptrref = irtyputils.find_actual_ptrref(typeref, ptrref)
             updvalue = shape_el.expr
             ptr_info = pg_types.get_ptrref_storage_info(
-                ptrref, resolve_type=True, link_bias=False)
+                actual_ptrref, resolve_type=True, link_bias=False)
 
             if ptr_info.table_type == 'ObjectType' and updvalue is not None:
                 with subctx.newscope() as scopectx:
@@ -834,7 +834,7 @@ def process_update_body(
             props_only = is_props_only_update(shape_el, ctx=subctx)
 
             ptr_info = pg_types.get_ptrref_storage_info(
-                ptrref, resolve_type=False, link_bias=True)
+                actual_ptrref, resolve_type=False, link_bias=True)
 
             if ptr_info and ptr_info.table_type == 'link':
                 external_updates.append((shape_el, shape_op, props_only))
@@ -933,20 +933,7 @@ def process_link_update(
     # The links in the dml class shape have been derived,
     # but we must use the correct specialized link class for the
     # base material type.
-    if ptrref.material_ptr is not None:
-        mptrref = ptrref.material_ptr
-    else:
-        mptrref = ptrref
-
-    if mptrref.out_source.id != source_typeref.id:
-        for descendant in mptrref.descendants:
-            if descendant.out_source.id == source_typeref.id:
-                mptrref = descendant
-                break
-        else:
-            raise errors.InternalServerError(
-                'missing PointerRef descriptor for source typeref')
-
+    mptrref = irtyputils.find_actual_ptrref(source_typeref, ptrref)
     assert isinstance(mptrref, irast.PointerRef)
 
     target_rvar = relctx.range_for_ptrref(
@@ -954,9 +941,6 @@ def process_link_update(
     assert isinstance(target_rvar, pgast.RelRangeVar)
     assert isinstance(target_rvar.relation, pgast.Relation)
     target_alias = target_rvar.alias.aliasname
-
-    target_tab_name = (target_rvar.relation.schemaname,
-                       target_rvar.relation.name)
 
     dml_cte_rvar = pgast.RelRangeVar(
         relation=dml_cte,
@@ -979,11 +963,10 @@ def process_link_update(
     data_cte, specified_cols = process_link_values(
         ir_stmt=ir_stmt,
         ir_expr=ir_set,
-        target_tab=target_tab_name,
         col_data=col_data,
         dml_rvar=dml_cte_rvar,
         sources=[],
-        props_only=props_only,
+        source_typeref=source_typeref,
         target_is_scalar=target_is_scalar,
         dml_cte=dml_cte,
         iterator=iterator,
@@ -1281,11 +1264,10 @@ def process_link_values(
     *,
     ir_stmt: irast.MutatingStmt,
     ir_expr: irast.Set,
-    target_tab: Tuple[str, ...],
     col_data: Mapping[str, pgast.BaseExpr],
     dml_rvar: pgast.PathRangeVar,
     sources: Iterable[pgast.BaseRangeVar],
-    props_only: bool,
+    source_typeref: irast.TypeRef,
     target_is_scalar: bool,
     dml_cte: pgast.CommonTableExpr,
     iterator: Optional[pgast.IteratorCTE],
@@ -1295,16 +1277,12 @@ def process_link_values(
 
     :param ir_expr:
         IR of the INSERT/UPDATE body element.
-    :param target_tab:
-        The link table being updated.
     :param col_data:
         Expressions used to populate well-known columns of the link
         table such as `source` and `__type__`.
     :param sources:
         A list of relations which must be joined into the data query
         to resolve expressions in *col_data*.
-    :param props_only:
-        Whether this link update only touches link properties.
     :param target_is_scalar:
         Whether the link target is an ScalarType.
     :param iterator:
@@ -1312,7 +1290,7 @@ def process_link_values(
         EdgeQL DML statement.
     """
     old_dml_count = len(ctx.dml_stmts)
-    with ctx.newscope() as newscope, newscope.newrel() as subrelctx:
+    with ctx.newrel() as subrelctx:
         subrelctx.enclosing_cte_iterator = pgast.IteratorCTE(
             path_id=ir_stmt.subject.path_id, cte=dml_cte,
             parent=iterator,
@@ -1328,8 +1306,10 @@ def process_link_values(
         with subrelctx.newscope() as sctx, sctx.subrel() as input_rel_ctx:
             input_rel = input_rel_ctx.rel
             input_rel_ctx.expr_exposed = False
-            input_rel_ctx.volatility_ref = pathctx.get_path_identity_var(
-                row_query, ir_stmt.subject.path_id, env=input_rel_ctx.env)
+            input_rel_ctx.volatility_ref = (
+                lambda: pathctx.get_path_identity_var(
+                    row_query, ir_stmt.subject.path_id,
+                    env=input_rel_ctx.env),)
             dispatch.visit(ir_expr, ctx=input_rel_ctx)
 
             if (
@@ -1403,12 +1383,13 @@ def process_link_values(
         for element in shape_tuple.elements:
             if not element.path_id.is_linkprop_path():
                 continue
-            rptr_name = element.path_id.rptr_name()
-            assert rptr_name is not None
-            colname = rptr_name.name
             val = pathctx.get_rvar_path_value_var(
                 input_rvar, element.path_id, env=ctx.env)
-            source_data.setdefault(colname, val)
+            rptr = element.path_id.rptr()
+            assert isinstance(rptr, irast.PointerRef)
+            actual_rptr = irtyputils.find_actual_ptrref(source_typeref, rptr)
+            ptr_info = pg_types.get_ptrref_storage_info(actual_rptr)
+            source_data.setdefault(ptr_info.column_name, val)
     else:
         if target_is_scalar:
             target_ref = pathctx.get_rvar_path_value_var(

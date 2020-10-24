@@ -156,10 +156,13 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
             else:
                 ours = None
 
-            inherited = result is not None and ours is None
+            inherited = self.is_field_inherited(
+                schema, field_name, bases, result, ours)
+
             inherited_fields_update[field_name] = inherited
 
-            if (result is not None or ours is not None) and result != ours:
+            if (result is not None or ours is not None) and (
+                    result != ours or inherited):
                 schema = self.inherit_field(
                     schema,
                     context,
@@ -172,6 +175,16 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
             schema, context, inherited_fields_update)
 
         return schema
+
+    def is_field_inherited(
+        self,
+        schema: s_schema.Schema,
+        field_name: str,
+        bases: Tuple[so.Object, ...],
+        merged_value: Any,
+        explicit_value: Any
+    ) -> bool:
+        return merged_value is not None and explicit_value is None
 
     def inherit_field(
         self,
@@ -361,10 +374,10 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
                 assert isinstance(obj,
                                   s_referencing.ReferencedInheritingObject)
                 existing_bases = obj.get_implicit_bases(schema)
-                schema, cmd = self._rebase_ref(
+                schema, cmd2 = self._rebase_ref(
                     schema, context, obj, existing_bases, bases)
-                group.add(cmd)
-                schema = cmd.apply(schema, context)
+                group.add(cmd2)
+                schema = cmd2.apply(schema, context)
 
         for fqname, delete_cmd_cls in deleted_refs.items():
             delete_cmd = delete_cmd_cls(classname=fqname)
@@ -380,9 +393,11 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         schema: s_schema.Schema,
         context: sd.CommandContext,
         scls: s_referencing.ReferencedInheritingObject,
-        old_bases: List[so.InheritingObjectT],
-        new_bases: List[so.InheritingObjectT],
+        old_bases: Sequence[so.InheritingObject],
+        new_bases: Sequence[so.InheritingObject],
     ) -> Tuple[s_schema.Schema, AlterInheritingObject[so.InheritingObjectT]]:
+        from . import referencing as s_referencing
+
         old_base_names = [b.get_name(schema) for b in old_bases]
         new_base_names = [b.get_name(schema) for b in new_bases]
 
@@ -395,12 +410,11 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         alter_cmd = scls.init_delta_command(schema, sd.AlterObject)
         assert isinstance(alter_cmd, AlterInheritingObject)
 
-        new_bases_coll = so.ObjectList[so.InheritingObjectT].create(
-            schema, new_bases)
+        new_bases_coll = so.ObjectList.create(schema, new_bases)
         schema = scls.set_field_value(schema, 'bases', new_bases_coll)
         ancestors = so.compute_ancestors(schema, scls)
-        ancestors_coll = so.ObjectList[so.InheritingObjectT].create(
-            schema, ancestors)
+        ancestors_coll = so.ObjectList[
+            s_referencing.ReferencedInheritingObject].create(schema, ancestors)
 
         if rebase is not None:
             rebase_cmd = rebase(

@@ -36,16 +36,6 @@ from . import spec
 from . import types
 
 
-if TYPE_CHECKING:
-    Mapping_T = TypeVar("Mapping_T", bound=Mapping[str, str])
-
-
-class OpLevel(enum.StrEnum):
-
-    SESSION = 'SESSION'
-    SYSTEM = 'SYSTEM'
-
-
 class OpCode(enum.StrEnum):
 
     CONFIG_ADD = 'ADD'
@@ -54,10 +44,21 @@ class OpCode(enum.StrEnum):
     CONFIG_RESET = 'RESET'
 
 
+class SettingValue(NamedTuple):
+
+    name: str
+    value: Any
+    source: str
+
+
+if TYPE_CHECKING:
+    Mapping_T = TypeVar("Mapping_T", bound=Mapping[str, SettingValue])
+
+
 class Operation(NamedTuple):
 
     opcode: OpCode
-    level: OpLevel
+    scope: qltypes.ConfigScope
     setting_name: str
     value: Union[str, int, bool, None]
 
@@ -101,8 +102,7 @@ class Operation(NamedTuple):
                 raise errors.ConfigurationError(
                     f'invalid value type for the {setting.name!r} setting')
 
-    def apply(self, spec: spec.Spec,
-              storage: Mapping_T) -> Mapping_T:
+    def apply(self, spec: spec.Spec, storage: Mapping_T) -> Mapping_T:
 
         setting = self.get_setting(spec)
         allow_missing = (
@@ -119,7 +119,7 @@ class Operation(NamedTuple):
                     f'configuration parameter: {self.setting_name}'
                 )
 
-            storage = storage.set(self.setting_name, value)
+            storage = self._set_value(storage, value)
 
         elif self.opcode is OpCode.CONFIG_RESET:
             if issubclass(setting.type, types.ConfigType):
@@ -140,7 +140,12 @@ class Operation(NamedTuple):
                     f'configuration parameter: {self.setting_name}'
                 )
 
-            exist_value = storage.get(self.setting_name, setting.default)
+            exist_setting = storage.get(self.setting_name)
+            if exist_setting is not None:
+                exist_value = exist_setting.value
+            else:
+                exist_value = setting.default
+
             if value in exist_value:
                 props = []
                 for f in dataclasses.fields(setting.type):
@@ -158,7 +163,7 @@ class Operation(NamedTuple):
                 )
 
             new_value = exist_value | {value}
-            storage = storage.set(self.setting_name, new_value)
+            storage = self._set_value(storage, new_value)
 
         elif self.opcode is OpCode.CONFIG_REM:
             if not issubclass(setting.type, types.ConfigType):
@@ -167,16 +172,42 @@ class Operation(NamedTuple):
                     f'configuration parameter: {self.setting_name}'
                 )
 
-            exist_value = storage.get(self.setting_name, setting.default)
+            exist_setting = storage.get(self.setting_name)
+            if exist_setting is not None:
+                exist_value = exist_setting.value
+            else:
+                exist_value = setting.default
             new_value = exist_value - {value}
-            storage = storage.set(self.setting_name, new_value)
+            storage = self._set_value(storage, new_value)
 
         return storage
 
+    def _set_value(
+        self,
+        storage: Mapping_T,
+        value: Any,
+    ) -> Mapping_T:
+
+        if self.scope is qltypes.ConfigScope.SYSTEM:
+            source = 'system override'
+        elif self.scope is qltypes.ConfigScope.DATABASE:
+            source = 'database'
+        elif self.scope is qltypes.ConfigScope.SESSION:
+            source = 'session'
+        else:
+            raise AssertionError(f'unexpected config scope: {self.scope}')
+
+        return set_value(storage, self.setting_name, value, source=source)
+
     @classmethod
     def from_json(cls, json_value: str) -> Operation:
-        op_str, lev_str, name, value = json.loads(json_value)
-        return Operation(OpCode(op_str), OpLevel(lev_str), name, value)
+        op_str, scope_str, name, value = json.loads(json_value)
+        return Operation(
+            opcode=OpCode(op_str),
+            scope=qltypes.ConfigScope(scope_str),
+            setting_name=name,
+            value=value,
+        )
 
 
 def spec_to_json(spec: spec.Spec):
@@ -195,9 +226,9 @@ def spec_to_json(spec: spec.Spec):
             raise RuntimeError(
                 f'cannot serialize type for config setting {setting.name}')
 
-        typemod = qltypes.TypeModifier.SINGLETON
+        typemod = qltypes.TypeModifier.SingletonType
         if setting.set_of:
-            typemod = qltypes.TypeModifier.SET_OF
+            typemod = qltypes.TypeModifier.SetOfType
 
         dct[setting.name] = {
             'default': value_to_json_value(setting, setting.default),
@@ -241,11 +272,26 @@ def value_from_json(setting, value: str):
     return value_from_json_value(setting, json.loads(value))
 
 
-def to_json(spec: spec.Spec, storage: Mapping) -> str:
+def to_json(
+    spec: spec.Spec,
+    storage: Mapping[str, SettingValue],
+    *,
+    setting_filter: Optional[Callable[[SettingValue], bool]] = None,
+    include_source: bool = True,
+) -> str:
     dct = {}
     for name, value in storage.items():
         setting = spec[name]
-        dct[name] = value_to_json_value(setting, value)
+        if setting_filter is None or setting_filter(value):
+            val = value_to_json_value(setting, value.value)
+            if include_source:
+                dct[name] = {
+                    'name': name,
+                    'source': value.source,
+                    'value': val,
+                }
+            else:
+                dct[name] = val
     return json.dumps(dct)
 
 
@@ -263,26 +309,45 @@ def from_json(spec: spec.Spec, js: str) -> Mapping:
                 raise errors.ConfigurationError(
                     f'invalid JSON: unknown setting name {key!r}')
 
-            mm[key] = value_from_json_value(setting, value)
+            mm[key] = SettingValue(
+                name=key,
+                value=value_from_json_value(setting, value['value']),
+                source=value['source'],
+            )
 
     return mm.finish()
 
 
-def lookup(spec: spec.Spec, name: str, *configs: Mapping,
-           allow_unrecognized: bool = False):
-    try:
-        setting = spec[name]
-    except (KeyError, TypeError):
-        if allow_unrecognized:
-            return None
-        else:
-            raise errors.ConfigurationError(
-                f'unrecognized configuration parameter {name!r}')
+def from_dict(
+    spec: spec.Spec,
+    values: Mapping[str, Any],
+    source: str,
+) -> Mapping[str, SettingValue]:
 
-    for c in configs:
-        try:
-            return c[name]
-        except KeyError:
-            pass
+    with immutables.Map().mutate() as mm:
+        for key, value in values.items():
+            setting = spec.get(key)
+            if setting is None:
+                raise errors.ConfigurationError(
+                    f'unknown setting name {key!r}')
 
-    return setting.default
+            mm[key] = SettingValue(
+                name=key,
+                value=value_from_json_value(setting, value),
+                source=source,
+            )
+
+    return mm.finish()
+
+
+def set_value(
+    storage: Mapping[str, SettingValue],
+    name: str,
+    value: Any,
+    source: str,
+) -> Mapping[str, SettingValue]:
+
+    return storage.set(
+        name,
+        SettingValue(name=name, value=value, source=source),
+    )

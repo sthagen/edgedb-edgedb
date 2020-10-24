@@ -43,9 +43,9 @@ from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
 
 from . import context
-from . import stmtctx
 
 
+# XXX: COME BACK TO THIS
 def get_schema_object(
         name: Union[str, qlast.BaseObjectRef],
         module: Optional[str]=None, *,
@@ -54,6 +54,8 @@ def get_schema_object(
         label: Optional[str]=None,
         ctx: context.ContextLevel,
         srcctx: Optional[parsing.ParserContext] = None) -> s_obj.Object:
+
+    expr = name if isinstance(name, qlast.BaseObjectRef) else None
 
     if isinstance(name, qlast.ObjectRef):
         if srcctx is None:
@@ -77,7 +79,7 @@ def get_schema_object(
 
     try:
         stype = ctx.env.get_track_schema_object(
-            name=name, modaliases=ctx.modaliases,
+            name=name, expr=expr, modaliases=ctx.modaliases,
             type=item_type, condition=condition,
             label=label,
         )
@@ -208,10 +210,8 @@ def derive_view(
                 if computable_data is not None:
                     ctx.source_map[ptr] = computable_data
 
-                if src_ptr in ctx.pending_cardinality:
-                    ctx.pointer_derivation_map[src_ptr].append(ptr)
-                    stmtctx.pend_pointer_cardinality_inference(
-                        ptrcls=ptr, ctx=ctx)
+                if src_ptr in ctx.env.pointer_specified_info:
+                    ctx.env.pointer_derivation_map[src_ptr].append(ptr)
 
     else:
         raise TypeError("unsupported type in derive_view")
@@ -330,7 +330,7 @@ def get_union_type(
             or union.get_name(ctx.env.schema).module != '__derived__'
         )
     ):
-        ctx.env.schema_refs.add(union)
+        ctx.env.add_schema_ref(union, expr=None)
 
     return union
 
@@ -353,7 +353,7 @@ def get_intersection_type(
             or intersection.get_name(ctx.env.schema).module != '__derived__'
         )
     ):
-        ctx.env.schema_refs.add(intersection)
+        ctx.env.add_schema_ref(intersection, expr=None)
 
     return intersection
 
@@ -442,10 +442,11 @@ def derive_dummy_ptr(
     *,
     ctx: context.ContextLevel,
 ) -> s_pointers.Pointer:
-    stdobj = cast(s_objtypes.ObjectType, ctx.env.schema.get('std::BaseObject'))
+    stdobj = ctx.env.schema.get('std::BaseObject', type=s_objtypes.ObjectType)
     derived_obj_name = stdobj.get_derived_name(
         ctx.env.schema, stdobj, module='__derived__')
-    derived_obj = ctx.env.schema.get(derived_obj_name, None)
+    derived_obj = ctx.env.schema.get(
+        derived_obj_name, None, type=s_obj.QualifiedObject)
     if derived_obj is None:
         ctx.env.schema, derived_obj = stdobj.derive_subtype(
             ctx.env.schema, name=derived_obj_name)
@@ -462,7 +463,7 @@ def derive_dummy_ptr(
             derived_obj,
             target=derived_obj,
             attrs={
-                'cardinality': qltypes.SchemaCardinality.MANY,
+                'cardinality': qltypes.SchemaCardinality.Many,
             },
             name=derived_name,
             mark_derived=True,

@@ -52,10 +52,12 @@ def compile_ir_to_sql_tree(
     try:
         # Transform to sql tree
         query_params = []
+        type_rewrites = {}
 
         if isinstance(ir_expr, irast.Statement):
             scope_tree = ir_expr.scope_tree
             query_params = list(ir_expr.params)
+            type_rewrites = ir_expr.type_rewrites
             ir_expr = ir_expr.expr
         elif isinstance(ir_expr, irast.ConfigCommand):
             scope_tree = ir_expr.scope_tree
@@ -67,6 +69,7 @@ def compile_ir_to_sql_tree(
             expected_cardinality_one=expected_cardinality_one,
             use_named_params=use_named_params,
             query_params=query_params,
+            type_rewrites=type_rewrites,
             ignore_object_shapes=ignore_shapes,
             explicit_top_cast=explicit_top_cast,
             singleton_mode=singleton_mode)
@@ -114,8 +117,10 @@ def compile_ir_to_sql(
         debug.header('SQL Tree')
         debug.dump(qtree)
 
-    assert isinstance(qtree, pgast.Query), "expected instance of ast.Query"
-    argmap = qtree.argnames
+    if isinstance(qtree, pgast.Query):
+        argmap = qtree.argnames
+    else:
+        argmap = {}
 
     # Generate query text
     codegen = _run_codegen(qtree, pretty=pretty)

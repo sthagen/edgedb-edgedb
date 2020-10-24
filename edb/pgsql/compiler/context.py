@@ -23,8 +23,10 @@ from __future__ import annotations
 from typing import *
 
 import collections
+import contextlib
 import itertools
 import enum
+import uuid
 
 from edb.common import compiler
 
@@ -63,11 +65,6 @@ class OutputFormat(enum.Enum):
     SCRIPT = enum.auto()
 
 
-class NoVolatilitySentinel:
-    pass
-
-
-NO_VOLATILITY = NoVolatilitySentinel()
 NO_STMT = pgast.SelectStmt()
 
 
@@ -100,6 +97,12 @@ class CompilerContextLevel(compiler.ContextLevel):
     #: SQL query hierarchy
     rel_hierarchy: Dict[pgast.Query, pgast.Query]
 
+    #: CTEs representing schema types, when rewritten based on access policy
+    type_ctes: Dict[uuid.UUID, pgast.CommonTableExpr]
+
+    #: A set of type CTEs currently being generated
+    pending_type_ctes: Set[uuid.UUID]
+
     #: The logical parent of the current query in the
     #: query hierarchy
     parent_rel: Optional[pgast.Query]
@@ -112,7 +115,12 @@ class CompilerContextLevel(compiler.ContextLevel):
     expr_exposed: Optional[bool]
 
     #: Expression to use to force SQL expression volatility in this context
-    volatility_ref: Optional[Union[pgast.BaseExpr, NoVolatilitySentinel]]
+    #: (Delayed with a lambda to avoid inserting it when not used.)
+    volatility_ref: Tuple[Callable[[], pgast.BaseExpr], ...]
+
+    # Current path_id we are INSERTing, so that we can avoid creating
+    # a bogus volatility ref to it...
+    current_insert_path_id: Optional[irast.PathId]
 
     group_by_rels: Dict[
         Tuple[irast.PathId, irast.PathId],
@@ -126,9 +134,9 @@ class CompilerContextLevel(compiler.ContextLevel):
     #: optionality scaffolding.
     force_optional: Set[irast.PathId]
 
-    #: ir.TypeRef used to narrow the joined relation representing
-    #: the mapping key.
-    join_target_type_filter: Dict[irast.Set, irast.TypeRef]
+    #: Specifies that references to a specific Set must be narrowed
+    #: by only selecting instances of type specified by the mapping value.
+    intersection_narrowing: Dict[irast.Set, irast.Set]
 
     #: Which SQL query holds the SQL scope for the given PathId
     path_scope: ChainMap[irast.PathId, pgast.SelectStmt]
@@ -188,17 +196,20 @@ class CompilerContextLevel(compiler.ContextLevel):
             self.stmt = NO_STMT
             self.rel = NO_STMT
             self.rel_hierarchy = {}
+            self.type_ctes = {}
+            self.pending_type_ctes = set()
             self.dml_stmts = {}
             self.parent_rel = None
             self.pending_query = None
 
             self.expr_exposed = None
-            self.volatility_ref = None
+            self.volatility_ref = ()
+            self.current_insert_path_id = None
             self.group_by_rels = {}
 
             self.disable_semi_join = set()
             self.force_optional = set()
-            self.join_target_type_filter = {}
+            self.intersection_narrowing = {}
 
             self.path_scope = collections.ChainMap()
             self.scope_tree = scope_tree
@@ -217,17 +228,20 @@ class CompilerContextLevel(compiler.ContextLevel):
             self.stmt = prevlevel.stmt
             self.rel = prevlevel.rel
             self.rel_hierarchy = prevlevel.rel_hierarchy
+            self.type_ctes = prevlevel.type_ctes
+            self.pending_type_ctes = prevlevel.pending_type_ctes
             self.dml_stmts = prevlevel.dml_stmts
             self.parent_rel = prevlevel.parent_rel
             self.pending_query = prevlevel.pending_query
 
             self.expr_exposed = prevlevel.expr_exposed
             self.volatility_ref = prevlevel.volatility_ref
+            self.current_insert_path_id = prevlevel.current_insert_path_id
             self.group_by_rels = prevlevel.group_by_rels
 
             self.disable_semi_join = prevlevel.disable_semi_join.copy()
             self.force_optional = prevlevel.force_optional.copy()
-            self.join_target_type_filter = prevlevel.join_target_type_filter
+            self.intersection_narrowing = prevlevel.intersection_narrowing
 
             self.path_scope = prevlevel.path_scope
             self.scope_tree = prevlevel.scope_tree
@@ -235,26 +249,45 @@ class CompilerContextLevel(compiler.ContextLevel):
             self.ptr_rel_overlays = prevlevel.ptr_rel_overlays
             self.enclosing_cte_iterator = prevlevel.enclosing_cte_iterator
 
-            if mode in {ContextSwitchMode.SUBREL, ContextSwitchMode.NEWREL,
-                        ContextSwitchMode.SUBSTMT}:
-                if self.pending_query and mode == ContextSwitchMode.SUBSTMT:
+            if mode is ContextSwitchMode.SUBSTMT:
+                if self.pending_query is not None:
                     self.rel = self.pending_query
                 else:
                     self.rel = pgast.SelectStmt()
-                    if mode != ContextSwitchMode.NEWREL:
-                        if prevlevel.parent_rel is not None:
-                            parent_rel = prevlevel.parent_rel
-                        else:
-                            parent_rel = prevlevel.rel
-                        self.rel_hierarchy[self.rel] = parent_rel
+                    if prevlevel.parent_rel is not None:
+                        parent_rel = prevlevel.parent_rel
+                    else:
+                        parent_rel = prevlevel.rel
+                    self.rel_hierarchy[self.rel] = parent_rel
 
+                self.stmt = self.rel
                 self.pending_query = None
                 self.parent_rel = None
 
-            if mode == ContextSwitchMode.SUBSTMT:
-                self.stmt = self.rel
+            elif mode is ContextSwitchMode.SUBREL:
+                self.rel = pgast.SelectStmt()
+                if prevlevel.parent_rel is not None:
+                    parent_rel = prevlevel.parent_rel
+                else:
+                    parent_rel = prevlevel.rel
+                self.rel_hierarchy[self.rel] = parent_rel
+                self.pending_query = None
+                self.parent_rel = None
 
-            if mode == ContextSwitchMode.NEWSCOPE:
+            elif mode is ContextSwitchMode.NEWREL:
+                self.rel = pgast.SelectStmt()
+                self.pending_query = None
+                self.parent_rel = None
+                self.path_scope = collections.ChainMap()
+                self.rel_hierarchy = {}
+                self.scope_tree = prevlevel.scope_tree.root
+
+                self.disable_semi_join = set()
+                self.force_optional = set()
+                self.intersection_narrowing = {}
+                self.pending_type_ctes = set(prevlevel.pending_type_ctes)
+
+            elif mode == ContextSwitchMode.NEWSCOPE:
                 self.path_scope = prevlevel.path_scope.new_child()
 
     def subrel(
@@ -295,6 +328,7 @@ class Environment:
     explicit_top_cast: Optional[irast.TypeRef]
     singleton_mode: bool
     query_params: List[irast.Param]
+    type_rewrites: Dict[uuid.UUID, irast.Set]
 
     def __init__(
         self,
@@ -306,6 +340,7 @@ class Environment:
         singleton_mode: bool,
         explicit_top_cast: Optional[irast.TypeRef],
         query_params: List[irast.Param],
+        type_rewrites: Dict[uuid.UUID, irast.Set],
     ) -> None:
         self.aliases = aliases.AliasGenerator()
         self.output_format = output_format
@@ -316,3 +351,19 @@ class Environment:
         self.singleton_mode = singleton_mode
         self.explicit_top_cast = explicit_top_cast
         self.query_params = query_params
+        self.type_rewrites = type_rewrites
+
+
+# XXX: this context hack is necessary until pathctx is converted
+#      to use context levels instead of using env directly.
+@contextlib.contextmanager
+def output_format(
+    ctx: CompilerContextLevel,
+    output_format: OutputFormat,
+) -> Generator[None, None, None]:
+    original_output_format = ctx.env.output_format
+    ctx.env.output_format = output_format
+    try:
+        yield
+    finally:
+        ctx.env.output_format = original_output_format
