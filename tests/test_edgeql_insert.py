@@ -569,7 +569,7 @@ class TestInsert(tb.QueryTestCase):
             [3],
         )
 
-        obj = await self.con.query_one(
+        obj = await self.con._fetchall(
             '''
                 WITH MODULE test
                 INSERT DefaultTest1 {
@@ -577,10 +577,13 @@ class TestInsert(tb.QueryTestCase):
                     num := 1,
                 };
             ''',
+            __typeids__=True,
+            __typenames__=True,
         )
 
-        self.assertTrue(hasattr(obj, 'id'))
-        self.assertTrue(hasattr(obj, '__tid__'))
+        self.assertTrue(hasattr(obj[0], 'id'))
+        self.assertTrue(hasattr(obj[0], '__tid__'))
+        self.assertEqual(obj[0].__tname__, 'test::DefaultTest1')
 
     async def test_edgeql_insert_returning_03(self):
         await self.con.execute('''
@@ -2077,7 +2080,7 @@ class TestInsert(tb.QueryTestCase):
         async with self._run_and_rollback():
             with self.assertRaisesRegex(
                     edgedb.QueryError,
-                    "ON CONFLICT argument must be a property"):
+                    "UNLESS CONFLICT argument must be a property"):
                 await self.con.query(r'''
                     INSERT test::Person {name := "hello"}
                     UNLESS CONFLICT ON 20;
@@ -2086,7 +2089,7 @@ class TestInsert(tb.QueryTestCase):
         async with self._run_and_rollback():
             with self.assertRaisesRegex(
                     edgedb.QueryError,
-                    "ON CONFLICT argument must be a property of "
+                    "UNLESS CONFLICT argument must be a property of "
                     "the type being inserted"):
                 await self.con.query(r'''
                     INSERT test::Person {name := "hello"}
@@ -2096,7 +2099,7 @@ class TestInsert(tb.QueryTestCase):
         async with self._run_and_rollback():
             with self.assertRaisesRegex(
                     edgedb.QueryError,
-                    "ON CONFLICT property must have a "
+                    "UNLESS CONFLICT property must have a "
                     "single exclusive constraint"):
                 await self.con.query(r'''
                     INSERT test::Note {name := "hello"}
@@ -2106,7 +2109,7 @@ class TestInsert(tb.QueryTestCase):
         async with self._run_and_rollback():
             with self.assertRaisesRegex(
                     edgedb.QueryError,
-                    "ON CONFLICT property must be a SINGLE property"):
+                    "UNLESS CONFLICT property must be a SINGLE property"):
                 await self.con.query(r'''
                     INSERT test::Person {name := "hello", multi_prop := "lol"}
                     UNLESS CONFLICT ON .multi_prop;

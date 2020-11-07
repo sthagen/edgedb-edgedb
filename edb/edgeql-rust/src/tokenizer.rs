@@ -17,6 +17,7 @@ use edgeql_parser::keywords::{FUTURE_RESERVED_KEYWORDS};
 use edgeql_parser::helpers::unquote_string;
 use crate::errors::TokenizerError;
 use crate::pynormalize::py_pos;
+use crate::float;
 
 static mut TOKENS: Option<Tokens> = None;
 
@@ -95,7 +96,6 @@ pub struct Tokens {
     set_type_val: PyString,
 
     dot: PyString,
-    forward_link: PyString,
     backward_link: PyString,
     open_bracket: PyString,
     close_bracket: PyString,
@@ -261,7 +261,6 @@ impl Tokens {
             set_type_val: PyString::new(py, "SET TYPE"),
 
             dot: PyString::new(py, "."),
-            forward_link: PyString::new(py, ".>"),
             backward_link: PyString::new(py, ".<"),
             open_bracket: PyString::new(py, "["),
             close_bracket: PyString::new(py, "]"),
@@ -385,9 +384,6 @@ fn convert(py: Python, tokens: &Tokens, cache: &mut Cache,
         Namespace => Ok((tokens.namespace.clone_ref(py),
                          tokens.namespace.clone_ref(py),
                          py.None())),
-        ForwardLink => Ok((tokens.forward_link.clone_ref(py),
-                           tokens.forward_link.clone_ref(py),
-                           py.None())),
         BackwardLink => Ok((tokens.backward_link.clone_ref(py),
                             tokens.backward_link.clone_ref(py),
                             py.None())),
@@ -499,15 +495,9 @@ fn convert(py: Python, tokens: &Tokens, cache: &mut Cache,
                     (&value[..value.len()-1].replace("_", ""),), None)?))
         }
         FloatConst => {
-            let float_value = f64::from_str(&value.replace("_", ""))
-                .map_err(|e| TokenizerError::new(py,
-                    (format!("error reading std::float64: {}", e),
-                     py_pos(py, &token.start))))?;
-            if float_value == f64::INFINITY || float_value == -f64::INFINITY {
-                return Err(TokenizerError::new(py,
-                    (format!("number is out of range for std::float64"),
-                     py_pos(py, &token.start))))?;
-            }
+            let float_value = float::convert(value)
+                .map_err(|msg| TokenizerError::new(py,
+                    (&msg, py_pos(py, &token.start))))?;
             Ok((tokens.fconst.clone_ref(py),
                 PyString::new(py, value),
                 float_value.to_py_object(py).into_object()))

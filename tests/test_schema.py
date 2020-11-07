@@ -4162,6 +4162,241 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             alias Alias3 := Remark { command := .remark ++ "!" };
         """])
 
+    def test_schema_migrations_equivalence_rename_alias_01(self):
+        self._assert_migration_equivalence([r"""
+            type Note {
+                required property note -> str;
+            };
+            alias Alias1 := Note;
+            alias Alias2 := (SELECT Note.note);
+            alias Alias3 := Note { command := .note ++ "!" };
+
+            type Foo {
+                link a -> Alias1;
+            };
+        """, r"""
+            type Note {
+                required property note -> str;
+            };
+            alias Blias1 := Note;
+            alias Blias2 := (SELECT Note.note);
+            alias Blias3 := Note { command := .note ++ "!" };
+
+            type Foo {
+                link a -> Blias1;
+            };
+        """])
+
+    @test.xfail('''Trips a SchemaError''')
+    def test_schema_migrations_equivalence_rename_alias_02(self):
+        self._assert_migration_equivalence([r"""
+            type Note {
+                required property note -> str;
+            };
+            alias Alias2 := (SELECT Note.note);
+
+            type Foo {
+                multi property b -> str {
+                    default := (SELECT Alias2 LIMIT 1);
+                }
+            };
+        """, r"""
+            type Note {
+                required property note -> str;
+            };
+            alias Blias2 := (SELECT Note.note);
+
+            type Foo {
+                multi property b -> str {
+                    default := (SELECT Blias2 LIMIT 1);
+                }
+            };
+        """])
+
+    def test_schema_migrations_equivalence_rename_annot_01(self):
+        self._assert_migration_equivalence([r"""
+            abstract annotation foo;
+
+            type Object1 {
+                annotation foo := 'bar';
+            };
+        """, r"""
+            abstract annotation bar;
+
+            type Object1 {
+                annotation bar := 'bar';
+            };
+        """])
+
+    def test_schema_migrations_equivalence_rename_type_01(self):
+        self._assert_migration_equivalence([r"""
+            type Foo;
+            type Baz {
+                link a -> Foo;
+            }
+        """, r"""
+            type Bar;
+            type Baz {
+                link a -> Bar;
+            }
+        """])
+
+    def test_schema_migrations_equivalence_rename_type_02(self):
+        self._assert_migration_equivalence([r"""
+            type Note {
+                property note -> str;
+            }
+            type Subtype extending Note;
+            type Link {
+                link a -> Note;
+            }
+            type Uses {
+                required property x -> str {
+                    default := (SELECT Note.note LIMIT 1)
+                }
+            };
+            type ComputeLink {
+                property foo -> str;
+                multi link x := (
+                    SELECT Note FILTER Note.note = ComputeLink.foo);
+            };
+            alias Alias := Note;
+        """, r"""
+            type Remark {
+                property note -> str;
+            }
+            type Subtype extending Remark;
+            type Link {
+                link a -> Remark;
+            }
+            type Uses {
+                required property x -> str {
+                    default := (SELECT Remark.note LIMIT 1)
+                }
+            };
+            type ComputeLink {
+                property foo -> str;
+                multi link x := (
+                    SELECT Remark FILTER Remark.note = ComputeLink.foo);
+            };
+            alias Alias := Remark;
+        """])
+
+    def test_schema_migrations_equivalence_rename_type_03(self):
+        self._assert_migration_equivalence([r"""
+            type Note {
+                property note -> str;
+            }
+        """, r"""
+            type Remark {
+                property note -> str;
+            }
+            type Subtype extending Remark;
+            type Link {
+                link a -> Remark;
+            }
+            type Uses {
+                required property x -> str {
+                    default := (SELECT Remark.note LIMIT 1)
+                }
+            };
+            type ComputeLink {
+                property foo -> str;
+                multi link x := (
+                    SELECT Remark FILTER Remark.note = ComputeLink.foo);
+            };
+            alias Alias := Remark;
+        """])
+
+    def test_schema_migrations_equivalence_rename_enum_01(self):
+        self._assert_migration_equivalence([r"""
+            scalar type foo extending enum<'foo', 'bar'>;
+            type Baz {
+                property a -> foo;
+            }
+        """, r"""
+            scalar type bar extending enum<'foo', 'bar'>;
+            type Baz {
+                property a -> bar;
+            }
+        """])
+
+    def test_schema_migrations_equivalence_rename_scalar_01(self):
+        self._assert_migration_equivalence([r"""
+            scalar type foo extending str;
+            type Baz {
+                property a -> foo;
+            }
+        """, r"""
+            scalar type bar extending str;
+            type Baz {
+                property a -> bar;
+            }
+        """])
+
+    def test_schema_migrations_equivalence_rename_abs_constraint_01(self):
+        self._assert_migration_equivalence([r"""
+            abstract constraint greater_or_equal(val: int64) {
+                using (SELECT __subject__ >= val);
+            };
+            type Note {
+                required property note -> int64 {
+                    constraint greater_or_equal(10);
+                }
+            };
+        """, r"""
+            abstract constraint not_less(val: int64) {
+                using (SELECT __subject__ >= val);
+            };
+            type Note {
+                required property note -> int64 {
+                    constraint not_less(10);
+                }
+            };
+        """])
+
+    def test_schema_migrations_equivalence_rename_abs_ptr_01(self):
+        self._assert_migration_equivalence([r"""
+            abstract link abs_link {
+                property prop -> int64;
+            };
+
+            type LinkedObj;
+            type RenameObj {
+                multi link link EXTENDING abs_link
+                    -> LinkedObj;
+            };
+        """, r"""
+            abstract link new_abs_link {
+                property prop -> int64;
+            };
+
+            type LinkedObj;
+            type RenameObj {
+                multi link link EXTENDING new_abs_link
+                    -> LinkedObj;
+            };
+        """])
+
+    def test_schema_migrations_equivalence_rename_abs_ptr_02(self):
+        self._assert_migration_equivalence([r"""
+            abstract property abs_prop {
+                annotation title := "lol";
+            };
+
+            type RenameObj {
+                property prop EXTENDING abs_prop -> str;
+            };
+        """, r"""
+            abstract property new_abs_prop {
+                annotation title := "lol";
+            };
+
+            type RenameObj {
+                property prop EXTENDING new_abs_prop -> str;
+            };
+        """])
+
 
 class TestDescribe(tb.BaseSchemaLoadTest):
     """Test the DESCRIBE command."""
@@ -5331,8 +5566,6 @@ class TestDescribe(tb.BaseSchemaLoadTest):
     def test_schema_describe_poly_01(self):
         self._assert_describe(
             """
-            scalar type all extending str;
-
             type Object {
                 property real -> bool;
             }
@@ -5350,8 +5583,6 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             function test::all() -> std::bool using (SELECT
                 true
             );
-            scalar type test::all extending std::str;
-
             # The following builtins are masked by the above:
 
             # function std::all(vals: SET OF std::bool) ->  std::bool {
@@ -5528,3 +5759,109 @@ class TestCreateMigration(tb.BaseSchemaTest):
                     }};
                 '''
             )
+
+    def test_schema_create_migration_hashing_01(self):
+        schema = self.schema
+        schema = self.run_ddl(schema, 'CREATE MODULE default;')
+        m1 = 'm1tjyzfl33vvzwjd5izo5nyp4zdsekyvxpdm7zhtt5ufmqjzczopdq'
+        schema = self.run_ddl(
+            schema,
+            f'''
+                CREATE MIGRATION {m1} ONTO initial;
+            '''
+        )
+
+    def test_schema_create_migration_hashing_02(self):
+        # this should yield the same hash as hashing_01
+        schema = self.schema
+        schema = self.run_ddl(schema, 'CREATE MODULE default;')
+        m1 = 'm1tjyzfl33vvzwjd5izo5nyp4zdsekyvxpdm7zhtt5ufmqjzczopdq'
+        schema = self.run_ddl(
+            schema,
+            f'''
+                CREATE MIGRATION {m1} ONTO initial {{
+                }};
+            '''
+        )
+
+    def test_schema_create_migration_hashing_03(self):
+        # this is different from the above because
+        # of the semicolon arrangement.
+        schema = self.schema
+        schema = self.run_ddl(schema, 'CREATE MODULE default;')
+        m1 = 'm1sdg27s7lffr7knqhlzq5oegfqr74esj5k3busddccorbj5vv2afa'
+        schema = self.run_ddl(
+            schema,
+            f'''
+                CREATE MIGRATION {m1} ONTO initial {{
+                    ;
+                }};
+            '''
+        )
+
+    def test_schema_create_migration_hashing_04(self):
+        # this is different from the above because
+        # of the semicolon arrangement.
+        schema = self.schema
+        schema = self.run_ddl(schema, 'CREATE MODULE default;')
+        m1 = 'm1cbiul6yeoa52xehujfb4l4uh34ty2vrsu5mvxk7h63q6ov57lqtq'
+        schema = self.run_ddl(
+            schema,
+            f'''
+                CREATE MIGRATION {m1} ONTO initial {{
+                    ;;
+                }};
+            '''
+        )
+
+    def test_schema_create_migration_hashing_05(self):
+        schema = self.schema
+        schema = self.run_ddl(schema, 'CREATE MODULE default;')
+        m1 = 'm1vrzjotjgjxhdratq7jz5vdxmhvg2yun2xobiddag4aqr3y4gavgq'
+        schema = self.run_ddl(
+            schema,
+            f'''
+                CREATE MIGRATION {m1} ONTO initial {{
+                    CREATE TYPE Foo;
+                }};
+            '''
+        )
+
+    def test_schema_create_migration_hashing_06(self):
+        schema = self.schema
+        schema = self.run_ddl(schema, 'CREATE MODULE default;')
+        m1 = 'm1oppdh5pqk2mi45e6s7zw3zbmwqgcmbwyew2vwa7pkqs7evmx3eca'
+        schema = self.run_ddl(
+            schema,
+            f'''
+                CREATE MIGRATION {m1} ONTO initial {{
+                    CREATE TYPE Foo;;
+                }};
+            '''
+        )
+
+    def test_schema_create_migration_hashing_07(self):
+        schema = self.schema
+        schema = self.run_ddl(schema, 'CREATE MODULE default;')
+        m1 = 'm1qunrujj5tnobsit2cpok4tpbdpagvfr5kqqvwqva3b2lurt7kzia'
+        schema = self.run_ddl(
+            schema,
+            f'''
+                CREATE MIGRATION {m1} ONTO initial {{
+                    CREATE TYPE Foo {{}}
+                }};
+            '''
+        )
+
+    def test_schema_create_migration_hashing_08(self):
+        schema = self.schema
+        schema = self.run_ddl(schema, 'CREATE MODULE default;')
+        m1 = 'm1usqifmekhxos6pmrjuqdl7qdewxhz32uqfh3loaywiyafdswqdaa'
+        schema = self.run_ddl(
+            schema,
+            f'''
+                CREATE MIGRATION {m1} ONTO initial {{
+                    CREATE TYPE Foo {{}};
+                }};
+            '''
+        )

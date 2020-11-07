@@ -110,6 +110,31 @@ class TestEdgeQLParser(EdgeQLSyntaxTest):
     def test_edgeql_syntax_float_number_too_large(self):
         """SELECT 2+1e999;"""
 
+    @tb.must_fail(errors.EdgeQLSyntaxError, line=1, col=8)
+    def test_edgeql_syntax_float_number_too_small_01(self):
+        """SELECT 0.01e-322;"""
+
+    @tb.must_fail(errors.EdgeQLSyntaxError, line=1, col=8)
+    def test_edgeql_syntax_float_number_too_small_02(self):
+        """SELECT 1e-324;"""
+
+    @tb.must_fail(errors.EdgeQLSyntaxError, line=1, col=8)
+    def test_edgeql_syntax_float_number_too_small_03(self):
+        (
+            "SELECT 0."
+            "0000000000_0000000000_0000000000_0000000000"
+            "0000000000_0000000000_0000000000_0000000000"
+            "0000000000_0000000000_0000000000_0000000000"
+            "0000000000_0000000000_0000000000_0000000000"
+            "0000000000_0000000000_0000000000_0000000000"
+            "0000000000_0000000000_0000000000_0000000000"
+            "0000000000_0000000000_0000000000_0000000000"
+            "0000000000_0000000000_0000000000_0000000000"
+            "0000000000_0000000000_0000000000_0000000000"
+            "0000000000_0000000000_0000000000_0000000000"
+            "1;"
+        )
+
     def test_edgeql_syntax_constants_01(self):
         """
         SELECT 0;
@@ -157,6 +182,7 @@ class TestEdgeQLParser(EdgeQLSyntaxTest):
         SELECT 3.543_2e-20;
         SELECT 354.32e-20;
         SELECT 2_354.32e-20;
+        SELECT 0e-999;
 
 % OK %
 
@@ -169,6 +195,7 @@ class TestEdgeQLParser(EdgeQLSyntaxTest):
         SELECT 3.543_2e-20;
         SELECT 354.32e-20;
         SELECT 2_354.32e-20;
+        SELECT 0e-999;
         """
 
     def test_edgeql_syntax_constants_05(self):
@@ -3242,6 +3269,19 @@ aa';
         };
         """
 
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  r"Unexpected 'RENAME'", line=5, col=21)
+    def test_edgeql_syntax_ddl_constraint_11(self):
+        """
+        ALTER TYPE Foo {
+            ALTER LINK bar {
+                ALTER CONSTRAINT my_constraint ON (foo) {
+                    RENAME TO myconstraint;
+                };
+            };
+        };
+        """
+
     def test_edgeql_syntax_ddl_function_01(self):
         """
         CREATE FUNCTION std::strlen(string: std::str) -> std::int64
@@ -3599,6 +3639,48 @@ aa';
             std::int64 USING SQL FUNCTION 'aaa';
         """
 
+    def test_edgeql_syntax_ddl_operator_01(self):
+        """
+        CREATE INFIX OPERATOR
+        std::`OR` (a: std::bool, b: std::bool) -> std::bool {
+            SET volatility := 'IMMUTABLE';
+            USING SQL $$
+            SELECT ("a" OR "b") AND ("a"::int | "b"::int)::bool
+            $$;
+        };
+        """
+
+    def test_edgeql_syntax_ddl_operator_02(self):
+        """
+        CREATE INFIX OPERATOR
+        std::`AND` (a: std::bool, b: std::bool) -> std::bool {
+            SET volatility := 'IMMUTABLE';
+            USING SQL EXPRESSION;
+        };
+        """
+
+    def test_edgeql_syntax_ddl_operator_03(self):
+        """
+        CREATE INFIX OPERATOR
+        std::`=` (l: std::bool, r: std::bool) -> std::bool {
+            SET volatility := 'IMMUTABLE';
+            SET commutator := 'std::=';
+            SET negator := 'std::!=';
+            USING SQL OPERATOR '=';
+        };
+        """
+
+    def test_edgeql_syntax_ddl_operator_04(self):
+        """
+        CREATE INFIX OPERATOR
+        std::`>` (l: std::int32, r: std::float32) -> std::bool {
+            SET volatility := 'IMMUTABLE';
+            SET commutator := 'std::<';
+            SET negator := 'std::<=';
+            USING SQL OPERATOR '>(float8,float8)';
+        };
+        """
+
     def test_edgeql_syntax_ddl_property_01(self):
         """
         CREATE ABSTRACT PROPERTY std::property {
@@ -3808,6 +3890,37 @@ aa';
         ALTER TYPE mymod::Foo {
             ALTER PROPERTY foo {
                 DROP OWNED;
+            };
+        };
+        """
+
+    def test_edgeql_syntax_ddl_type_12(self):
+        """
+        CREATE TYPE Foo {
+            CREATE PROPERTY bar := 'something';
+        };
+
+% OK %
+
+        CREATE TYPE Foo {
+            CREATE PROPERTY bar := ('something');
+        };
+        """
+
+    def test_edgeql_syntax_ddl_type_13(self):
+        """
+        ALTER TYPE Foo {
+            ALTER PROPERTY bar {
+                DROP EXPRESSION;
+            };
+        };
+        """
+
+    def test_edgeql_syntax_ddl_type_14(self):
+        """
+        ALTER TYPE Foo {
+            ALTER LINK bar {
+                DROP EXPRESSION;
             };
         };
         """

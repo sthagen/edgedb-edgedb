@@ -29,6 +29,7 @@ from edb.errors import EdgeQLSyntaxError
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
 
+from edb.common import context as pctx
 from edb.common import parsing
 
 from . import expressions
@@ -290,6 +291,14 @@ class UsingStmt(Nonterm):
         )
 
 
+class DropUsingStmt(Nonterm):
+    def reduce_DROP_EXPRESSION(self, *kids):
+        self.val = qlast.SetSpecialField(
+            name='expr',
+            value=None
+        )
+
+
 class SetFieldStmt(Nonterm):
     # field := <expr>
     def reduce_SET_Identifier_ASSIGN_Expr(self, *kids):
@@ -339,6 +348,7 @@ commands_block(
 commands_block(
     'Alter',
     UsingStmt,
+    DropUsingStmt,
     RenameStmt,
     SetFieldStmt,
     CreateAnnotationValueStmt,
@@ -424,11 +434,21 @@ commands_block(
 # CREATE DATABASE
 #
 class CreateDatabaseStmt(Nonterm):
-    def reduce_CREATE_DATABASE_AnyNodeName_OptCreateRoleCommandsBlock(
-        self,
-        *kids,
-    ):
+    def reduce_CREATE_DATABASE_regular(self, *kids):
+        """%reduce CREATE DATABASE AnyNodeName OptCreateDatabaseCommandsBlock
+        """
         self.val = qlast.CreateDatabase(name=kids[2].val, commands=kids[3].val)
+
+    def reduce_CREATE_DATABASE_from_template(self, *kids):
+        """%reduce
+            CREATE DATABASE AnyNodeName FROM AnyNodeName
+            OptCreateDatabaseCommandsBlock
+        """
+        self.val = qlast.CreateDatabase(
+            name=kids[2].val,
+            commands=kids[5].val,
+            template=kids[4].val,
+        )
 
 
 #
@@ -615,7 +635,6 @@ class AlterConstraintOwned(Nonterm):
 
 commands_block(
     'AlterConcreteConstraint',
-    RenameStmt,
     SetFieldStmt,
     SetDelegatedStmt,
     AlterConstraintOwned,
@@ -1068,6 +1087,7 @@ class AlterPropertyOwned(Nonterm):
 commands_block(
     'AlterConcreteProperty',
     UsingStmt,
+    DropUsingStmt,
     RenameStmt,
     SetFieldStmt,
     AlterPropertyOwned,
@@ -1287,6 +1307,7 @@ class AlterLinkOwned(Nonterm):
 commands_block(
     'AlterConcreteLink',
     UsingStmt,
+    DropUsingStmt,
     RenameStmt,
     SetFieldStmt,
     AlterLinkOwned,
@@ -2152,28 +2173,68 @@ class CreateMigrationBody(
     pass
 
 
+class MigrationBody(typing.NamedTuple):
+
+    body: qlast.MigrationBody
+    message: typing.Optional[str]
+
+
 class OptCreateMigrationBody(Nonterm):
+
+    def _process_body(self, body):
+        message = None
+        stmts = []
+        for stmt in body:
+            if isinstance(stmt, qlast.SetField):
+                if stmt.name == 'message':
+                    message = stmt.value
+                else:
+                    raise errors.InvalidSyntaxError(
+                        f'unexpected field: {stmt.name!r}',
+                        context=stmt.context,
+                    )
+            else:
+                stmts.append(stmt)
+
+        return message, stmts
 
     def reduce_1(self, *kids):
         """%reduce
             LBRACE CreateMigrationBody OptSemicolons RBRACE
         """
-        self.val = kids[1].val
+        message, stmts = self._process_body(kids[1].val)
+        body = qlast.MigrationBody(commands=stmts)
+        contexts = [kids[1].context]
+        if kids[2].context is not None:
+            contexts.append(kids[2].context)
+        body.context = pctx.merge_context(contexts)
+        self.val = MigrationBody(body=body, message=message)
 
     def reduce_2(self, *kids):
         """%reduce
             LBRACE Semicolons CreateMigrationBody OptSemicolons RBRACE
         """
-        self.val = kids[2].val
+        message, stmts = self._process_body(kids[2].val)
+        body = qlast.MigrationBody(commands=stmts)
+        body.context = pctx.merge_context(
+            [kids[1].context, kids[2].context, kids[3].context])
+        self.val = MigrationBody(body=body, message=message)
 
     def reduce_3(self, *kids):
         """%reduce
             LBRACE OptSemicolons RBRACE
         """
         self.val = []
+        body = qlast.MigrationBody(commands=[])
+        body.context = kids[1].context
+        if body.context is None:
+            body.context = pctx.empty_context()
+        self.val = MigrationBody(body=body, message=None)
 
     def reduce_empty(self):
-        self.val = []
+        body = qlast.MigrationBody(commands=[])
+        body.context = pctx.empty_context()
+        self.val = MigrationBody(body=body, message=None)
 
 
 class MigrationNameAndParent(typing.NamedTuple):
@@ -2209,26 +2270,11 @@ class CreateMigrationStmt(Nonterm):
         r"""%reduce
             CREATE MIGRATION OptMigrationNameParentName OptCreateMigrationBody
         """
-        message = None
-
-        body = []
-        for stmt in kids[3].val:
-            if isinstance(stmt, qlast.SetField):
-                if stmt.name == 'message':
-                    message = stmt.value
-                else:
-                    raise errors.InvalidSyntaxError(
-                        f'unexpected field: {stmt.name!r}',
-                        context=stmt.context,
-                    )
-            else:
-                body.append(stmt)
-
         self.val = qlast.CreateMigration(
             name=kids[2].val.name,
             parent=kids[2].val.parent,
-            message=message,
-            commands=body,
+            message=kids[3].val.message,
+            body=kids[3].val.body,
         )
 
 

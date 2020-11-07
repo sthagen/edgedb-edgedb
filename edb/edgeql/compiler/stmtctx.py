@@ -95,6 +95,7 @@ def init_context(
     ctx.toplevel_result_view_name = options.result_view_name
     ctx.implicit_id_in_shapes = options.implicit_id_in_shapes
     ctx.implicit_tid_in_shapes = options.implicit_tid_in_shapes
+    ctx.implicit_tname_in_shapes = options.implicit_tname_in_shapes
     ctx.implicit_limit = options.implicit_limit
 
     return ctx
@@ -458,6 +459,7 @@ def declare_view_from_schema(
         assert view_expr is not None
         view_ql = qlparser.parse(view_expr.text)
         viewcls_name = viewcls.get_name(ctx.env.schema)
+        assert isinstance(view_ql, qlast.Expr), 'expected qlast.Expr'
         view_set = declare_view(view_ql, alias=viewcls_name,
                                 fully_detached=True, ctx=subctx)
         # The view path id _itself_ should not be in the nested namespace.

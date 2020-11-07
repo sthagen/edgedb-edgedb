@@ -51,7 +51,7 @@ class BaseHttpTest:
     # compiler processes and at a high number of parallel test
     # workers this ends up with test consuming too much system resources
     # for no particular speedup.
-    SERIALIZED = True
+    PARALLELISM_GRANULARITY = 'system'
 
     @classmethod
     def get_port_proto(cls):
@@ -79,6 +79,16 @@ class BaseHttpTest:
                 '''))
 
         cls.http_addr = f'http://127.0.0.1:{cls.http_port}'
+
+    @classmethod
+    def tearDownClass(cls):
+        dbname = cls.get_database_name()
+        cls.loop.run_until_complete(
+            cls.con.execute(
+                f'CONFIGURE SYSTEM RESET Port FILTER .database = "{dbname}";',
+            ),
+        )
+        super().tearDownClass()
 
     @contextlib.contextmanager
     def http_con(self):

@@ -1309,6 +1309,8 @@ class ObjectCommand(
                     for fn in fns:
                         # Do the switcheraroos
                         value = ref.get_explicit_field_value(schema, fn, None)
+                        if value is None:
+                            continue
                         assert isinstance(value, s_expr.Expression)
                         # Strip the "compiled" out of the expression
                         value = s_expr.Expression.not_compiled(value)
@@ -1454,12 +1456,10 @@ class ObjectCommand(
         # For functions, we need to update the internal function name and
         # the internal param names if a type name has changed.
         elif isinstance(cmd, s_func.AlterFunction):
-            # Construct a dummy function AST so we can produce a param
-            # desc list which we use to find a new name.
+            # Produce a param desc list which we use to find a new name.
             param_list = cmd.scls.get_params(schema)
-            ast = qlast.CreateFunction(params=param_list.get_ast(schema))
-            params = s_func.CallableCommand._get_param_desc_from_ast(
-                schema, {}, ast)
+            params = s_func.CallableCommand._get_param_desc_from_params_ast(
+                schema, context.modaliases, param_list.get_ast(schema))
             name = sn.shortname_from_fullname(cmd.classname)
             new_fname = s_func.CallableObject.get_fqname(schema, name, params)
             if new_fname == cmd.classname:
@@ -1471,17 +1471,6 @@ class ObjectCommand(
             rename.set_attribute_value(
                 'name', value=new_fname, orig_value=cmd.classname)
             cmd.add(rename)
-            # ... and rename all the params too
-            for dparam, oparam in zip(params, param_list.objects(schema)):
-                new_pname = dparam.get_fqname(schema, new_fname)
-                rename = oparam.init_delta_command(
-                    schema, RenameObject, new_name=new_pname)
-                rename.set_attribute_value(
-                    'name', value=new_pname, orig_value=cmd.classname)
-
-                alter = oparam.init_delta_command(schema, AlterObject)
-                alter.add(rename)
-                cmd.add(alter)
 
     def _finalize_affected_refs(
         self,
@@ -2131,6 +2120,16 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
 
         props = self.get_resolved_attributes(schema, context)
         metaclass = self.get_schema_metaclass()
+
+        # Check if functions by this name exist
+        fn = props.get('name')
+        if fn is not None:
+            funcs = schema.get_functions(fn, tuple())
+            if funcs:
+                raise errors.SchemaError(
+                    f'{funcs[0].get_verbosename(schema)} is already present '
+                    f'in the schema {schema!r}')
+
         schema, self.scls = metaclass.create_in_schema(schema, **props)
 
         if not props.get('id'):
@@ -2381,6 +2380,34 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
 
         return schema
 
+    def _canonicalize_ref_rename(
+        self,
+        ref: so.Object,
+        ref_name: str,
+        new_ref_name: str,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        scls: so.Object,
+    ) -> Command:
+        alter = ref.init_delta_command(schema, AlterObject)
+
+        rename = ref.init_delta_command(
+            schema,
+            RenameObject,
+            new_name=new_ref_name,
+        )
+        rename.set_attribute_value(
+            'name',
+            value=new_ref_name,
+            orig_value=ref_name,
+        )
+        with alter.new_context(schema, context, ref):
+            rename.update(rename._canonicalize(schema, context, ref))
+        alter.canonical = True
+        alter.add(rename)
+
+        return alter
+
     def _canonicalize(
         self,
         schema: s_schema.Schema,
@@ -2395,8 +2422,8 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
                 scls.get_field_value(schema, refdict.attr).objects(schema)
             )
 
+            ref: so.Object
             for ref in all_refs:
-                alter = ref.init_delta_command(schema, AlterObject)
                 ref_name = ref.get_name(schema)
                 quals = list(sn.quals_from_fullname(ref_name))
                 quals[0] = self.new_name
@@ -2406,21 +2433,9 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
                     name=sn.get_specialized_name(shortname, *quals),
                     module=sn.Name(self.new_name).module,
                 )
-                rename = ref.init_delta_command(
-                    schema,
-                    RenameObject,
-                    new_name=new_ref_name,
-                )
-                rename.set_attribute_value(
-                    'name',
-                    value=new_ref_name,
-                    orig_value=ref_name,
-                )
-                with alter.new_context(schema, context, ref):
-                    rename.update(rename._canonicalize(schema, context, ref))
-                alter.canonical = True
-                alter.add(rename)
-                commands.append(alter)
+
+                commands.append(self._canonicalize_ref_rename(
+                    ref, ref_name, new_ref_name, schema, context, scls))
 
         # Record the fact that RenameObject._canonicalize
         # was called on this object to guard against possible
@@ -3056,7 +3071,7 @@ class AlterObjectProperty(Command):
         parent_cls = parent_op.get_schema_metaclass()
         has_shadow = parent_cls.has_field(f'orig_{field.name}')
 
-        if context.descriptive_mode:
+        if context.descriptive_mode and self.new_value.origtext is not None:
             # When generating AST for DESCRIBE AS TEXT, we want
             # to use the original user-specified and unmangled
             # expression to render the object definition.

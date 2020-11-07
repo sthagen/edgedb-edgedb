@@ -31,10 +31,8 @@ import asyncpg
 import immutables
 
 from edb import errors
-from edb import _edgeql_rust
 
 from edb.server import defines
-from edb.server import tokenizer
 from edb.pgsql import compiler as pg_compiler
 
 from edb import edgeql
@@ -103,8 +101,10 @@ class CompileContext:
     json_parameters: bool = False
     schema_reflection_mode: bool = False
     implicit_limit: int = 0
+    inline_typeids: bool = False
+    inline_typenames: bool = False
     schema_object_ids: Optional[Mapping[str, uuid.UUID]] = None
-    first_extracted_var: Optional[int] = None
+    source: Optional[edgeql.Source] = None
     backend_instance_params: BackendInstanceParams = BackendInstanceParams()
     compat_ver: Optional[verutils.Version] = None
     bootstrap_mode: bool = False
@@ -201,8 +201,10 @@ def new_compiler_context(
 
 
 async def load_cached_schema(backend_conn, key) -> s_schema.Schema:
-    data = await backend_conn.fetchval(
-        f'SELECT edgedbinstdata.__syscache_{key}();')
+    data = await backend_conn.fetchval(f'''\
+        SELECT bin FROM edgedbinstdata.instdata
+        WHERE key = {pg_common.quote_literal(key)};
+    ''')
     try:
         return pickle.loads(data)
     except Exception as e:
@@ -215,14 +217,17 @@ async def load_std_schema(backend_conn) -> s_schema.Schema:
 
 
 async def load_schema_intro_query(backend_conn) -> str:
-    return json.loads(await backend_conn.fetchval(
-        'SELECT edgedbinstdata.__syscache_introquery();'))
+    return await backend_conn.fetchval(f'''\
+        SELECT text FROM edgedbinstdata.instdata
+        WHERE key = 'introquery';
+    ''')
 
 
 async def load_schema_class_layout(backend_conn) -> s_schema.Schema:
-    data = await backend_conn.fetchval(
-        'SELECT edgedbinstdata.__syscache_classlayout();',
-    )
+    data = await backend_conn.fetchval(f'''\
+        SELECT bin FROM edgedbinstdata.instdata
+        WHERE key = 'classlayout';
+    ''')
     try:
         return pickle.loads(data)
     except Exception as e:
@@ -534,8 +539,8 @@ class Compiler(BaseCompiler):
         eql: str,
     ) -> Tuple[str, Dict[str, int]]:
 
-        tokens = _edgeql_rust.tokenize(eql)
-        units = self._compile(ctx=ctx, tokens=tokens)
+        source = edgeql.Source.from_string(eql)
+        units = self._compile(ctx=ctx, source=source)
 
         sql_stmts = []
         for u in units:
@@ -578,7 +583,7 @@ class Compiler(BaseCompiler):
 
         single_stmt_mode = ctx.stmt_mode is enums.CompileStatementMode.SINGLE
 
-        implicit_fields = (
+        can_have_implicit_fields = (
             native_out_format and
             single_stmt_mode
         )
@@ -598,8 +603,13 @@ class Compiler(BaseCompiler):
             schema=current_tx.get_schema(),
             options=qlcompiler.CompilerOptions(
                 modaliases=current_tx.get_modaliases(),
-                implicit_tid_in_shapes=implicit_fields,
-                implicit_id_in_shapes=implicit_fields,
+                implicit_tid_in_shapes=(
+                    can_have_implicit_fields and ctx.inline_typeids
+                ),
+                implicit_tname_in_shapes=(
+                    can_have_implicit_fields and ctx.inline_typenames
+                ),
+                implicit_id_in_shapes=can_have_implicit_fields,
                 constant_folding=not disable_constant_folding,
                 json_parameters=ctx.json_parameters,
                 implicit_limit=ctx.implicit_limit,
@@ -634,7 +644,8 @@ class Compiler(BaseCompiler):
             if native_out_format:
                 out_type_data, out_type_id = sertypes.TypeSerializer.describe(
                     ir.schema, ir.stype,
-                    ir.view_shapes, ir.view_shapes_metadata)
+                    ir.view_shapes, ir.view_shapes_metadata,
+                    inline_typenames=ctx.inline_typenames)
             else:
                 out_type_data, out_type_id = \
                     sertypes.TypeSerializer.describe_json()
@@ -644,8 +655,13 @@ class Compiler(BaseCompiler):
             if ir.params:
                 first_param = next(iter(ir.params))
                 named = not first_param.name.isdecimal()
-                if ctx.first_extracted_var is not None:
-                    user_params = ctx.first_extracted_var
+                if (src := ctx.source) is not None:
+                    first_extracted = src.first_extra()
+                else:
+                    first_extracted = None
+
+                if first_extracted is not None:
+                    user_params = first_extracted
                 else:
                     user_params = len(ir.params)
 
@@ -655,8 +671,7 @@ class Compiler(BaseCompiler):
                     sql_param = argmap[param.name]
 
                     idx = sql_param.index - 1
-                    if(ctx.first_extracted_var is not None and
-                            idx >= ctx.first_extracted_var):
+                    if first_extracted is not None and idx >= first_extracted:
                         continue
 
                     array_tid = None
@@ -833,6 +848,10 @@ class Compiler(BaseCompiler):
                 mstate.target_schema,
                 guidance=mstate.guidance,
             )
+            if debug.flags.delta_plan:
+                debug.header('Populate Migration Diff')
+                debug.dump(diff, schema=schema)
+
             new_ddl = s_ddl.ddlast_from_delta(mstate.target_schema, diff)
             all_ddl = mstate.current_ddl + new_ddl
             if not mstate.current_ddl:
@@ -1051,8 +1070,8 @@ class Compiler(BaseCompiler):
                 last_migration_ref = None
 
             create_migration = qlast.CreateMigration(
+                body=qlast.MigrationBody(commands=mstate.current_ddl),
                 parent=last_migration_ref,
-                commands=mstate.current_ddl,
                 auto_diff=mstate.auto_diff,
             )
 
@@ -1394,7 +1413,7 @@ class Compiler(BaseCompiler):
         self,
         *,
         ctx: CompileContext,
-        tokens: List[_edgeql_rust.Token],
+        source: edgeql.Source,
     ) -> List[dbstate.QueryUnit]:
 
         # When True it means that we're compiling for "connection.query()".
@@ -1403,7 +1422,7 @@ class Compiler(BaseCompiler):
         single_stmt_mode = ctx.stmt_mode is enums.CompileStatementMode.SINGLE
         default_cardinality = enums.ResultCardinality.NO_RESULT
 
-        statements = edgeql.parse_block_tokens(tokens)
+        statements = edgeql.parse_block(source)
         statements_len = len(statements)
 
         if ctx.stmt_mode is enums.CompileStatementMode.SKIP_FIRST:
@@ -1593,6 +1612,7 @@ class Compiler(BaseCompiler):
     async def _ctx_new_con_state(
         self,
         *,
+        source: Optional[edgeql.Source] = None,
         dbver: bytes,
         io_format: enums.IoFormat,
         expect_one: bool,
@@ -1601,10 +1621,11 @@ class Compiler(BaseCompiler):
         stmt_mode: Optional[enums.CompileStatementMode],
         capability: enums.Capability,
         implicit_limit: int=0,
+        inline_typeids: bool=False,
+        inline_typenames: bool=False,
         json_parameters: bool=False,
         schema: Optional[s_schema.Schema] = None,
         schema_object_ids: Optional[Mapping[str, uuid.UUID]] = None,
-        first_extracted_var: Optional[int] = None,
         compat_ver: Optional[verutils.Version] = None,
     ) -> CompileContext:
 
@@ -1639,21 +1660,29 @@ class Compiler(BaseCompiler):
             output_format=io_format,
             expected_cardinality_one=expect_one,
             implicit_limit=implicit_limit,
+            inline_typeids=inline_typeids,
+            inline_typenames=inline_typenames,
             stmt_mode=stmt_mode,
             json_parameters=json_parameters,
             schema_object_ids=schema_object_ids,
             compat_ver=compat_ver,
-            first_extracted_var=first_extracted_var,
+            source=source,
         )
 
         return ctx
 
-    async def _ctx_from_con_state(self, *, txid: int,
-                                  io_format: enums.IoFormat,
-                                  expect_one: bool,
-                                  implicit_limit: int,
-                                  stmt_mode: enums.CompileStatementMode,
-                                  first_extracted_var: Optional[int]=None):
+    async def _ctx_from_con_state(
+        self,
+        *,
+        source: edgeql.Source,
+        txid: int,
+        io_format: enums.IoFormat,
+        expect_one: bool,
+        implicit_limit: int,
+        inline_typeids: bool,
+        inline_typenames: bool,
+        stmt_mode: enums.CompileStatementMode,
+    ):
         state = self._load_state(txid)
 
         ctx = CompileContext(
@@ -1661,8 +1690,11 @@ class Compiler(BaseCompiler):
             output_format=io_format,
             expected_cardinality_one=expect_one,
             implicit_limit=implicit_limit,
+            inline_typeids=inline_typeids,
+            inline_typenames=inline_typenames,
             stmt_mode=stmt_mode,
-            first_extracted_var=first_extracted_var)
+            source=source,
+        )
 
         return ctx
 
@@ -1726,6 +1758,7 @@ class Compiler(BaseCompiler):
             io_format=enums.IoFormat.BINARY,
             expect_one=False,
             implicit_limit=implicit_limit,
+            inline_typenames=True,
             modaliases=DEFAULT_MODULE_ALIASES_MAP,
             session_config=EMPTY_MAP,
             stmt_mode=enums.CompileStatementMode.SINGLE,
@@ -1744,17 +1777,21 @@ class Compiler(BaseCompiler):
         ] = []
 
         for query in queries:
-            ctx = await self._ctx_from_con_state(
-                txid=txid,
-                io_format=enums.IoFormat.BINARY,
-                expect_one=False,
-                implicit_limit=implicit_limit,
-                stmt_mode=enums.CompileStatementMode.SINGLE)
-
             try:
-                tokens = tokenizer.tokenize(query)
+                source = edgeql.Source.from_string(query)
+                ctx = await self._ctx_from_con_state(
+                    source=source,
+                    txid=txid,
+                    io_format=enums.IoFormat.BINARY,
+                    expect_one=False,
+                    implicit_limit=implicit_limit,
+                    inline_typeids=False,
+                    inline_typenames=True,
+                    stmt_mode=enums.CompileStatementMode.SINGLE,
+                )
+
                 result.append(
-                    (False, self._compile(ctx=ctx, tokens=tokens)[0]))
+                    (False, self._compile(ctx=ctx, source=source)[0]))
             except Exception as ex:
                 fields = {}
                 typename = 'Error'
@@ -1770,55 +1807,63 @@ class Compiler(BaseCompiler):
 
         return result
 
-    async def compile_eql_tokens(
+    async def compile(
         self,
         dbver: bytes,
-        eql_tokens: List[_edgeql_rust.Token],
+        source: edgeql.Source,
         sess_modaliases: Optional[immutables.Map],
         sess_config: Optional[immutables.Map],
         io_format: enums.IoFormat,
         expect_one: bool,
         implicit_limit: int,
+        inline_typeids: bool,
+        inline_typenames: bool,
         stmt_mode: enums.CompileStatementMode,
         capability: enums.Capability,
-        first_extracted_var: Optional[int]=None,
         json_parameters: bool=False,
     ) -> List[dbstate.QueryUnit]:
 
         ctx = await self._ctx_new_con_state(
+            source=source,
             dbver=dbver,
             io_format=io_format,
             expect_one=expect_one,
             implicit_limit=implicit_limit,
+            inline_typeids=inline_typeids,
+            inline_typenames=inline_typenames,
             modaliases=sess_modaliases,
             session_config=sess_config,
             stmt_mode=enums.CompileStatementMode(stmt_mode),
             capability=capability,
             json_parameters=json_parameters,
-            first_extracted_var=first_extracted_var)
+        )
 
-        return self._compile(ctx=ctx, tokens=eql_tokens)
+        return self._compile(ctx=ctx, source=source)
 
-    async def compile_eql_tokens_in_tx(
+    async def compile_in_tx(
         self,
         txid: int,
-        eql_tokens: List[_edgeql_rust.Token],
+        source: edgeql.Source,
         io_format: enums.IoFormat,
         expect_one: bool,
         implicit_limit: int,
+        inline_typeids: bool,
+        inline_typenames: bool,
         stmt_mode: enums.CompileStatementMode,
-        first_extracted_var: Optional[int]=None,
     ) -> List[dbstate.QueryUnit]:
 
         ctx = await self._ctx_from_con_state(
+            source=source,
             txid=txid,
             io_format=io_format,
             expect_one=expect_one,
             implicit_limit=implicit_limit,
+            inline_typeids=inline_typeids,
+            inline_typenames=inline_typenames,
             stmt_mode=enums.CompileStatementMode(stmt_mode),
-            first_extracted_var=first_extracted_var)
+        )
 
-        return self._compile(ctx=ctx, tokens=eql_tokens)
+        return self._compile(ctx=ctx, source=source)
 
     async def interpret_backend_error(self, dbver, fields):
         db = await self._get_database(dbver)
@@ -2055,10 +2100,8 @@ class Compiler(BaseCompiler):
         )
         ctx.state.start_tx()
 
-        units = self._compile(
-            ctx=ctx,
-            tokens=tokenizer.tokenize(schema_ddl),
-        )
+        ddl_source = edgeql.Source.from_string(schema_ddl.decode('utf-8'))
+        units = self._compile(ctx=ctx, source=ddl_source)
         schema = ctx.state.current_tx().get_schema()
 
         restore_blocks = []

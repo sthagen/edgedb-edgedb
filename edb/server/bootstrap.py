@@ -33,6 +33,7 @@ import psutil
 from edb import errors
 
 from edb import edgeql
+from edb.edgeql import ast as qlast
 
 from edb.common import context as parser_context
 from edb.common import debug
@@ -53,12 +54,12 @@ from edb.server import buildmeta
 from edb.server import config
 from edb.server import compiler as edbcompiler
 from edb.server import defines as edbdef
-from edb.server import tokenizer  # type: ignore
 
 from edb.pgsql import common as pg_common
 from edb.pgsql import dbops
 from edb.pgsql import delta as delta_cmds
 from edb.pgsql import metaschema
+from edb.pgsql.common import quote_ident as qi
 
 from edgedb import scram
 
@@ -100,6 +101,7 @@ async def _execute_edgeql_ddl(
     context = sd.CommandContext(stdmode=stdmode)
 
     for ddl_cmd in edgeql.parse_block(ddltext):
+        assert isinstance(ddl_cmd, qlast.DDLCommand)
         delta_command = s_ddl.delta_from_ddl(
             ddl_cmd, modaliases={}, schema=schema, stdmode=stdmode)
 
@@ -235,11 +237,31 @@ async def _ensure_edgedb_template_database(cluster, conn):
 async def _store_static_bin_cache(cluster, key: str, data: bytes) -> None:
 
     text = f"""\
-        CREATE OR REPLACE FUNCTION edgedbinstdata.__syscache_{key} ()
-        RETURNS bytea
-        AS $$
-            SELECT {pg_common.quote_bytea_literal(data)};
-        $$ LANGUAGE SQL IMMUTABLE;
+        INSERT INTO edgedbinstdata.instdata (key, bin)
+        VALUES(
+            {pg_common.quote_literal(key)},
+            {pg_common.quote_bytea_literal(data)}::bytea
+        )
+    """
+
+    dbconn = await cluster.connect(
+        database=edbdef.EDGEDB_TEMPLATE_DB,
+    )
+
+    try:
+        await _execute(dbconn, text)
+    finally:
+        await dbconn.close()
+
+
+async def _store_static_text_cache(cluster, key: str, data: str) -> None:
+
+    text = f"""\
+        INSERT INTO edgedbinstdata.instdata (key, text)
+        VALUES(
+            {pg_common.quote_literal(key)},
+            {pg_common.quote_literal(data)}::text
+        )
     """
 
     dbconn = await cluster.connect(
@@ -255,11 +277,11 @@ async def _store_static_bin_cache(cluster, key: str, data: bytes) -> None:
 async def _store_static_json_cache(cluster, key: str, data: str) -> None:
 
     text = f"""\
-        CREATE OR REPLACE FUNCTION edgedbinstdata.__syscache_{key} ()
-        RETURNS jsonb
-        AS $$
-            SELECT {pg_common.quote_literal(data)}::jsonb;
-        $$ LANGUAGE SQL IMMUTABLE;
+        INSERT INTO edgedbinstdata.instdata (key, json)
+        VALUES(
+            {pg_common.quote_literal(key)},
+            {pg_common.quote_literal(data)}::jsonb
+        )
     """
 
     dbconn = await cluster.connect(
@@ -359,6 +381,7 @@ async def _make_stdlib(testmode: bool, global_ids) -> StdlibBits:
     std_plans: List[sd.Command] = []
 
     for ddl_cmd in edgeql.parse_block(ddl_text):
+        assert isinstance(ddl_cmd, qlast.DDLCommand)
         delta_command = s_ddl.delta_from_ddl(
             ddl_cmd, modaliases={}, schema=schema, stdmode=True)
 
@@ -437,8 +460,8 @@ async def _make_stdlib(testmode: bool, global_ids) -> StdlibBits:
     sql_introparts = []
 
     for intropart in introparts:
-        introtokens = tokenizer.tokenize(intropart.encode())
-        units = compiler._compile(ctx=compilerctx, tokens=introtokens)
+        intro_source = edgeql.Source.from_string(intropart)
+        units = compiler._compile(ctx=compilerctx, source=intro_source)
         assert len(units) == 1 and len(units[0].sql) == 1
         sql_intropart = units[0].sql[0].decode()
         sql_introparts.append(sql_intropart)
@@ -469,6 +492,7 @@ async def _amend_stdlib(
     context.stdmode = True
 
     for ddl_cmd in edgeql.parse_block(ddl_text):
+        assert isinstance(ddl_cmd, qlast.DDLCommand)
         delta_command = s_ddl.delta_from_ddl(
             ddl_cmd, modaliases={}, schema=schema, stdmode=True)
 
@@ -662,10 +686,10 @@ async def _init_stdlib(cluster, conn, testmode, global_ids):
         pickle.dumps(stdlib.classlayout, protocol=pickle.HIGHEST_PROTOCOL),
     )
 
-    await _store_static_json_cache(
+    await _store_static_text_cache(
         cluster,
         'introquery',
-        json.dumps(stdlib.introquery),
+        stdlib.introquery,
     )
 
     await metaschema.generate_support_views(cluster, conn, stdlib.reflschema)
@@ -782,7 +806,7 @@ async def _configure(
 
         for setting, value in settings.items():
             scripts.append(f'''
-                CONFIGURE SYSTEM SET {setting} := {value};
+                CONFIGURE SYSTEM SET {setting} := {value.value};
             ''')
     else:
         settings = {}
@@ -881,6 +905,33 @@ async def _populate_misc_instance_data(cluster, conn):
     commands = dbops.CommandGroup()
     commands.add_commands([
         dbops.CreateSchema(name='edgedbinstdata'),
+        dbops.CreateTable(dbops.Table(
+            name=('edgedbinstdata', 'instdata'),
+            columns=[
+                dbops.Column(
+                    name='key',
+                    type='text',
+                ),
+                dbops.Column(
+                    name='bin',
+                    type='bytea',
+                ),
+                dbops.Column(
+                    name='text',
+                    type='text',
+                ),
+                dbops.Column(
+                    name='json',
+                    type='jsonb',
+                ),
+            ],
+            constraints=[
+                dbops.PrimaryKey(
+                    table_name=('edgedbinstdata', 'instdata'),
+                    columns=['key'],
+                ),
+            ],
+        ))
     ])
 
     block = dbops.PLTopBlock()
@@ -955,7 +1006,7 @@ def _pg_log_listener(conn, msg):
 async def _get_instance_data(conn: Any) -> Dict[str, Any]:
 
     data = await conn.fetchval(
-        'SELECT edgedbinstdata.__syscache_instancedata()'
+        "SELECT json FROM edgedbinstdata.instdata WHERE key = 'instancedata'"
     )
 
     return json.loads(data)
@@ -1040,7 +1091,7 @@ async def _bootstrap(
 
     await _execute(
         pgconn,
-        f'SET ROLE {edbdef.EDGEDB_SUPERUSER};',
+        f'SET ROLE {qi(edbdef.EDGEDB_SUPERUSER)};',
     )
     cluster.set_default_session_authorization(edbdef.EDGEDB_SUPERUSER)
 
@@ -1094,26 +1145,27 @@ async def _bootstrap(
         cluster=cluster,
         objid=superuser_db.id,
     )
+    if args['default_database_user']:
+        await _ensure_edgedb_role(
+            cluster,
+            pgconn,
+            args['default_database_user'],
+            membership=membership,
+            is_superuser=True,
+        )
 
-    await _ensure_edgedb_role(
-        cluster,
-        pgconn,
-        args['default_database_user'],
-        membership=membership,
-        is_superuser=True,
-    )
+        await _execute(
+            pgconn,
+            f"SET ROLE {qi(args['default_database_user'])};",
+        )
 
-    await _execute(
-        pgconn,
-        f"SET ROLE {args['default_database_user']};",
-    )
-
-    await _ensure_edgedb_database(
-        pgconn,
-        args['default_database'],
-        args['default_database_user'],
-        cluster=cluster,
-    )
+    if args['default_database']:
+        await _ensure_edgedb_database(
+            pgconn,
+            args['default_database'],
+            args['default_database_user'] or edbdef.EDGEDB_SUPERUSER,
+            cluster=cluster,
+        )
 
 
 async def ensure_bootstrapped(

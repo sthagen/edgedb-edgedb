@@ -697,8 +697,14 @@ class Migration:
     __abstract_node__ = True
 
 
+class MigrationBody(DDL):
+
+    commands: typing.List[DDLOperation]
+
+
 class CreateMigration(CreateObject, Migration):
 
+    body: MigrationBody
     parent: typing.Optional[ObjectRef] = None
     message: typing.Optional[str] = None
     # XXX: due to unresolved issues in DDL IR decompilation
@@ -745,7 +751,8 @@ class Database:
 
 
 class CreateDatabase(CreateObject, Database):
-    pass
+
+    template: typing.Optional[ObjectRef] = None
 
 
 class AlterDatabase(AlterObject, Database):

@@ -32,6 +32,7 @@ import math
 import os
 import pathlib
 import pprint
+import random
 import re
 import subprocess
 import sys
@@ -46,9 +47,12 @@ import click.testing
 import edgedb
 
 from edb import cli
+
+from edb.edgeql import quote as qlquote
 from edb.server import cluster as edgedb_cluster
 from edb.server import defines as edgedb_defines
 
+from edb.common import debug
 from edb.common import taskgroup
 
 from edb.testbase import serutils
@@ -121,7 +125,7 @@ class TestCaseMeta(type(unittest.TestCase)):
                     if (
                         try_no == 3
                         # Only do a retry loop when we have a transaction
-                        or not getattr(self, 'ISOLATED_METHODS', False)
+                        or not getattr(self, 'TRANSACTION_ISOLATION', False)
                     ):
                         raise
                     else:
@@ -159,6 +163,7 @@ class TestCaseMeta(type(unittest.TestCase)):
 
 
 class TestCase(unittest.TestCase, metaclass=TestCaseMeta):
+
     @classmethod
     def setUpClass(cls):
         loop = asyncio.new_event_loop()
@@ -185,8 +190,7 @@ class TestCase(unittest.TestCase, metaclass=TestCaseMeta):
             raise
 
     @contextlib.contextmanager
-    def assertRaisesRegex(self, exception, regex, msg=None,
-                          **kwargs):
+    def assertRaisesRegex(self, exception, regex, msg=None, **kwargs):
         with super().assertRaisesRegex(exception, regex, msg=msg):
             try:
                 yield
@@ -200,6 +204,29 @@ class TestCase(unittest.TestCase, metaclass=TestCaseMeta):
                                 f'{attr_name!r} is {val} (expected '
                                 f'{expected_val!r})') from e
                 raise
+
+    def __getstate__(self):
+        # TestCases get pickled when run in in separate OS processes
+        # via `edb test -jN`. If they reference any unpickleable objects,
+        # the test engine crashes with no indication why and on what test.
+        # That said, most of the TestCases' guts are not needed for the
+        # test results renderer, so we only keep the essential attributes
+        # here.
+
+        outcome = self._outcome
+        if outcome is not None and outcome.errors:
+            # We don't use `test._outcome` to render errors in
+            # our renderers.
+            outcome.errors = []
+
+        return {
+            '_testMethodName': self._testMethodName,
+            '_outcome': outcome,
+            '_testMethodDoc': self._testMethodDoc,
+            '_subtest': self._subtest,
+            '_cleanups': [],
+            '_type_equality_funcs': self._type_equality_funcs,
+        }
 
 
 _default_cluster = None
@@ -368,14 +395,26 @@ class ConnectedTestCaseMixin:
             # The expected result is the same
             exp_result_binary = exp_result_json
 
+        typenames = random.choice([True, False])
+        typeids = random.choice([True, False])
+
         try:
-            res = await self.con.query(query, *fetch_args, **fetch_kw)
+            res = await self.con._fetchall(
+                query,
+                *fetch_args,
+                __typenames__=typenames,
+                __typeids__=typeids,
+                **fetch_kw
+            )
             res = serutils.serialize(res)
             if sort is not None:
                 self._sort_results(res, sort)
             self._assert_data_shape(res, exp_result_binary, message=msg)
         except Exception:
-            self.add_fail_notes(serialization='binary')
+            self.add_fail_notes(
+                serialization='binary',
+                __typenames__=typenames,
+                __typeids__=typeids)
             raise
 
     def _sort_results(self, results, sort):
@@ -635,6 +674,7 @@ class ConnectedTestCase(ClusterTestCase, ConnectedTestCaseMixin):
 
 
 class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
+
     SETUP = None
     TEARDOWN = None
     SCHEMA = None
@@ -643,8 +683,23 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
     TEARDOWN_METHOD = None
 
     # Some tests may want to manage transactions manually,
-    # in which case ISOLATED_METHODS will be False.
-    ISOLATED_METHODS = True
+    # or affect non-transactional state, in which case
+    # TRANSACTION_ISOLATION must be set to False
+    TRANSACTION_ISOLATION = True
+
+    # By default, tests from the same testsuite may be ran
+    # in parallel in several test worker processes.  However,
+    # certain cases might exhibit pathological locking behavior,
+    # or are parallel-unsafe altogether, in which case
+    # PARALLELISM_GRANULARITY must be set to 'database' or 'system'.
+    # The 'database' granularity signals that no two runners may
+    # execute tests on the same database in parallel, although the
+    # tests may still run on copies of the test database.
+    # The 'system' granularity means that the test suite is not
+    # parallelizable at all and must run sequentially in the same
+    # worker process.
+    PARALLELISM_GRANULARITY = 'default'
+
     # Turns on "EdgeDB developer" mode which allows using restricted
     # syntax like USING SQL and similar. It allows modifying standard
     # library (e.g. declaring casts).
@@ -658,7 +713,7 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
                 self.con.execute(
                     'CONFIGURE SESSION SET __internal_testmode := true;'))
 
-        if self.ISOLATED_METHODS:
+        if self.TRANSACTION_ISOLATION:
             self.xact = self.con.transaction()
             self.loop.run_until_complete(self.xact.start())
 
@@ -675,7 +730,7 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
                     self.con.execute(self.TEARDOWN_METHOD))
         finally:
             try:
-                if self.ISOLATED_METHODS:
+                if self.TRANSACTION_ISOLATION:
                     self.loop.run_until_complete(self.xact.rollback())
                     del self.xact
 
@@ -686,7 +741,7 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
                         'test connection is still in transaction '
                         '*after* the test')
 
-                if not self.ISOLATED_METHODS:
+                if not self.TRANSACTION_ISOLATION:
                     self.loop.run_until_complete(
                         self.con.execute('RESET ALIAS *;'))
 
@@ -709,12 +764,99 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
             cls.admin_conn = cls.loop.run_until_complete(cls.connect())
             cls.loop.run_until_complete(cls.admin_conn.execute(script))
 
+        elif cls.uses_database_copies():
+            cls.admin_conn = cls.loop.run_until_complete(cls.connect())
+
+            orig_testmode = cls.loop.run_until_complete(
+                cls.admin_conn.query(
+                    'SELECT cfg::Config.__internal_testmode',
+                ),
+            )
+            if not orig_testmode:
+                orig_testmode = False
+            else:
+                orig_testmode = orig_testmode[0]
+
+            if not orig_testmode:
+                cls.loop.run_until_complete(
+                    cls.admin_conn.execute(
+                        'CONFIGURE SESSION SET __internal_testmode := true;',
+                    ),
+                )
+
+            base_db_name, _, _ = dbname.rpartition('_')
+            cls.loop.run_until_complete(
+                cls.admin_conn.execute(
+                    f'''
+                        CREATE DATABASE {qlquote.quote_ident(dbname)}
+                        FROM {qlquote.quote_ident(base_db_name)}
+                    ''',
+                ),
+            )
+
+            if not orig_testmode:
+                cls.loop.run_until_complete(
+                    cls.admin_conn.execute(
+                        'CONFIGURE SESSION SET __internal_testmode := false;',
+                    ),
+                )
+
         cls.con = cls.loop.run_until_complete(cls.connect(database=dbname))
 
         if not class_set_up:
             script = cls.get_setup_script()
             if script:
                 cls.loop.run_until_complete(cls.con.execute(script))
+
+    @classmethod
+    def tearDownClass(cls):
+        script = ''
+
+        class_set_up = os.environ.get('EDGEDB_TEST_CASES_SET_UP')
+
+        if cls.TEARDOWN and not class_set_up:
+            script = cls.TEARDOWN.strip()
+
+        try:
+            if script:
+                cls.loop.run_until_complete(
+                    cls.con.execute(script))
+        finally:
+            try:
+                cls.loop.run_until_complete(cls.con.aclose())
+
+                if not class_set_up or cls.uses_database_copies():
+                    dbname = cls.get_database_name()
+                    script = f'DROP DATABASE {dbname};'
+
+                    cls.loop.run_until_complete(
+                        cls.admin_conn.execute(script))
+
+            finally:
+                try:
+                    if cls.admin_conn is not None:
+                        cls.loop.run_until_complete(
+                            cls.admin_conn.aclose())
+                finally:
+                    super().tearDownClass()
+
+    @classmethod
+    def get_parallelism_granularity(cls):
+        if cls.PARALLELISM_GRANULARITY == 'default':
+            if cls.TRANSACTION_ISOLATION:
+                return 'default'
+            else:
+                return 'database'
+        else:
+            return cls.PARALLELISM_GRANULARITY
+
+    @classmethod
+    def uses_database_copies(cls):
+        return (
+            os.environ.get('EDGEDB_TEST_PARALLEL')
+            and cls.get_parallelism_granularity() == 'database'
+            and debug.flags.parallelize_tests_better
+        )
 
     @classmethod
     def get_database_name(cls):
@@ -725,7 +867,10 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
         else:
             dbname = cls.__name__
 
-        return dbname.lower()
+        if cls.uses_database_copies():
+            return f'{dbname.lower()}_{os.getpid()}'
+        else:
+            return dbname.lower()
 
     @classmethod
     def get_setup_script(cls):
@@ -776,38 +921,6 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
             script += '\nCONFIGURE SESSION SET __internal_testmode := false;'
 
         return script.strip(' \n')
-
-    @classmethod
-    def tearDownClass(cls):
-        script = ''
-
-        class_set_up = os.environ.get('EDGEDB_TEST_CASES_SET_UP')
-
-        if cls.TEARDOWN and not class_set_up:
-            script = cls.TEARDOWN.strip()
-
-        try:
-            if script:
-                cls.loop.run_until_complete(
-                    cls.con.execute(script))
-        finally:
-            try:
-                cls.loop.run_until_complete(cls.con.aclose())
-
-                if not class_set_up:
-                    dbname = cls.get_database_name()
-                    script = f'DROP DATABASE {dbname};'
-
-                    cls.loop.run_until_complete(
-                        cls.admin_conn.execute(script))
-
-            finally:
-                try:
-                    if cls.admin_conn is not None:
-                        cls.loop.run_until_complete(
-                            cls.admin_conn.aclose())
-                finally:
-                    super().tearDownClass()
 
     @contextlib.asynccontextmanager
     async def assertRaisesRegexTx(self, exception, regex, msg=None, **kwargs):
@@ -877,12 +990,7 @@ class BaseQueryTestCase(DatabaseTestCase):
 class DDLTestCase(BaseQueryTestCase):
     # DDL test cases generally need to be serialized
     # to avoid deadlocks in parallel execution.
-    SERIALIZED = True
-
-
-class NonIsolatedDDLTestCase(DDLTestCase):
-    ISOLATED_METHODS = False
-
+    PARALLELISM_GRANULARITY = 'database'
     BASE_TEST_CLASS = True
 
 
@@ -962,6 +1070,7 @@ class StableDumpTestCase(QueryTestCase, CLITestCaseMixin):
     BASE_TEST_CLASS = True
     ISOLATED_METHODS = False
     STABLE_DUMP = True
+    TRANSACTION_ISOLATION = False
 
     async def check_dump_restore(self, check_method):
         dbname = self.get_database_name()

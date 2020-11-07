@@ -1011,6 +1011,12 @@ class AlterAnnotationValue(
     pass
 
 
+class RenameAnnotationValue(
+        AnnotationValueCommand, RenameObject,
+        adapts=s_anno.RenameAnnotationValue):
+    pass
+
+
 class RebaseAnnotationValue(
     AnnotationValueCommand,
     RebaseObject,
@@ -1324,23 +1330,14 @@ class RenameScalarType(ScalarTypeMetaCommand,
         ctx = context.get(s_scalars.ScalarTypeCommandContext)
         orig_schema = ctx.original_schema
 
-        domain_name = common.get_backend_name(
-            orig_schema, scls, catenate=False)
-
-        new_domain_name = common.get_backend_name(
-            schema, scls, catenate=False)
+        name = common.get_backend_name(orig_schema, scls, catenate=False)
+        new_name = common.get_backend_name(schema, scls, catenate=False)
 
         if scls.is_enum(schema):
-            enum_name = common.get_backend_name(
-                orig_schema, scls, catenate=False, aspect='enum')
-            new_enum_name = common.get_backend_name(
-                schema, scls, catenate=False, aspect='enum')
-            self.pgops.add(
-                dbops.RenameEnum(name=enum_name, new_name=new_enum_name))
+            self.pgops.add(dbops.RenameEnum(name=name, new_name=new_name))
 
         else:
-            self.pgops.add(
-                dbops.RenameDomain(name=domain_name, new_name=new_domain_name))
+            self.pgops.add(dbops.RenameDomain(name=name, new_name=new_name))
 
         if self.is_sequence(schema, scls):
             seq_name = common.get_backend_name(
@@ -2655,6 +2652,10 @@ class DeleteLink(LinkMetaCommand, adapts=s_links.DeleteLink):
             self.attach_alter_table(context)
 
         self.pgops.add(
+            self.drop_inhview(orig_schema, context, link, drop_ancestors=True)
+        )
+
+        self.pgops.add(
             dbops.DropTable(
                 name=old_table_name,
                 priority=1,
@@ -3764,6 +3765,7 @@ class CreateDatabase(ObjectMetaCommand, adapts=s_db.CreateDatabase):
                         id=str(db.id),
                         builtin=db.get_builtin(schema),
                     ),
+                    template=self.template,
                 )
             )
         )

@@ -1,7 +1,7 @@
 #
 # This source file is part of the EdgeDB open source project.
 #
-# Copyright 2019-present MagicStack Inc. and the EdgeDB authors.
+# Copyright 2016-present MagicStack Inc. and the EdgeDB authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,20 +16,7 @@
 # limitations under the License.
 #
 
+from __future__ import annotations
+from typing import *
 
-cpdef tuple MIN_PROTOCOL = (0, 7)
-cpdef tuple CURRENT_PROTOCOL = (0, 9)
-
-DEF DUMP_BLOCK_SIZE = 1024 * 1024 * 10
-
-DEF DUMP_HEADER_BLOCK_TYPE = 101
-DEF DUMP_HEADER_BLOCK_TYPE_INFO = b'I'
-DEF DUMP_HEADER_BLOCK_TYPE_DATA = b'D'
-
-DEF DUMP_HEADER_SERVER_TIME = 102
-DEF DUMP_HEADER_SERVER_VER = 103
-DEF DUMP_HEADER_BLOCKS_INFO = 104
-
-DEF DUMP_HEADER_BLOCK_ID = 110
-DEF DUMP_HEADER_BLOCK_NUM = 111
-DEF DUMP_HEADER_BLOCK_DATA = 112
+from edb._edgeql_rust import Hasher  # noqa

@@ -46,6 +46,7 @@ import click
 import edgedb
 
 from edb.common import devmode
+from edb.common import debug
 from edb.testbase import server as tb
 
 from . import mproc_fixes
@@ -84,8 +85,8 @@ def init_worker(status_queue: multiprocessing.SimpleQueue,
         if server_addr is not None:
             os.environ['EDGEDB_TEST_CLUSTER_ADDR'] = json.dumps(server_addr)
 
+    os.environ['EDGEDB_TEST_PARALLEL'] = '1'
     coverage_run = devmode.CoverageConfig.start_coverage_if_requested()
-
     status_queue.put(True)
 
 
@@ -165,7 +166,14 @@ class ChannelingTestResultMeta(type):
                 error_text = self._exc_info_to_string(args[-1], args[0])
                 args[-1] = error_text
 
-            self._queue.put((meth, args, kwargs))
+            try:
+                self._queue.put((meth, args, kwargs))
+            except Exception:
+                print(
+                    f'!!! Test worker child process: '
+                    f'failed to serialize arguments for {meth}: '
+                    f'*args={args} **kwargs={kwargs} !!!')
+                raise
         return _wrapper
 
     def __new__(mcls, name, bases, dct):
@@ -622,7 +630,7 @@ class ParallelTextTestResult(unittest.result.TestResult):
             description,
             currently_running=list(self.currently_running),
         )
-        self.currently_running.pop(test)
+        self.currently_running.pop(test, None)
 
     def record_test_stats(self, test, stats):
         self.test_stats.append((test, stats))
@@ -918,10 +926,18 @@ class ParallelTextTestRunner:
         return result
 
     def _sort_tests(self, cases):
+        if debug.flags.parallelize_tests_better:
+            non_parallelizable = ('system',)
+        else:
+            non_parallelizable = ('system', 'database',)
+
         serialized_suites = {
             casecls: unittest.TestSuite(tests)
             for casecls, tests in cases.items()
-            if getattr(casecls, 'SERIALIZED', False)
+            if (
+                (gg := getattr(casecls, 'get_parallelism_granularity', None))
+                and gg() in non_parallelizable
+            )
         }
 
         tests = itertools.chain(
