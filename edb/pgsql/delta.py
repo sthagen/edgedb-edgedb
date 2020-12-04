@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+
 #
 # This source file is part of the EdgeDB open source project.
 #
@@ -65,6 +67,8 @@ from edb.ir import utils as irutils
 from edb.pgsql import common
 from edb.pgsql import dbops
 
+from edb.server import pgcluster
+
 from . import ast as pg_ast
 from .common import qname as q
 from .common import quote_literal as ql
@@ -91,7 +95,7 @@ def has_table(obj, schema):
     elif obj.generic(schema):
         return (
             not isinstance(obj, s_props.Property)
-            and obj.get_name(schema) != 'std::link'
+            and str(obj.get_name(schema)) != 'std::link'
         )
     elif obj.is_link_property(schema):
         return not obj.singular(schema)
@@ -612,7 +616,26 @@ class CreateFunction(FunctionCommand, CreateObject,
 
 class RenameFunction(
         FunctionCommand, RenameObject, adapts=s_funcs.RenameFunction):
-    pass
+    def apply(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        func = self.get_object(schema, context)
+        orig_schema = schema
+        schema = super().apply(schema, context)
+
+        variadic = func.get_params(orig_schema).find_variadic(orig_schema)
+        self.pgops.add(
+            dbops.RenameFunction(
+                name=self.get_pgname(func, orig_schema),
+                new_name=self.get_pgname(func, schema),
+                args=self.compile_args(func, schema),
+                has_variadic=variadic is not None,
+            )
+        )
+
+        return schema
 
 
 class AlterFunction(
@@ -673,11 +696,10 @@ class OperatorCommand(FunctionCommand):
     def oper_name_to_pg_name(
         self,
         schema,
-        name: sn.Name,
+        name: sn.QualName,
     ) -> Tuple[str, str]:
-        module = schema.get_global(s_mod.Module, name.module)
         return common.get_operator_backend_name(
-            name, module.id, catenate=False)
+            name, catenate=False)
 
     def get_pg_operands(self, schema, oper: s_opers.Operator):
         left_type = None
@@ -1094,8 +1116,7 @@ class RenameConstraint(
         ConstraintCommand, RenameObject,
         adapts=s_constr.RenameConstraint):
     def apply(self, schema, context):
-        delta_root_ctx = context.top()
-        orig_schema = delta_root_ctx.original_schema
+        orig_schema = schema
         schema = super().apply(schema, context)
         constraint = self.scls
         if not self.constraint_is_effective(orig_schema, constraint):
@@ -1134,8 +1155,7 @@ class AlterConstraint(
         ConstraintCommand, AlterObject,
         adapts=s_constr.AlterConstraint):
     def apply(self, schema, context):
-        delta_root_ctx = context.top()
-        orig_schema = delta_root_ctx.original_schema
+        orig_schema = schema
         schema = super().apply(schema, context)
         constraint = self.scls
         if self.metadata_only:
@@ -1590,6 +1610,11 @@ class CompositeObjectMetaCommand(ObjectMetaCommand):
         update_ancestors: Optional[bool]=None,
         update_descendants: Optional[bool]=None,
     ):
+        self.pgops.add(
+            self.drop_inhview(
+                schema, context, obj, drop_ancestors=update_ancestors)
+        )
+
         root = context.get(sd.DeltaRootContext).op
         updates = root.update_inhviews.view_updates
         update = updates.get(obj)
@@ -1724,13 +1749,13 @@ class CreateIndex(IndexCommand, CreateObject, adapts=s_indexes.CreateIndex):
             # list.
             sql_expr = sql_expr[1:-1]
 
-        module = schema.get_global(s_mod.Module, index.get_name(schema).module)
+        module_name = index.get_name(schema).module
         index_name = common.get_index_backend_name(
-            index.id, module.id, catenate=False)
+            index.id, module_name, catenate=False)
         pg_index = dbops.Index(
             name=index_name[1], table_name=table_name, expr=sql_expr,
             unique=False, inherit=True,
-            metadata={'schemaname': index.get_name(schema)})
+            metadata={'schemaname': str(index.get_name(schema))})
         self.pgops.add(dbops.CreateIndex(pg_index, priority=3))
 
         return schema
@@ -1782,10 +1807,9 @@ class DeleteIndex(IndexCommand, DeleteObject, adapts=s_indexes.DeleteIndex):
             #
             table_name = common.get_backend_name(
                 schema, source.scls, catenate=False)
-            module = schema.get_global(
-                s_mod.Module, index.get_name(orig_schema).module)
+            module_name = index.get_name(orig_schema).module
             orig_idx_name = common.get_index_backend_name(
-                index.id, module.id, catenate=False)
+                index.id, module_name, catenate=False)
             index = dbops.Index(
                 name=orig_idx_name[1], table_name=table_name, inherit=True)
             index_exists = dbops.IndexExists(
@@ -1854,7 +1878,7 @@ class CreateObjectType(ObjectTypeMetaCommand,
             self.pgops.add(self.update_search_indexes)
 
         self.pgops.add(
-            dbops.Comment(object=objtype_table, text=self.classname))
+            dbops.Comment(object=objtype_table, text=str(self.classname)))
 
         return schema
 
@@ -1881,9 +1905,6 @@ class RenameObjectType(ObjectTypeMetaCommand,
 
         obj_has_table = has_table(scls, schema)
 
-        if obj_has_table:
-            objtype.op.attach_alter_table(context)
-
         self.rename(schema, objtype.original_schema, context, scls)
 
         if obj_has_table:
@@ -1891,16 +1912,16 @@ class RenameObjectType(ObjectTypeMetaCommand,
                 schema, scls, catenate=False)
             objtype_table = dbops.Table(name=new_table_name)
             self.pgops.add(dbops.Comment(
-                object=objtype_table, text=self.new_name))
+                object=objtype_table, text=str(self.new_name)))
 
             objtype.op.table_name = new_table_name
 
             # Need to update all bits that reference objtype name
 
             old_constr_name = common.edgedb_name_to_pg_name(
-                self.classname + '.class_check')
+                str(self.classname) + '.class_check')
             new_constr_name = common.edgedb_name_to_pg_name(
-                self.new_name + '.class_check')
+                str(self.new_name) + '.class_check')
 
             alter_table = self.get_alter_table(schema, context, manual=True)
             rc = dbops.AlterTableRenameConstraintSimple(
@@ -2101,7 +2122,8 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
                     and not pointer.is_pure_computable(schema)
                 ),
                 default=default,
-                comment=pointer.get_shortname(schema))
+                comment=str(pointer.get_shortname(schema)),
+            ),
         ]
 
     def create_table(self, ptr, schema, context, conditional=False):
@@ -2131,13 +2153,15 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
 
         type_change_ok = False
 
-        if (old_target.get_name(schema) != new_target.get_name(schema) or
+        if (old_target.get_name(orig_schema) != new_target.get_name(schema) or
                 old_ptr_stor_info.table_type != new_ptr_stor_info.table_type):
 
             for op in self.get_subcommands(type=s_scalars.ScalarTypeCommand):
                 for rename in op(s_scalars.RenameScalarType):
-                    if (old_target.get_name(schema) == rename.classname and
-                            new_target.get_name(schema) == rename.new_name):
+                    if (
+                        old_target.get_name(orig_schema) == rename.classname
+                        and new_target.get_name(schema) == rename.new_name
+                    ):
                         # Our target alter is a mere rename
                         type_change_ok = True
 
@@ -2332,7 +2356,7 @@ class LinkMetaCommand(CompositeObjectMetaCommand, PointerMetaCommand):
         c.add_command(ct)
         c.add_command(ci)
 
-        c.add_command(dbops.Comment(table, link.get_name(schema)))
+        c.add_command(dbops.Comment(table, str(link.get_name(schema))))
 
         create_c.add_command(c)
 
@@ -2409,7 +2433,7 @@ class CreateLink(LinkMetaCommand, adapts=s_links.CreateLink):
 
                     if col.name == '__type__':
                         constr_name = common.edgedb_name_to_pg_name(
-                            objtype.op.classname + '.class_check')
+                            str(objtype.op.classname) + '.class_check')
 
                         constr_expr = dbops.Query(textwrap.dedent(f"""\
                             SELECT
@@ -2691,8 +2715,9 @@ class PropertyMetaCommand(CompositeObjectMetaCommand, PointerMetaCommand):
             dbops.Column(
                 name='ptr_item_id', type='uuid', required=True))
 
-        index_name = common.convert_name(
-            prop.get_name(schema), 'idx0', catenate=True)
+        id = sn.QualName(
+            module=prop.get_name(schema).module, name=str(prop.id))
+        index_name = common.convert_name(id, 'idx0', catenate=True)
 
         pg_index = dbops.Index(
             name=index_name, table_name=new_table_name,
@@ -2727,7 +2752,7 @@ class PropertyMetaCommand(CompositeObjectMetaCommand, PointerMetaCommand):
         c.add_command(ct)
         c.add_command(ci)
 
-        c.add_command(dbops.Comment(table, prop.get_name(schema)))
+        c.add_command(dbops.Comment(table, str(prop.get_name(schema))))
 
         create_c.add_command(c)
 
@@ -3571,9 +3596,10 @@ class UpdateInheritanceViews(MetaCommand):
         graph = {}
         for obj in all_updates:
             objname = obj.get_name(schema)
-            graph[objname] = dict(
+            graph[objname] = topological.DepGraphEntry(
                 item=obj,
                 deps=obj.get_bases(schema).names(schema),
+                extra=False,
             )
 
         ordered = topological.sort(graph, allow_unresolved=True)
@@ -3698,22 +3724,7 @@ class CreateModule(ModuleMetaCommand, adapts=s_mod.CreateModule):
         context: sd.CommandContext,
     ) -> s_schema.Schema:
         schema = CompositeObjectMetaCommand.apply(self, schema, context)
-        schema = s_mod.CreateModule.apply(self, schema, context)
-        module = self.scls
-
-        schema_name = common.get_backend_name(schema, module)
-        condition = dbops.SchemaExists(name=schema_name)
-
-        if self.if_not_exists:
-            cmd = dbops.CommandGroup(neg_conditions={condition})
-        else:
-            cmd = dbops.CommandGroup()
-
-        cmd.add_command(dbops.CreateSchema(name=schema_name))
-
-        self.pgops.add(cmd)
-
-        return schema
+        return s_mod.CreateModule.apply(self, schema, context)
 
 
 class AlterModule(ModuleMetaCommand, adapts=s_mod.AlterModule):
@@ -3732,21 +3743,8 @@ class DeleteModule(ModuleMetaCommand, adapts=s_mod.DeleteModule):
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
-        module = self.get_object(schema, context)
-        schema_name = common.get_backend_name(schema, module)
-
         schema = CompositeObjectMetaCommand.apply(self, schema, context)
-        schema = s_mod.DeleteModule.apply(self, schema, context)
-
-        condition = dbops.SchemaExists(name=schema_name)
-
-        cmd = dbops.CommandGroup(priority=4)
-        cmd.add_command(
-            dbops.DropSchema(
-                name=schema_name, conditions={condition}))
-        self.pgops.add(cmd)
-
-        return schema
+        return s_mod.DeleteModule.apply(self, schema, context)
 
 
 class CreateDatabase(ObjectMetaCommand, adapts=s_db.CreateDatabase):
@@ -3760,7 +3758,7 @@ class CreateDatabase(ObjectMetaCommand, adapts=s_db.CreateDatabase):
         self.pgops.add(
             dbops.CreateDatabase(
                 dbops.Database(
-                    self.classname,
+                    str(self.classname),
                     metadata=dict(
                         id=str(db.id),
                         builtin=db.get_builtin(schema),
@@ -3779,7 +3777,7 @@ class DropDatabase(ObjectMetaCommand, adapts=s_db.DropDatabase):
         context: sd.CommandContext,
     ) -> s_schema.Schema:
         schema = s_db.DropDatabase.apply(self, schema, context)
-        self.pgops.add(dbops.DropDatabase(self.classname))
+        self.pgops.add(dbops.DropDatabase(str(self.classname)))
         return schema
 
 
@@ -3797,17 +3795,38 @@ class CreateRole(ObjectMetaCommand, adapts=s_roles.CreateRole):
         passwd = role.get_password(schema)
         superuser_flag = False
 
+        members = set()
+
+        ctx_backend_params = context.backend_runtime_params
+        if ctx_backend_params is not None:
+            backend_params = cast(
+                pgcluster.BackendRuntimeParams, ctx_backend_params)
+        else:
+            backend_params = pgcluster.get_default_runtime_params()
+
+        instance_params = backend_params.instance_params
+        capabilities = instance_params.capabilities
+
         if role.get_is_superuser(schema):
-            if context.backend_superuser_role:
+            if instance_params.base_superuser:
                 # If the cluster is exposing an explicit superuser role,
                 # become a member of that instead of creating a superuser
                 # role directly.
-                membership.append(context.backend_superuser_role)
+                membership.append(instance_params.base_superuser)
             else:
-                superuser_flag = True
+                superuser_flag = (
+                    capabilities
+                    & pgcluster.BackendCapabilities.SUPERUSER_ACCESS
+                )
+
+        if backend_params.session_authorization_role is not None:
+            # When we connect to the backend via a proxy role, we
+            # must ensure that role is a member of _every_ EdgeDB
+            # role so that `SET ROLE` can work properly.
+            members.add(backend_params.session_authorization_role)
 
         role = dbops.Role(
-            name=role.get_name(schema),
+            name=str(role.get_name(schema)),
             allow_login=True,
             is_superuser=superuser_flag,
             password=passwd,
@@ -3831,7 +3850,7 @@ class AlterRole(ObjectMetaCommand, adapts=s_roles.AlterRole):
         schema = s_roles.AlterRole.apply(self, schema, context)
         role = self.scls
         schema = ObjectMetaCommand.apply(self, schema, context)
-        rolname = role.get_name(schema)
+        rolname = str(role.get_name(schema))
         kwargs = {}
         if self.has_attribute_value('password'):
             passwd = self.get_attribute_value('password')
@@ -3842,13 +3861,23 @@ class AlterRole(ObjectMetaCommand, adapts=s_roles.AlterRole):
                 builtin=role.get_builtin(schema),
             )
         if self.has_attribute_value('is_superuser'):
+            ctx_backend_params = context.backend_runtime_params
+            if ctx_backend_params is not None:
+                backend_params = cast(
+                    pgcluster.BackendRuntimeParams, ctx_backend_params)
+            else:
+                backend_params = pgcluster.get_default_runtime_params()
+
+            instance_params = backend_params.instance_params
+            capabilities = instance_params.capabilities
+
             superuser_flag = False
-            if context.backend_superuser_role:
+            if instance_params.base_superuser:
                 # If the cluster is exposing an explicit superuser role,
                 # become a member of that instead of creating a superuser
                 # role directly.
                 membership = list(role.get_bases(schema).names(schema))
-                membership.append(context.backend_superuser_role)
+                membership.append(instance_params.base_superuser)
 
                 self.pgops.add(
                     dbops.AlterRoleAddMembership(
@@ -3857,7 +3886,10 @@ class AlterRole(ObjectMetaCommand, adapts=s_roles.AlterRole):
                     )
                 )
             else:
-                superuser_flag = True
+                superuser_flag = (
+                    capabilities
+                    & pgcluster.BackendCapabilities.SUPERUSER_ACCESS
+                )
 
             kwargs['is_superuser'] = superuser_flag
 
@@ -3879,15 +3911,15 @@ class RebaseRole(ObjectMetaCommand, adapts=s_roles.RebaseRole):
 
         for dropped in self.removed_bases:
             self.pgops.add(dbops.AlterRoleDropMember(
-                name=dropped.name,
-                member=role.get_name(schema),
+                name=str(dropped.name),
+                member=str(role.get_name(schema)),
             ))
 
         for bases, _pos in self.added_bases:
             for added in bases:
                 self.pgops.add(dbops.AlterRoleAddMember(
-                    name=added.name,
-                    member=role.get_name(schema),
+                    name=str(added.name),
+                    member=str(role.get_name(schema)),
                 ))
 
         return schema
@@ -3901,7 +3933,7 @@ class DeleteRole(ObjectMetaCommand, adapts=s_roles.DeleteRole):
     ) -> s_schema.Schema:
         schema = s_roles.DeleteRole.apply(self, schema, context)
         schema = ObjectMetaCommand.apply(self, schema, context)
-        self.pgops.add(dbops.DropRole(self.classname))
+        self.pgops.add(dbops.DropRole(str(self.classname)))
         return schema
 
 

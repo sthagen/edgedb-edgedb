@@ -40,9 +40,10 @@ class Role(base.DBObject):
         password: Union[None, str, base.NotSpecifiedT] = base.NotSpecified,
         is_superuser: Union[bool, base.NotSpecifiedT] = base.NotSpecified,
         membership: Optional[Iterable[str]] = None,
+        members: Optional[Iterable[str]] = None,
         metadata: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(metadata=metadata)
         self.name = name
         self.is_superuser = is_superuser
         self.allow_login = allow_login
@@ -50,7 +51,7 @@ class Role(base.DBObject):
         self.allow_createrole = allow_createrole
         self.password = password
         self.membership = membership
-        self.metadata = metadata
+        self.members = members
 
     def get_type(self):
         return 'ROLE'
@@ -107,11 +108,16 @@ class CreateRole(ddl.CreateObject, RoleCommand):
 
     def code(self, block: base.PLBlock) -> str:
         if self.object.membership:
-            roles = ', '.join(qi(m) for m in self.object.membership)
+            roles = ', '.join(qi(str(m)) for m in self.object.membership)
             membership = f'IN ROLE {roles}'
         else:
             membership = ''
-        return f'CREATE {self._render()} {membership}'
+        if self.object.members:
+            roles = ', '.join(qi(str(m)) for m in self.object.members)
+            members = f'ROLE {roles}'
+        else:
+            members = ''
+        return f'CREATE {self._render()} {membership} {members}'
 
 
 class AlterRole(ddl.AlterObject, RoleCommand):

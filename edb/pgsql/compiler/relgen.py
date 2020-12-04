@@ -265,7 +265,7 @@ def _get_set_rvar(
         rvars = process_set_as_tuple_indirection(ir_set, stmt, ctx=ctx)
 
     elif isinstance(ir_set.expr, irast.FunctionCall):
-        if ir_set.expr.func_shortname == 'std::enumerate':
+        if str(ir_set.expr.func_shortname) == 'std::enumerate':
             if isinstance(irutils.unwrap_set(ir_set.expr.args[0].expr).expr,
                           irast.FunctionCall):
                 # Enumeration of a SET-returning function
@@ -609,7 +609,7 @@ def finalize_optional_rel(
 
 def get_set_rel_alias(ir_set: irast.Set, *,
                       ctx: context.CompilerContextLevel) -> str:
-    _, _, dname = ir_set.path_id.target_name_hint.rpartition('::')
+    dname = ir_set.path_id.target_name_hint.name
     if ir_set.rptr is not None and ir_set.rptr.source.typeref is not None:
         alias_hint = '{}_{}'.format(
             dname,
@@ -649,7 +649,7 @@ def process_set_as_link_property_ref(
         lpropref, resolve_type=False, link_bias=False)
 
     if (ptr_info.table_type == 'ObjectType' or
-            lpropref.std_parent_name == 'std::target'):
+            str(lpropref.std_parent_name) == 'std::target'):
         # This is a singleton link property stored in source rel,
         # e.g. @target
         val = pathctx.get_rvar_path_var(
@@ -1145,7 +1145,7 @@ def process_set_as_membership_expr(
         # since that has a higher chance of using the indexes.
         right_expr = right_arg.expr
         if (isinstance(right_expr, irast.FunctionCall)
-                and right_expr.func_shortname == 'std::array_unpack'):
+                and str(right_expr.func_shortname) == 'std::array_unpack'):
             is_array_unpack = True
             right_arg = right_expr.args[0].expr
         else:
@@ -1168,7 +1168,7 @@ def process_set_as_membership_expr(
                     )
                 )
 
-    negated = expr.func_shortname == 'std::NOT IN'
+    negated = str(expr.func_shortname) == 'std::NOT IN'
     sublink_type = pgast.SubLinkType.ALL if negated else pgast.SubLinkType.ANY
 
     set_expr = exprcomp.compile_operator(
@@ -1929,10 +1929,13 @@ def _process_set_func(
         colnames = list(subtypes)
     else:
         colnames = [ctx.env.aliases.get('v')]
-        coldeflist = []
 
-    if expr.sql_func_has_out_params:
-        # SQL functions declared with OUT params reject column definitions.
+    if (
+        # SQL functions declared with OUT params or returning
+        # named composite types reject column definitions.
+        irtyputils.is_persistent_tuple(rtype)
+        or expr.sql_func_has_out_params
+    ):
         coldeflist = []
 
     fexpr = pgast.FuncCall(name=func_name, args=args, coldeflist=coldeflist)
@@ -1968,7 +1971,7 @@ def _process_set_func(
         )
 
         for element in set_expr.elements:
-            pathctx.put_path_value_var(
+            pathctx.put_path_value_var_if_not_exists(
                 ctx.rel, element.path_id, element.val, env=ctx.env)
 
     return set_expr
@@ -2034,6 +2037,19 @@ def _compile_func_args(
     return args
 
 
+def get_func_call_backend_name(
+        expr: irast.FunctionCall, *,
+        ctx: context.CompilerContextLevel) -> Tuple[str, ...]:
+    if expr.func_sql_function:
+        # The name might contain a "." if it's one of our
+        # metaschema helpers.
+        func_name = tuple(expr.func_sql_function.split('.', 1))
+    else:
+        func_name = common.get_function_backend_name(
+            expr.func_shortname, expr.backend_name)
+    return func_name
+
+
 def process_set_as_func_enumerate(
         ir_set: irast.Set, stmt: pgast.SelectStmt, *,
         ctx: context.CompilerContextLevel) -> SetRVars:
@@ -2047,14 +2063,7 @@ def process_set_as_func_enumerate(
     with ctx.subrel() as newctx:
         newctx.expr_exposed = False
         args = _compile_func_args(inner_func_set, ctx=newctx)
-
-        if inner_func.func_sql_function:
-            # The name might contain a "." if it's one of our
-            # metaschema helpers.
-            func_name = tuple(inner_func.func_sql_function.split('.', 1))
-        else:
-            func_name = common.get_function_backend_name(
-                inner_func.func_shortname, inner_func.func_module_id)
+        func_name = get_func_call_backend_name(inner_func, ctx=newctx)
 
         set_expr = _process_set_func_with_ordinality(
             ir_set=inner_func_set,
@@ -2078,14 +2087,7 @@ def process_set_as_func_expr(
     with ctx.subrel() as newctx:
         newctx.expr_exposed = False
         args = _compile_func_args(ir_set, ctx=newctx)
-
-        if expr.func_sql_function:
-            # The name might contain a "." if it's one of our
-            # metaschema helpers.
-            name = tuple(expr.func_sql_function.split('.', 1))
-        else:
-            name = common.get_function_backend_name(
-                expr.func_shortname, expr.func_module_id)
+        name = get_func_call_backend_name(expr, ctx=newctx)
 
         if expr.typemod is qltypes.TypeModifier.SetOfType:
             set_expr = _process_set_func(
@@ -2245,13 +2247,7 @@ def process_set_as_agg_expr(
 
                 args.append(arg_ref)
 
-        if expr.func_sql_function:
-            # The name might contain a "." if it's one of our
-            # metaschema helpers.
-            name = tuple(expr.func_sql_function.split('.', 1))
-        else:
-            name = common.get_function_backend_name(expr.func_shortname,
-                                                    expr.func_module_id)
+        name = get_func_call_backend_name(expr, ctx=newctx)
 
         set_expr = pgast.FuncCall(
             name=name, args=args, agg_order=agg_sort, agg_filter=agg_filter,

@@ -156,6 +156,18 @@ class StructMeta(type):
             elif isinstance(parent, StructMeta):
                 fields.update(parent.get_ownfields())
 
+        for field in fields.values():
+            if field.coerce and not issubclass(cls, RTStruct):
+                raise TypeError(
+                    f'{cls.__name__}.{field.name} cannot be declared '
+                    f'with coerce=True: {cls.__name__} is not an RTStruct',
+                )
+            if field.frozen and not issubclass(cls, RTStruct):
+                raise TypeError(
+                    f'{cls.__name__}.{field.name} cannot be declared '
+                    f'with frozen=True: {cls.__name__} is not an RTStruct',
+                )
+
         cls._fields = fields
         cls._sorted_fields = collections.OrderedDict(
             sorted(fields.items(), key=lambda e: e[0]))
@@ -218,36 +230,25 @@ class Struct(metaclass=StructMeta):
         AttributeError: 'S2' object has no attribute 'spam'
     """
 
-    __slots__ = ('_in_init_',)
-
     def __init__(self, **kwargs: Any) -> None:
         """
         :raises: TypeError if invalid field value was provided or a value was
                  not provided for a field without a default value.
         """
         self._check_init_argnames(kwargs)
-
-        self._in_init_ = True
-        try:
-            self._init_fields(kwargs)
-        finally:
-            self._in_init_ = False
+        self._init_fields(kwargs)
 
     def __setstate__(self, state: Mapping[str, Any]) -> None:
-        self._in_init_ = True
-        try:
-            if isinstance(state, tuple) and len(state) == 2:
-                state, slotstate = state
-            else:
-                slotstate = None
+        if isinstance(state, tuple) and len(state) == 2:
+            state, slotstate = state
+        else:
+            slotstate = None
 
-            if state:
-                self.update(**state)
+        if state:
+            self.update(**state)
 
-            if slotstate:
-                self.update(**slotstate)
-        finally:
-            self._in_init_ = False
+        if slotstate:
+            self.update(**slotstate)
 
     def update(self, *args: Any, **kwargs: Any) -> None:
         """Update the field values."""
@@ -347,14 +348,6 @@ class Struct(metaclass=StructMeta):
 
             setattr(self, field_name, value)
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        field = type(self)._fields.get(name)
-        if field is not None:
-            value = self._check_field_type(field, name, value)
-            if field.frozen and not self._in_init_:
-                raise ValueError(f'cannot assign to frozen field {name!r}')
-        super().__setattr__(name, value)
-
     def _check_init_argnames(self, args: Iterable[str]) -> None:
         extra = set(args) - set(self.__class__._fields) - {'_in_init_'}
         if extra:
@@ -364,6 +357,71 @@ class Struct(metaclass=StructMeta):
                 ', '.join(extra), 'are' if plural else 'is an', 's' if plural
                 else '', self.__class__.__module__, self.__class__.__name__)
             raise TypeError(msg)
+
+    def _getdefault(
+        self,
+        field_name: str,
+        field: Field[T],
+    ) -> T:
+        ftype = field.type
+        if field.default == ftype:
+            value = field.default()  # type: ignore
+        elif field.default is NoDefault:
+            raise TypeError(
+                '%s.%s.%s is required' % (
+                    self.__class__.__module__, self.__class__.__name__,
+                    field_name))
+        else:
+            value = field.default
+
+        return value  # type: ignore
+
+    def get_field_value(self, field_name: str) -> Any:
+        try:
+            return self.__dict__[field_name]
+        except KeyError as e:
+            field = self.__class__.get_field(field_name)
+            if field is None:
+                raise TypeError(
+                    f'{field_name} is not a valid field in this struct')
+            try:
+                return self._getdefault(field_name, field)
+            except TypeError:
+                raise e
+
+
+class RTStruct(Struct):
+    """A variant of Struct with runtime type validation"""
+
+    __slots__ = ('_in_init_',)
+
+    def __init__(self, **kwargs: Any) -> None:
+        """
+        :raises: TypeError if invalid field value was provided or a value was
+                 not provided for a field without a default value.
+        """
+        self._check_init_argnames(kwargs)
+
+        self._in_init_ = True
+        try:
+            self._init_fields(kwargs)
+        finally:
+            self._in_init_ = False
+
+    def __setstate__(self, state: Mapping[str, Any]) -> None:
+        self._in_init_ = True
+        try:
+            super().__setstate__(state)
+        finally:
+            self._in_init_ = False
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        field = type(self)._fields.get(name)
+        if field is not None:
+            value = self._check_field_type(field, name, value)
+            if field.frozen and not self._in_init_:
+                raise ValueError(f'cannot assign to frozen field {name!r}')
+        super().__setattr__(name, value)
 
     def _check_field_type(self, field: Field[T], name: str, value: Any) -> T:
         if (field.type and value is not None and
@@ -405,37 +463,6 @@ class Struct(metaclass=StructMeta):
 
         return value  # type: ignore
 
-    def _getdefault(
-        self,
-        field_name: str,
-        field: Field[T],
-    ) -> T:
-        ftype = cast(type, field.type)
-        if field.default == ftype:
-            value = field.default()  # type: ignore
-        elif field.default is NoDefault:
-            raise TypeError(
-                '%s.%s.%s is required' % (
-                    self.__class__.__module__, self.__class__.__name__,
-                    field_name))
-        else:
-            value = field.default
-
-        return value  # type: ignore
-
-    def get_field_value(self, field_name: str) -> Any:
-        try:
-            return self.__dict__[field_name]
-        except KeyError as e:
-            field = self.__class__.get_field(field_name)
-            if field is None:
-                raise TypeError(
-                    f'{field_name} is not a valid field in this struct')
-            try:
-                return self._getdefault(field_name, field)
-            except TypeError:
-                raise e
-
 
 class MixedStructMeta(StructMeta):
     def __new__(
@@ -450,5 +477,10 @@ class MixedStructMeta(StructMeta):
 
 
 class MixedStruct(Struct, metaclass=MixedStructMeta):
+    def _check_init_argnames(self, args: Iterable[Any]) -> None:
+        pass
+
+
+class MixedRTStruct(RTStruct, metaclass=MixedStructMeta):
     def _check_init_argnames(self, args: Iterable[Any]) -> None:
         pass

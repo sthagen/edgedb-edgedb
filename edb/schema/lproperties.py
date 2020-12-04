@@ -61,7 +61,7 @@ class Property(pointers.Pointer, s_abc.Property,
         schema, ptr = super().derive_ref(
             schema, referrer, target=target, attrs=attrs, **kwargs)
 
-        ptr_sn = ptr.get_shortname(schema)
+        ptr_sn = str(ptr.get_shortname(schema))
 
         if ptr_sn == 'std::source':
             assert isinstance(referrer, s_links.Link)
@@ -170,14 +170,14 @@ class Property(pointers.Pointer, s_abc.Property,
             return not source.is_view(schema)
 
     @classmethod
-    def get_root_classes(cls) -> Tuple[sn.Name, ...]:
+    def get_root_classes(cls) -> Tuple[sn.QualName, ...]:
         return (
-            sn.Name(module='std', name='property'),
+            sn.QualName(module='std', name='property'),
         )
 
     @classmethod
-    def get_default_base_name(self) -> sn.Name:
-        return sn.Name('std::property')
+    def get_default_base_name(self) -> sn.QualName:
+        return sn.QualName('std', 'property')
 
     def is_blocking_ref(
         self,
@@ -376,6 +376,7 @@ class AlterPropertyOwned(
 
 class AlterProperty(
     PropertyCommand,
+    pointers.PointerAlterFragment,
     referencing.AlterReferencedInheritingObject[Property],
 ):
     astnode = [qlast.AlterConcreteProperty,
@@ -428,6 +429,14 @@ class AlterProperty(
                     value=op.new_value,
                 ),
             )
+        elif op.property == 'computable':
+            if not op.new_value:
+                node.commands.append(
+                    qlast.SetSpecialField(
+                        name='expr',
+                        value=None,
+                    ),
+                )
         else:
             super()._apply_field_ast(schema, context, node, op)
 
@@ -441,24 +450,21 @@ class DeleteProperty(
 
     referenced_astnode = qlast.DropConcreteProperty
 
-    @classmethod
-    def _cmd_tree_from_ast(
-        cls,
+    def _canonicalize(
+        self,
         schema: s_schema.Schema,
-        astnode: qlast.DDLOperation,
         context: sd.CommandContext,
-    ) -> sd.Command:
-        cmd = super()._cmd_tree_from_ast(schema, astnode, context)
-        assert isinstance(cmd, DeleteProperty)
+        scls: so.Object,
+    ) -> Sequence[sd.Command]:
+        cmds = list(super()._canonicalize(schema, context, scls))
 
-        if isinstance(astnode, qlast.DropConcreteProperty):
-            prop = schema.get(cmd.classname, type=Property)
-            target = prop.get_target(schema)
+        assert isinstance(scls, Property)
+        target = scls.get_target(schema)
+        if target is not None and isinstance(target, s_types.Collection):
+            cmds.append(
+                target.as_colltype_delete_delta(schema, expiring_refs={scls}))
 
-            if target is not None and isinstance(target, s_types.Collection):
-                cmd.add(target.as_colltype_delete_delta(schema))
-
-        return cmd
+        return cmds
 
     def _get_ast(
         self,

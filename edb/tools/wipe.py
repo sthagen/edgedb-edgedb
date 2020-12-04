@@ -163,13 +163,14 @@ async def do_wipe(
 
 
 async def _get_dbs_and_roles(pgconn) -> Tuple[List[str], List[str]]:
-    compiler = edbcompiler.Compiler(None)
+    compiler = edbcompiler.Compiler({})
     await compiler.ensure_initialized(pgconn)
     schema = compiler.get_std_schema()
     compilerctx = edbcompiler.new_compiler_context(
         schema,
         expected_cardinality_one=False,
         single_statement=True,
+        output_format=edbcompiler.IoFormat.JSON,
     )
 
     schema, get_databases_sql = edbcompiler.compile_edgeql_script(
@@ -183,7 +184,7 @@ async def _get_dbs_and_roles(pgconn) -> Tuple[List[str], List[str]]:
         key=lambda dname: dname == edbdef.EDGEDB_TEMPLATE_DB,
     ))
 
-    schema, get_roles_sql = compiler.compile_edgeql_script(
+    schema, get_roles_sql = edbcompiler.compile_edgeql_script(
         compiler,
         compilerctx,
         '''SELECT sys::Role {
@@ -194,10 +195,11 @@ async def _get_dbs_and_roles(pgconn) -> Tuple[List[str], List[str]]:
 
     roles = json.loads(await pgconn.fetchval(get_roles_sql))
     sorted_roles = list(topological.sort({
-        r['name']: {
-            'item': r['name'],
-            'deps': r['parents'],
-        } for r in roles
+        r['name']: topological.DepGraphEntry(
+            item=r['name'],
+            deps=r['parents'],
+            extra=False,
+        ) for r in roles
     }))
 
     return databases, sorted_roles

@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+
 #
 # This source file is part of the EdgeDB open source project.
 #
@@ -54,6 +56,7 @@ from edb.schema import delta as s_delta
 from edb.schema import links as s_links
 from edb.schema import lproperties as s_props
 from edb.schema import modules as s_mod
+from edb.schema import name as s_name
 from edb.schema import objects as s_obj
 from edb.schema import objtypes as s_objtypes
 from edb.schema import reflection as s_refl
@@ -67,6 +70,7 @@ from edb.pgsql import common as pg_common
 from edb.pgsql import types as pg_types
 
 from edb.server import config
+from edb.server import pgcluster
 
 from . import dbstate
 from . import enums
@@ -84,14 +88,6 @@ class CompilerDatabaseState:
 
 
 @dataclasses.dataclass(frozen=True)
-class BackendInstanceParams:
-
-    #: Explicit superuser role for instances where
-    #: direct creation of SUPERUSER roles is not allowed.
-    explicit_superuser_role: Optional[str] = None
-
-
-@dataclasses.dataclass(frozen=True)
 class CompileContext:
 
     state: dbstate.CompilerConnectionState
@@ -103,12 +99,14 @@ class CompileContext:
     implicit_limit: int = 0
     inline_typeids: bool = False
     inline_typenames: bool = False
-    schema_object_ids: Optional[Mapping[str, uuid.UUID]] = None
+    schema_object_ids: Optional[Mapping[s_name.Name, uuid.UUID]] = None
     source: Optional[edgeql.Source] = None
-    backend_instance_params: BackendInstanceParams = BackendInstanceParams()
+    backend_runtime_params: Any = (
+        pgcluster.get_default_runtime_params())
     compat_ver: Optional[verutils.Version] = None
     bootstrap_mode: bool = False
     internal_schema_mode: bool = False
+    standalone_mode: bool = False
 
 
 EMPTY_MAP = immutables.Map()
@@ -171,6 +169,7 @@ def new_compiler_context(
     output_format: enums.IoFormat = enums.IoFormat.BINARY,
     bootstrap_mode: bool = False,
     internal_schema_mode: bool = False,
+    standalone_mode: bool = False,
 ) -> CompileContext:
     """Create and return an ad-hoc compiler context."""
 
@@ -191,6 +190,7 @@ def new_compiler_context(
         schema_reflection_mode=schema_reflection_mode,
         bootstrap_mode=bootstrap_mode,
         internal_schema_mode=internal_schema_mode,
+        standalone_mode=standalone_mode,
         stmt_mode=(
             enums.CompileStatementMode.SINGLE
             if single_statement else enums.CompileStatementMode.ALL
@@ -245,8 +245,7 @@ class BaseCompiler:
         self,
         connect_args: dict,
         *,
-        backend_instance_params: BackendInstanceParams = (
-            BackendInstanceParams()),
+        backend_runtime_params: Any = pgcluster.get_default_runtime_params(),
     ):
         self._connect_args = connect_args
         self._dbname = None
@@ -256,7 +255,7 @@ class BaseCompiler:
         self._config_spec = None
         self._schema_class_layout = None
         self._intro_query = None
-        self._backend_instance_params = backend_instance_params
+        self._backend_runtime_params = backend_runtime_params
 
     def _hash_sql(self, sql: bytes, **kwargs: bytes):
         h = hashlib.sha1(sql)
@@ -267,10 +266,11 @@ class BaseCompiler:
 
     def _wrap_schema(
         self,
-        dbver: int,
+        dbver: bytes,
         schema: s_schema.Schema,
         cached_reflection: immutables.Map[str, Tuple[str, ...]],
     ) -> CompilerDatabaseState:
+        assert isinstance(dbver, bytes)
         return CompilerDatabaseState(
             dbver=dbver,
             schema=schema,
@@ -377,12 +377,11 @@ class Compiler(BaseCompiler):
         self,
         connect_args: dict,
         *,
-        backend_instance_params: BackendInstanceParams = (
-            BackendInstanceParams()),
+        backend_runtime_params: Any = pgcluster.get_default_runtime_params(),
     ):
         super().__init__(
             connect_args,
-            backend_instance_params=backend_instance_params,
+            backend_runtime_params=backend_runtime_params,
         )
 
         self._current_db_state = None
@@ -404,8 +403,7 @@ class Compiler(BaseCompiler):
         context.internal_schema_mode = ctx.internal_schema_mode
         context.schema_object_ids = ctx.schema_object_ids
         context.compat_ver = ctx.compat_ver
-        context.backend_superuser_role = (
-            self._backend_instance_params.explicit_superuser_role)
+        context.backend_runtime_params = self._backend_runtime_params
         return context
 
     def _process_delta(self, ctx: CompileContext, delta):
@@ -444,7 +442,8 @@ class Compiler(BaseCompiler):
 
         # Generate schema storage SQL (DML into schema storage tables).
         subblock = block.add_block()
-        self._compile_schema_storage_in_delta(ctx, delta, subblock)
+        self._compile_schema_storage_in_delta(
+            ctx, delta, subblock, context=context)
 
         return block, new_types
 
@@ -453,6 +452,7 @@ class Compiler(BaseCompiler):
         ctx: CompileContext,
         delta: s_delta.Command,
         block: pg_dbops.SQLBlock,
+        context: Optional[s_delta.CommandContext] = None,
     ):
 
         current_tx = ctx.state.current_tx()
@@ -460,11 +460,18 @@ class Compiler(BaseCompiler):
 
         meta_blocks: List[Tuple[str, Dict[str, Any]]] = []
 
+        # Use a provided context if one was passed in, which lets us
+        # used the cached values for resolved properties. (Which is
+        # important, since if there were renames we won't necessarily
+        # be able to resolve them just using the new schema.)
+        if not context:
+            context = s_delta.CommandContext()
+
         s_refl.write_meta(
             delta,
             classlayout=self._schema_class_layout,
             schema=schema,
-            context=s_delta.CommandContext(),
+            context=context,
             blocks=meta_blocks,
             internal_schema_mode=ctx.internal_schema_mode,
             stdmode=ctx.bootstrap_mode,
@@ -675,7 +682,10 @@ class Compiler(BaseCompiler):
                         continue
 
                     array_tid = None
-                    if param.schema_type.is_array():
+                    if (
+                        param.schema_type.is_array()
+                        and not ctx.standalone_mode
+                    ):
                         el_type = param.schema_type.get_element_type(ir.schema)
                         array_tid = el_type.get_backend_id(ir.schema)
                         if array_tid is None:
@@ -852,7 +862,8 @@ class Compiler(BaseCompiler):
                 debug.header('Populate Migration Diff')
                 debug.dump(diff, schema=schema)
 
-            new_ddl = s_ddl.ddlast_from_delta(mstate.target_schema, diff)
+            new_ddl = s_ddl.ddlast_from_delta(
+                schema, mstate.target_schema, diff)
             all_ddl = mstate.current_ddl + new_ddl
             if not mstate.current_ddl:
                 mstate = mstate._replace(current_ddl=all_ddl, auto_diff=diff)
@@ -924,6 +935,7 @@ class Compiler(BaseCompiler):
                 )
 
                 proposed_ddl = s_ddl.statements_from_delta(
+                    schema,
                     mstate.target_schema,
                     guided_diff,
                 )
@@ -937,7 +949,7 @@ class Compiler(BaseCompiler):
                         'statements': [{
                             'text': proposed_ddl[0],
                         }],
-                        'confidence': 1.0,
+                        'confidence': top_op.get_annotation('confidence'),
                         'prompt': top_op.get_annotation('user_prompt'),
                         'operation_id': op_id,
                     }
@@ -946,7 +958,7 @@ class Compiler(BaseCompiler):
 
                 desc = json.dumps({
                     'parent': (
-                        mstate.parent_migration.get_name(schema)
+                        str(mstate.parent_migration.get_name(schema))
                         if mstate.parent_migration is not None
                         else 'initial'
                     ),
@@ -1415,6 +1427,32 @@ class Compiler(BaseCompiler):
         ctx: CompileContext,
         source: edgeql.Source,
     ) -> List[dbstate.QueryUnit]:
+        try:
+            return self._try_compile(ctx=ctx, source=source)
+        except errors.EdgeQLSyntaxError as original_err:
+            if isinstance(source, edgeql.NormalizedSource):
+                # try non-normalized source
+                try:
+                    original = edgeql.Source.from_string(source.text())
+                    ctx = dataclasses.replace(ctx, source=original)
+                    self._try_compile(ctx=ctx, source=original)
+                except errors.EdgeQLSyntaxError as denormalized_err:
+                    raise denormalized_err
+                except Exception:
+                    raise AssertionError(
+                        "Normalized and non-normalized query errors differ")
+                else:
+                    raise AssertionError(
+                        "Normalized query is broken while original is valid")
+            else:
+                raise original_err
+
+    def _try_compile(
+        self,
+        *,
+        ctx: CompileContext,
+        source: edgeql.Source,
+    ) -> List[dbstate.QueryUnit]:
 
         # When True it means that we're compiling for "connection.query()".
         # That means that the returned QueryUnit has to have the in/out codec
@@ -1625,7 +1663,7 @@ class Compiler(BaseCompiler):
         inline_typenames: bool=False,
         json_parameters: bool=False,
         schema: Optional[s_schema.Schema] = None,
-        schema_object_ids: Optional[Mapping[str, uuid.UUID]] = None,
+        schema_object_ids: Optional[Mapping[s_name.Name, uuid.UUID]] = None,
         compat_ver: Optional[verutils.Version] = None,
     ) -> CompileContext:
 
@@ -2075,7 +2113,10 @@ class Compiler(BaseCompiler):
         blocks: List[Tuple[bytes, bytes]],  # type_id, typespec
     ) -> RestoreDescriptor:
         schema_object_ids = {
-            (name, qltype if qltype else None): uuidgen.from_bytes(objid)
+            (
+                s_name.name_from_string(name),
+                qltype if qltype else None
+            ): uuidgen.from_bytes(objid)
             for name, qltype, objid in schema_ids
         }
 

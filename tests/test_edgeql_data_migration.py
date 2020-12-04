@@ -20,6 +20,7 @@
 import json
 import os.path
 import uuid
+import textwrap
 
 import edgedb
 
@@ -38,7 +39,26 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
     should match for easy reference, even if it means skipping some.
     """
 
+    def cleanup_statement(self, s: str) -> str:
+        return textwrap.dedent(s.lstrip('\n')).rstrip('\n')
+
+    def cleanup_migration_exp_json(self, exp_result_json):
+        # Cleanup the expected values by dedenting/stripping them
+        if 'confirmed' in exp_result_json:
+            exp_result_json['confirmed'] = [
+                self.cleanup_statement(v) for v in exp_result_json['confirmed']
+            ]
+        if (
+            'proposed' in exp_result_json
+            and exp_result_json['proposed']
+            and 'statements' in exp_result_json['proposed']
+        ):
+            for stmt in exp_result_json['proposed']['statements']:
+                stmt['text'] = self.cleanup_statement(stmt['text'])
+
     async def assert_describe_migration(self, exp_result_json, *, msg=None):
+        self.cleanup_migration_exp_json(exp_result_json)
+
         try:
             tx = self.con.transaction()
             await tx.start()
@@ -98,16 +118,25 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             self.add_fail_notes(serialization='json')
             raise
 
-    async def migrate(self, migration, *, module: str = 'test'):
+    async def start_migration(self, migration, *,
+                              populate: bool = False,
+                              module: str = 'test'):
+        mig = f"""
+            START MIGRATION TO {{
+                module {module} {{
+                    {migration}
+                }}
+            }};
+        """
+        await self.con.execute(mig)
+        if populate:
+            await self.con.execute('POPULATE MIGRATION;')
+
+    async def migrate(self, migration, *,
+                      populate: bool = False, module: str = 'test'):
         async with self.con.transaction():
-            mig = f"""
-                START MIGRATION TO {{
-                    module {module} {{
-                        {migration}
-                    }}
-                }};
-            """
-            await self.con.execute(mig)
+            await self.start_migration(
+                migration, populate=populate, module=module)
             await self.fast_forward_describe_migration()
 
     async def test_edgeql_migration_simple_01(self):
@@ -273,7 +302,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'CREATE TYPE test::Type0;'
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE TYPE test::Type0',
                 'prompt': "did you create object type 'test::Type0'?",
             },
@@ -328,7 +356,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'ALTER TYPE other::Test RENAME TO other::Test3;',
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE other::Test',
                 'prompt': (
                     "did you rename object type 'other::Test' to "
@@ -348,7 +375,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'ALTER TYPE other::Test RENAME TO test::Test2;',
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE other::Test',
                 'prompt': (
                     "did you rename object type 'other::Test' to "
@@ -370,7 +396,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'ALTER TYPE test::Test RENAME TO other::Test3;',
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE test::Test',
                 'prompt': (
                     "did you rename object type 'test::Test' to "
@@ -392,7 +417,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'CREATE TYPE other::Test3;',
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE TYPE other::Test3',
                 'prompt': (
                     "did you create object type 'other::Test3'?"
@@ -441,7 +465,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE TYPE test::Type1',
                 'prompt': "did you create object type 'test::Type1'?",
             },
@@ -486,7 +509,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'CREATE MODULE new_module IF NOT EXISTS;'
                 }],
-                'confidence': 1.0,
             },
         })
 
@@ -508,7 +530,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'DROP TYPE new_module::Type0;'
                 }],
-                'confidence': 1.0,
             },
         })
         await self.con.execute('''
@@ -524,7 +545,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'DROP MODULE new_module;'
                 }],
-                'confidence': 1.0,
             },
         })
 
@@ -548,7 +568,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'CREATE MODULE new_module IF NOT EXISTS;'
                 }],
-                'confidence': 1.0,
             },
         })
         await self.con.execute('''
@@ -600,7 +619,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'CREATE TYPE test::Type1;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE TYPE test::Type1',
                 'prompt': "did you create object type 'test::Type1'?",
             },
@@ -628,7 +646,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'ALTER TYPE test::Type1 RENAME TO test::Type01;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE test::Type1',
                 'prompt': (
                     "did you rename object type 'test::Type1' to "
@@ -663,7 +680,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'CREATE TYPE test::Type02;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE TYPE test::Type02',
                 'prompt': "did you create object type 'test::Type02'?",
             },
@@ -691,7 +707,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'DROP TYPE test::Type02;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'DROP TYPE test::Type02',
                 'prompt': (
                     "did you drop object type 'test::Type02'?"
@@ -727,7 +742,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'CREATE TYPE test::Type02;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE TYPE test::Type02',
                 'prompt': "did you create object type 'test::Type02'?",
             },
@@ -759,7 +773,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': "ALTER TYPE test::Type0 RENAME TO test::Type1;"
                 }],
-                'confidence': 1.0,
                 'operation_id': "ALTER TYPE test::Type0",
                 'prompt': (
                     "did you rename object type 'test::Type0' to "
@@ -807,7 +820,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'ALTER TYPE test::Test RENAME TO test::Test2;',
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE test::Test',
                 'prompt': (
                     "did you rename object type 'test::Test' to 'test::Test2'?"
@@ -827,7 +839,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'ALTER TYPE test::Test RENAME TO test::Test3;',
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE test::Test',
                 'prompt': (
                     "did you rename object type 'test::Test' to 'test::Test3'?"
@@ -847,7 +858,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': 'CREATE TYPE test::Test2;',
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE TYPE test::Test2',
                 'prompt': (
                     "did you create object type 'test::Test2'?"
@@ -880,7 +890,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE TYPE test::Type01',
                 'prompt': "did you create object type 'test::Type01'?",
             },
@@ -918,7 +927,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE test::Type01',
                 'prompt': (
                     "did you alter object type 'test::Type01'?"
@@ -959,7 +967,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE TYPE test::Type02',
                 'prompt': "did you create object type 'test::Type02'?",
             },
@@ -994,7 +1001,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE test::Type02',
                 'prompt': (
                     "did you alter object type 'test::Type02'?"
@@ -1037,7 +1043,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE test::Type02',
                 'prompt': (
                     "did you alter object type 'test::Type02'?"
@@ -1086,7 +1091,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE TYPE test::Type01',
                 'prompt': "did you create object type 'test::Type01'?",
             },
@@ -1130,7 +1134,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE test::Type01',
                 'prompt': (
                     "did you alter object type 'test::Type01'?"
@@ -1177,7 +1180,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE TYPE test::Type02',
                 'prompt': "did you create object type 'test::Type02'?",
             },
@@ -1218,7 +1220,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE test::Type02',
                 'prompt': (
                     "did you alter object type 'test::Type02'?"
@@ -1269,7 +1270,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER TYPE test::Type02',
                 'prompt': (
                     "did you alter object type 'test::Type02'?"
@@ -1291,17 +1291,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             'foo02': None,
         }])
 
-    @test.xfail('''
-        In the final migration DESCRIBE generates "RENAME TO foo01;" twice.
-
-        Also, if the double RENAME validation is skipped, the
-        following error appears in the final (DROP) migration:
-
-        dgedb.errors.InternalServerError: cannot drop table
-        "edgedb_193fe3f0-fcad-11ea-9d53-39dd03c0a79a".
-        "1b16e5a3-fcad-11ea-a559-4f0a062303a6"
-        because other objects depend on it
-    ''')
     async def test_edgeql_migration_describe_link_03(self):
         # Migration that renames a link.
         await self.con.execute(r'''
@@ -1322,7 +1311,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'CREATE ABSTRACT LINK test::foo3;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE LINK test::foo3',
                 'prompt': "did you create abstract link 'test::foo3'?",
             },
@@ -1345,12 +1333,10 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             'proposed': {
                 'statements': [{
                     'text': (
-                        'ALTER ABSTRACT LINK test::foo3 {\n'
-                        '    RENAME TO test::foo03;\n'
-                        '};'
+                        'ALTER ABSTRACT LINK test::foo3 '
+                        'RENAME TO test::foo03;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER LINK test::foo3',
                 'prompt': (
                     "did you rename abstract link 'test::foo3' to "
@@ -1369,7 +1355,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1wk3m67nkkglmcbx32wvjh75n4pqbqtz5bs2rwdgcoefiwveqpfcq',
+            'parent': 'm17h46d7r6h5rbxxsr2dlpowpklqze4iqhadkr6tlwedwguex5dbba',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1378,7 +1364,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'DROP ABSTRACT LINK test::foo03;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'DROP LINK test::foo03',
                 'prompt': (
                     "did you drop abstract link 'test::foo03'?"
@@ -1409,7 +1394,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         ' EXTENDING std::int64;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE SCALAR TYPE test::ScalarType1',
                 'prompt': "did you create scalar type 'test::ScalarType1'?",
             },
@@ -1440,7 +1424,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         ' RENAME TO test::ScalarType01;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER SCALAR TYPE test::ScalarType1',
                 'prompt': (
                     "did you rename scalar type 'test::ScalarType1' to "
@@ -1476,7 +1459,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         ' EXTENDING std::str;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE SCALAR TYPE test::ScalarType02',
                 'prompt': "did you create scalar type 'test::ScalarType02'?",
             },
@@ -1506,7 +1488,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'DROP SCALAR TYPE test::ScalarType02;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'DROP SCALAR TYPE test::ScalarType02',
                 'prompt': (
                     "did you drop scalar type 'test::ScalarType02'?"
@@ -1543,7 +1524,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         ' EXTENDING std::str;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE SCALAR TYPE test::ScalarType02',
                 'prompt': "did you create scalar type 'test::ScalarType02'?",
             },
@@ -1576,7 +1556,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         " EXTENDING enum<foo, bar>;"
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE SCALAR TYPE test::EnumType1',
                 'prompt': "did you create enumerated type 'test::EnumType1'?",
             },
@@ -1607,7 +1586,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         ' RENAME TO test::EnumType01;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'ALTER SCALAR TYPE test::EnumType1',
                 'prompt': (
                     "did you rename enumerated type 'test::EnumType1' to "
@@ -1643,7 +1621,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         " EXTENDING enum<foo, bar>;"
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE SCALAR TYPE test::EnumType02',
                 'prompt': "did you create enumerated type 'test::EnumType02'?",
             },
@@ -1673,7 +1650,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'DROP SCALAR TYPE test::EnumType02;'
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'DROP SCALAR TYPE test::EnumType02',
                 'prompt': (
                     "did you drop enumerated type 'test::EnumType02'?"
@@ -1710,7 +1686,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         " EXTENDING enum<foo, bar>;"
                     )
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE SCALAR TYPE test::EnumType02',
                 'prompt': "did you create enumerated type 'test::EnumType02'?",
             },
@@ -1722,9 +1697,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             SELECT <test::EnumType02>'foo';
         ''', ['foo'])
 
-    @test.xfail('''
-        Abstract annotation doesn't offer renaming.
-    ''')
     async def test_edgeql_migration_describe_annotation_01(self):
         # Migration that renames an annotation.
         await self.migrate('''
@@ -1749,7 +1721,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'RENAME TO test::renamed_anno1;'
                     )
                 }],
-                'confidence': 1.0,
             },
         })
 
@@ -1789,7 +1760,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'CREATE ABSTRACT ANNOTATION test::my_anno2;'
                     )
                 }],
-                'confidence': 1.0,
             },
         })
         # Auto-complete migration
@@ -1815,7 +1785,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     )
                 }],
-                'confidence': 1.0,
             },
         })
         # Auto-complete migration
@@ -1861,7 +1830,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'CREATE ABSTRACT ANNOTATION test::my_anno2;'
                     )
                 }],
-                'confidence': 1.0,
             },
         })
         # Auto-complete migration
@@ -1887,16 +1855,18 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        We drop and create a new constraint but would prefer to
-        rename it directly.
-    ''')
     async def test_edgeql_migration_describe_constraint_01(self):
         # Migration that renames a constraint.
         await self.migrate('''
             abstract constraint my_oneof(one_of: array<anytype>) {
                 using (contains(one_of, __subject__));
             };
+
+            type Foo {
+                property note -> str {
+                    constraint my_oneof(["foo", "bar"]);
+                }
+            }
         ''')
 
         await self.con.execute('''
@@ -1905,6 +1875,12 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                     abstract constraint my_one_of(one_of: array<anytype>) {
                         using (contains(one_of, __subject__));
                     };
+
+                    type Foo {
+                        property note -> str {
+                            constraint my_one_of(["foo", "bar"]);
+                        }
+                    }
                 };
             };
         ''')
@@ -1919,11 +1895,104 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'RENAME TO test::my_one_of;'
                     )
                 }],
-                'confidence': 1.0,
             },
         })
 
+        await self.fast_forward_describe_migration()
+
     async def test_edgeql_migration_describe_constraint_02(self):
+        # Migration that renames a link constraint.
+        # Honestly I'm not sure if link constraints can really be
+        # anything other than exclusive?
+        await self.migrate('''
+            abstract constraint my_exclusive() extending std::exclusive;
+
+            type Foo;
+            type Bar {
+                link foo -> Foo {
+                    constraint my_exclusive;
+                }
+            }
+        ''')
+
+        await self.con.execute('''
+            START MIGRATION TO {
+                module test {
+                    abstract constraint myexclusive() extending std::exclusive;
+
+                    type Foo;
+                    type Bar {
+                        link foo -> Foo {
+                            constraint myexclusive;
+                        }
+                    }
+                };
+            };
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'complete': False,
+            'proposed': {
+                'statements': [{
+                    'text': (
+                        'ALTER ABSTRACT CONSTRAINT test::my_exclusive '
+                        'RENAME TO test::myexclusive;'
+                    )
+                }],
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+    async def test_edgeql_migration_describe_constraint_03(self):
+        # Migration that renames a object constraint.
+        await self.migrate('''
+            abstract constraint my_oneof(one_of: array<anytype>) {
+                using (contains(one_of, __subject__));
+            };
+
+            type Foo {
+                property a -> str;
+                property b -> str;
+                constraint my_oneof(["foo", "bar"])
+                    ON (__subject__.a++__subject__.b);
+            }
+        ''')
+
+        await self.con.execute('''
+            START MIGRATION TO {
+                module test {
+                    abstract constraint my_one_of(one_of: array<anytype>) {
+                        using (contains(one_of, __subject__));
+                    };
+
+                    type Foo {
+                        property a -> str;
+                        property b -> str;
+                        constraint my_one_of(["foo", "bar"])
+                            ON (__subject__.a++__subject__.b);
+                    }
+                };
+            };
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'complete': False,
+            'proposed': {
+                'statements': [{
+                    'text': (
+                        'ALTER ABSTRACT CONSTRAINT test::my_oneof '
+                        'RENAME TO test::my_one_of;'
+                    )
+                }],
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+    async def test_edgeql_migration_describe_constraint_04(self):
         # Migration that creates a constraint.
         await self.con.execute('''
             START MIGRATION TO {
@@ -1957,7 +2026,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     ),
                 }],
-                'confidence': 1.0,
             },
         })
         # Auto-complete migration
@@ -2002,7 +2070,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         "};"
                     ),
                 }],
-                'confidence': 1.0,
             },
         })
         # Auto-complete migration
@@ -2049,7 +2116,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '};'
                     ),
                 }],
-                'confidence': 1.0,
                 'operation_id': 'CREATE CONSTRAINT test::my_one_of',
             },
         })
@@ -2092,26 +2158,18 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         'RENAME TO test::new_abs_link;'
                     )
                 }],
-                'confidence': 1.0,
             },
         })
 
-    @test.xfail('''
-        Function rename DESCRIBE fails with:
-
-        InvalidReferenceError: function 'default::foo' does not exist
-    ''')
     async def test_edgeql_migration_describe_function_01(self):
-        # Migration that renames a function (currently we expect a
-        # drop/create instead of renaming).
         await self.migrate('''
-            function foo() -> str using (SELECT <str>random());
+            function foo(x: str) -> str using (SELECT <str>random());
         ''')
 
         await self.con.execute('''
             START MIGRATION TO {
                 module test {
-                    function bar() -> str using (SELECT <str>random());
+                    function bar(x: str) -> str using (SELECT <str>random());
                 };
             };
         ''')
@@ -2120,8 +2178,12 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             'confirmed': [],
             'complete': False,
             'proposed': {
-                # TODO: add actual validation for statements
-                'confidence': 1.0,
+                'statements': [{
+                    'text': (
+                        'ALTER FUNCTION test::foo(x: std::str) '
+                        'RENAME TO test::bar;'
+                    )
+                }],
             },
         })
 
@@ -2138,6 +2200,77 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 USING (SELECT x.name)
             }
         ''')
+
+    async def test_edgeql_migration_function_02(self):
+        await self.migrate('''
+            type Foo;
+
+            function foo(x: Foo) -> int64 {
+                USING (SELECT 0)
+            }
+        ''')
+
+        await self.migrate('''
+            type Bar;
+
+            function foo(x: Bar) -> int64 {
+                USING (SELECT 0)
+            }
+        ''')
+
+        await self.con.execute('''
+            DROP FUNCTION test::foo(x: test::Bar);
+        ''')
+
+    async def test_edgeql_migration_function_03(self):
+        await self.migrate('''
+            type Foo;
+
+            function foo(x: Foo) -> int64 {
+                USING (SELECT 0)
+            }
+        ''')
+
+        await self.migrate('''
+            type Bar;
+
+            function foo2(x: Bar) -> int64 {
+                USING (SELECT 0)
+            }
+        ''')
+
+        await self.con.execute('''
+            DROP FUNCTION test::foo2(x: test::Bar);
+        ''')
+
+    async def test_edgeql_migration_describe_type_rename_01(self):
+        await self.migrate('''
+            type Foo;
+            type Baz {
+                link l -> Foo;
+            };
+        ''')
+
+        await self.con.execute('''
+            START MIGRATION TO {
+                module test {
+                    type Bar;
+                    type Baz {
+                        link l -> Bar;
+                    };
+                }
+            };
+            POPULATE MIGRATION;
+        ''')
+
+        await self.assert_describe_migration({
+            'complete': True,
+            'confirmed': [
+                'ALTER TYPE test::Foo RENAME TO test::Bar;'
+            ],
+        })
+
+        await self.fast_forward_describe_migration()
 
     async def test_edgeql_migration_eq_01(self):
         await self.migrate("""
@@ -2715,7 +2848,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    async def test_edgeql_migration_eq_14(self):
+    async def test_edgeql_migration_eq_14a(self):
         await self.migrate(r"""
             type Base;
 
@@ -2753,12 +2886,42 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
+    async def test_edgeql_migration_eq_14b(self):
+        # Same as above, except POPULATE and inspect the query
+        await self.migrate(r"""
+            type Base;
 
-        The second migration fails.
-    ''')
+            type Derived extending Base {
+                property foo -> str;
+            }
+        """)
+
+        await self.start_migration(r"""
+            type Base {
+                # move the property earlier in the inheritance
+                property foo -> str;
+            }
+
+            type Derived extending Base {
+                overloaded required property foo -> str;
+            }
+        """, populate=True)
+
+        await self.assert_describe_migration({
+            'confirmed': ["""
+                ALTER TYPE test::Base {
+                    CREATE OPTIONAL SINGLE PROPERTY foo -> std::str;
+                };
+            """, """
+                ALTER TYPE test::Derived {
+                    ALTER PROPERTY foo {
+                        SET REQUIRED;
+                    };
+                };
+            """],
+            'complete': True,
+        })
+
     async def test_edgeql_migration_eq_16(self):
         await self.migrate(r"""
             type Child;
@@ -2828,12 +2991,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_18(self):
         await self.migrate(r"""
             type Base {
@@ -2873,12 +3030,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_19(self):
         await self.migrate(r"""
             type Base {
@@ -2911,12 +3062,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
-
-        This happens on the third migration.
-    ''')
     async def test_edgeql_migration_eq_21(self):
         await self.migrate(r"""
             type Base {
@@ -2979,11 +3124,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        edgedb.errors.InvalidReferenceError: property 'foo' does not exist
-
-        This error happens in the last migration.
-    ''')
     async def test_edgeql_migration_eq_22(self):
         await self.migrate(r"""
             type Base {
@@ -3321,18 +3461,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        edgedb.errors.InvalidReferenceError: property 'name' does not exist
-
-        Exception: Error while processing
-        'ALTER TYPE test::Bar {
-            DROP EXTENDING test::Named;
-            ALTER PROPERTY name {
-                DROP OWNED;
-                SET TYPE std::str;
-            };
-        };'
-    ''')
     async def test_edgeql_migration_eq_27(self):
         await self.migrate(r"""
             abstract type Named {
@@ -3442,12 +3570,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             # drop everything
         """)
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
-
-        This happens on the third migration.
-    ''')
     async def test_edgeql_migration_eq_30(self):
         await self.migrate(r"""
             type Foo {
@@ -3886,12 +4008,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_35(self):
         await self.migrate(r"""
             type Child {
@@ -5431,12 +5547,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
-
-        The second migration fails.
-    ''')
     async def test_edgeql_migration_eq_linkprops_07(self):
         await self.migrate(r"""
             type Child;
@@ -5558,12 +5668,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
-
-        The second migration fails.
-    ''')
     async def test_edgeql_migration_eq_linkprops_09(self):
         await self.migrate(r"""
             type Child;
@@ -5620,20 +5724,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        edgedb.errors.SchemaError: cannot drop abstract link
-        'test::base_child' because other objects in the schema depend
-        on it
-
-        DETAILS: link 'child' of object type 'test::Derived' depends
-        on test::base_child; link 'child' of object type 'test::Base'
-        depends on test::base_child
-
-        Exception: Error while processing
-        'DROP ABSTRACT LINK test::base_child {
-            DROP PROPERTY foo;
-        };'
-    ''')
     async def test_edgeql_migration_eq_linkprops_10(self):
         # reverse of the test_edgeql_migration_eq_linkprops_09 refactoring
         await self.migrate(r"""
@@ -5678,7 +5768,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
 
         await self.assert_query_result(
             r"""
-                SELECT Base {
+                SELECT Derived {
                     child: {
                         @foo,
                     }
@@ -5691,12 +5781,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
-
-        The second migration fails.
-    ''')
     async def test_edgeql_migration_eq_linkprops_11(self):
         # merging a link with the same properties
         await self.migrate(r"""
@@ -5778,25 +5862,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        edgedb.errors.SchemaError: cannot drop inherited property
-        'bar' of link 'item' of object type 'test::Owner'
-
-        DETAILS: property 'bar' of link 'item' of object type
-        'test::Owner' is inherited from:
-        - link 'item' of object type 'test::Base'
-
-        Exception: Error while processing
-        'ALTER TYPE test::Owner {
-            EXTENDING test::Base LAST;
-            ALTER LINK item {
-                DROP OWNED;
-                ALTER PROPERTY foo {
-                    DROP OWNED;
-                };
-            };
-        };'
-    ''')
     async def test_edgeql_migration_eq_linkprops_12(self):
         # merging a link with different properties
         await self.migrate(r"""
@@ -6317,6 +6382,40 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
+    async def test_edgeql_migration_describe_annot_01(self):
+        await self.migrate('''
+            abstract annotation foo;
+
+            type Base {
+                annotation foo := "1";
+            };
+        ''')
+
+        await self.con.execute('''
+            START MIGRATION TO {
+                module test {
+                    abstract annotation bar;
+
+                    type Base {
+                        annotation bar := "1";
+                    };
+                }
+            };
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'complete': False,
+            'proposed': {
+                'statements': [{
+                    'text': (
+                        'ALTER ABSTRACT ANNOTATION test::foo '
+                        'RENAME TO test::bar;'
+                    )
+                }],
+            },
+        })
+
     async def test_edgeql_migration_eq_index_01(self):
         await self.con.execute("""
             SET MODULE test;
@@ -6748,12 +6847,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             [{'a': 'hello', 'b': 42}],
         )
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_collections_06(self):
         await self.migrate(r"""
             type Base {
@@ -6786,10 +6879,11 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         )
 
     @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
+        ISE: column <blah> cannot be cast automatically to type
+           <blah>
 
-        This happens on the second migration.
+        I think we ought to generate a DROP/CREATE and also reject the ALTER
+        with a real error message.
     ''')
     async def test_edgeql_migration_eq_collections_07(self):
         await self.con.execute("""
@@ -6833,10 +6927,9 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         )
 
     @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
+        ISE: cannot be cast automatically
 
-        This happens on the second migration.
+        The test case thinks this ought to work, at least.
     ''')
     async def test_edgeql_migration_eq_collections_08(self):
         await self.migrate(r"""
@@ -6870,10 +6963,9 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         )
 
     @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
+        ISE: cannot be cast automatically
 
-        This happens on the second migration.
+        The test case thinks this ought to work, at least.
     ''')
     async def test_edgeql_migration_eq_collections_09(self):
         await self.migrate(r"""
@@ -6905,15 +6997,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             [{'a': 'test', 'b': 9}],
         )
 
-    @test.xfail('''
-        edgedb.errors.SchemaError: cannot drop scalar type
-        'test::CollAlias' because other objects in the schema depend
-        on it
-
-        Exception: Error while processing 'DROP SCALAR TYPE test::CollAlias;'
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_collections_13(self):
         await self.migrate(r"""
             type Base {
@@ -6962,18 +7045,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             [[13.5]],
         )
 
-    @test.xfail('''
-        edgedb.errors.SchemaError: cannot drop scalar type
-        'test::CollAlias' because other objects in the schema depend
-        on it
-
-        DETAILS: alias 'test::CollAlias' depends on test::CollAlias
-
-        Exception: Error while processing
-        'DROP SCALAR TYPE test::CollAlias;'
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_collections_14(self):
         await self.migrate(r"""
             type Base {
@@ -6987,6 +7058,8 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         """)
 
         await self.con.execute(r"""
+            SET MODULE test;
+
             INSERT Base {
                 name := 'coll_14',
                 foo := 14.5,
@@ -7023,16 +7096,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             [['coll_14', 14.5]],
         )
 
-    @test.xfail('''
-        edgedb.errors.SchemaError: cannot drop scalar type
-        'test::CollAlias' because other objects in the schema depend
-        on it
-
-        Exception: Error while processing
-        'DROP SCALAR TYPE test::CollAlias;'
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_collections_15(self):
         await self.migrate(r"""
             type Base {
@@ -7089,16 +7152,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             [['coll_15', 15, [15.5]]],
         )
 
-    @test.xfail('''
-        edgedb.errors.SchemaError: cannot drop scalar type
-        'test::CollAlias' because other objects in the schema depend
-        on it
-
-        Exception: Error while processing
-        'DROP SCALAR TYPE test::CollAlias;'
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_collections_16(self):
         await self.migrate(r"""
             type Base {
@@ -7152,15 +7205,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             [{'a': 'coll_16', 'b': 16.5}],
         )
 
-    @test.xfail('''
-        edgedb.errors.InvalidReferenceError: schema item
-        'test::CollAlias' does not exist
-
-        Exception: Error while processing
-        'ALTER ALIAS test::CollAlias USING ([test::Base.foo]);'
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_collections_17(self):
         await self.migrate(r"""
             type Base {
@@ -7212,19 +7256,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             [[17.5]],
         )
 
-    @test.xfail('''
-        edgedb.errors.InvalidReferenceError: schema item
-        'test::CollAlias' does not exist
-
-        Exception: Error while processing
-        'ALTER ALIAS test::CollAlias USING ((
-            test::Base.name,
-            test::Base.number,
-            test::Base.foo
-        ));'
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_collections_18(self):
         await self.migrate(r"""
             type Base {
@@ -7283,18 +7314,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             [['coll_18', 18, 18.5]],
         )
 
-    @test.xfail('''
-        edgedb.errors.InvalidReferenceError: schema item
-        'test::CollAlias' does not exist
-
-        Exception: Error while processing
-        'ALTER ALIAS test::CollAlias USING ((
-            test::Base.name,
-            test::Base.foo
-        ));'
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_collections_20(self):
         await self.migrate(r"""
             type Base {
@@ -7353,18 +7372,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             [['test20', 123.5]],
         )
 
-    @test.xfail('''
-        edgedb.errors.InvalidReferenceError: schema item
-        'test::CollAlias' does not exist
-
-        Exception: Error while processing
-        'ALTER ALIAS test::CollAlias USING ((
-            a := test::Base.name,
-            b := test::Base.foo
-        ));'
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_collections_21(self):
         await self.migrate(r"""
             type Base {
@@ -7508,3 +7515,198 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         """)
 
         await self.migrate("")
+
+    async def test_edgeql_migration_invalid_scalar_01(self):
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r"may not have more than one concrete base type"):
+            await self.con.execute(r"""
+                START MIGRATION TO {
+                    abstract scalar type test::lol extending str;
+                    scalar type test::myint extending int64, test::lol;
+                };
+                POPULATE MIGRATION;
+            """)
+
+    async def test_edgeql_migration_force_alter(self):
+        await self.con.execute('''
+            START MIGRATION TO {
+                module test {
+                    type Obj1 {
+                        property foo -> str;
+                        property bar -> str;
+                    }
+
+                    type Obj2 {
+                        property o -> int64;
+                        link o1 -> Obj1;
+                    }
+                };
+            };
+        ''')
+        await self.fast_forward_describe_migration()
+
+        await self.con.execute('''
+            START MIGRATION TO {
+                module test {
+                    type Obj1 {
+                        property foo -> str;
+                        property bar -> str;
+                    }
+
+                    type NewObj2 {
+                        property name -> str;
+                        annotation title := 'Obj2';
+                    }
+                };
+            };
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'complete': False,
+            'proposed': {
+                'statements': [{
+                    'text':
+                        'CREATE TYPE test::NewObj2 {\n'
+                        "    CREATE ANNOTATION std::title := 'Obj2';\n"
+                        '    CREATE OPTIONAL SINGLE PROPERTY name'
+                        ' -> std::str;\n'
+                        '};'
+                }],
+            },
+        })
+
+        await self.con.execute('''
+            ALTER CURRENT MIGRATION REJECT PROPOSED;
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'complete': False,
+            'proposed': {
+                'statements': [{
+                    'text':
+                        'ALTER TYPE test::Obj2 {\n'
+                        '    DROP LINK o1;\n'
+                        '    DROP PROPERTY o;\n'
+                        '    RENAME TO test::NewObj2;\n'
+                        "    CREATE ANNOTATION std::title := 'Obj2';\n"
+                        '    CREATE OPTIONAL SINGLE PROPERTY name -> std::str;'
+                        '\n'
+                        '};'
+                }],
+            },
+        })
+        await self.fast_forward_describe_migration()
+
+    async def test_edgeql_migration_confidence_01(self):
+        await self.con.execute('''
+            START MIGRATION TO {
+                module test {
+                    type Obj1 {
+                        property foo -> str;
+                        property bar -> str;
+                    }
+                };
+            };
+        ''')
+        await self.fast_forward_describe_migration()
+
+        await self.con.execute('''
+            START MIGRATION TO {
+                module test {
+                    type NewObj1 {
+                        property foo -> str;
+                        property bar -> str;
+                    }
+                };
+            };
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'complete': False,
+            'proposed': {
+                'statements': [{
+                    'text':
+                        'ALTER TYPE test::Obj1 RENAME TO test::NewObj1;'
+                }],
+                'confidence': 0.636174,
+            },
+        })
+
+        await self.con.execute('''
+            ALTER CURRENT MIGRATION REJECT PROPOSED;
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'complete': False,
+            'proposed': {
+                'statements': [{
+                    'text':
+                        'CREATE TYPE test::NewObj1 {\n'
+                        '    CREATE OPTIONAL SINGLE PROPERTY bar -> std::str;'
+                        '\n    CREATE OPTIONAL SINGLE PROPERTY foo '
+                        '-> std::str;'
+                        '\n};'
+                }],
+                'confidence': 1.0,
+            },
+        })
+
+    async def test_edgeql_migration_confidence_02(self):
+        await self.con.execute('''
+            START MIGRATION TO {
+                module test {
+                    type Obj1;
+                };
+            };
+        ''')
+        await self.fast_forward_describe_migration()
+
+        await self.con.execute('''
+            START MIGRATION TO {
+                module test {
+                    type Obj1;
+                    type Obj2;
+                };
+            };
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'complete': False,
+            'proposed': {
+                'statements': [{
+                    'text':
+                        'CREATE TYPE test::Obj2;'
+                }],
+                'confidence': 1.0,
+            },
+        })
+
+
+class TestEdgeQLDataMigrationNonisolated(tb.DDLTestCase):
+    TRANSACTION_ISOLATION = False
+
+    async def test_edgeql_migration_eq_collections_25(self):
+        await self.con.execute(r"""
+            START MIGRATION TO {
+                module test {
+                    alias Foo := [20];
+                }
+            };
+            POPULATE MIGRATION;
+            COMMIT MIGRATION;
+        """)
+
+        await self.con.execute(r"""
+            START MIGRATION TO {
+                module test {
+                }
+            };
+            POPULATE MIGRATION;
+            COMMIT MIGRATION;
+        """)

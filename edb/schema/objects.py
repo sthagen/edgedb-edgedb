@@ -33,6 +33,7 @@ from edb.edgeql import qltypes
 
 from edb.common import checked
 from edb.common import markup
+from edb.common import ordered
 from edb.common import parametric
 from edb.common import parsing
 from edb.common import struct
@@ -136,8 +137,11 @@ def default_field_merge(
 
 
 def get_known_type_id(
-    typename: Any, default: Union[uuid.UUID, NoDefaultT] = NoDefault
+    typename: Union[str, sn.Name],
+    default: Union[uuid.UUID, NoDefaultT] = NoDefault
 ) -> uuid.UUID:
+    if isinstance(typename, str):
+        typename = sn.name_from_string(typename)
     try:
         return _types.TYPE_IDS[typename]
     except KeyError:
@@ -161,8 +165,8 @@ class DeltaGuidance(NamedTuple):
 
 class ComparisonContext:
 
-    renames: Dict[Tuple[Type[Object], str], sd.RenameObject[Object]]
-    deletions: Dict[Tuple[Type[Object], str], sd.DeleteObject[Object]]
+    renames: Dict[Tuple[Type[Object], sn.Name], sd.RenameObject[Object]]
+    deletions: Dict[Tuple[Type[Object], sn.Name], sd.DeleteObject[Object]]
     guidance: Optional[DeltaGuidance]
 
     def __init__(
@@ -188,7 +192,7 @@ class ComparisonContext:
     def is_renaming(self, schema: s_schema.Schema, obj: Object) -> bool:
         return (type(obj), obj.get_name(schema)) in self.renames
 
-    def get_obj_name(self, schema: s_schema.Schema, obj: Object) -> str:
+    def get_obj_name(self, schema: s_schema.Schema, obj: Object) -> sn.Name:
         obj_name = obj.get_name(schema)
         rename_op = self.renames.get((type(obj), obj_name))
         if rename_op is not None:
@@ -345,6 +349,9 @@ class Field(struct.ProtoField, Generic[T]):
             # Type[T]
             return ftype.create(schema, value)  # type: ignore
 
+        elif issubclass(ftype, sn.QualName):
+            return ftype.from_string(value)  # type: ignore
+
         try:
             # Type ignore below because Mypy doesn't trust we can instantiate
             # the type using the value.  We don't trust that either but this
@@ -429,10 +436,7 @@ class SchemaField(Field[Type_T]):
             if issubclass(self.type, ObjectCollection):
                 value = self.type.create_empty()
             else:
-                # The dance below is required to workaround a bug in mypy:
-                # Unsupported type Type["Type[T]"]
-                t = cast(type, self.type)
-                value = t()
+                value = self.type()  # type: ignore
         else:
             value = self.default
         return value
@@ -451,7 +455,7 @@ class SchemaField(Field[Type_T]):
             )
 
 
-class RefDict(struct.Struct):
+class RefDict(struct.RTStruct):
 
     attr = struct.Field(
         str, frozen=True)
@@ -849,7 +853,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
 
     internal = SchemaField(
         bool,
-        inheritable=True,
+        inheritable=False,
     )
 
     # Schema source context for this object
@@ -863,7 +867,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
     )
 
     name = SchemaField(
-        str,
+        sn.Name,
         inheritable=False,
         compcoef=0.670,
     )
@@ -879,7 +883,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
     # so that this item can act as a transparent proxy for the item
     # it has been derived from, specifically in path ids.
     path_id_name = SchemaField(
-        sn.Name,
+        sn.QualName,
         inheritable=False,
         ephemeral=True,
         default=None)
@@ -915,20 +919,20 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         return cls.__name__.lower()
 
     @classmethod
-    def get_shortname_static(cls, name: str) -> str:
+    def get_shortname_static(cls, name: sn.Name) -> sn.Name:
         return name
 
     @classmethod
-    def get_displayname_static(cls, name: str) -> str:
+    def get_displayname_static(cls, name: sn.Name) -> str:
         return str(cls.get_shortname_static(name))
 
     @classmethod
-    def get_verbosename_static(cls, name: str) -> str:
+    def get_verbosename_static(cls, name: sn.Name) -> str:
         clsname = cls.get_schema_class_displayname()
         dname = cls.get_displayname_static(name)
         return f"{clsname} '{dname}'"
 
-    def get_shortname(self, schema: s_schema.Schema) -> str:
+    def get_shortname(self, schema: s_schema.Schema) -> sn.Name:
         return type(self).get_shortname_static(self.get_name(schema))
 
     def get_displayname(self, schema: s_schema.Schema) -> str:
@@ -945,12 +949,13 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         self.id = _private_id
 
     def __eq__(self, other: Any) -> bool:
-        if type(self) is not type(other):
+        if isinstance(other, Object):
+            return self.id == other.id
+        else:
             return NotImplemented
-        return self.id == other.id  # type: ignore
 
     def __hash__(self) -> int:
-        return hash((self.id, type(self)))
+        return hash(self.id)
 
     @classmethod
     def _prepare_id(
@@ -959,8 +964,11 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         if id is not None:
             return id
 
+        name = data.get('name')
+        assert isinstance(name, (str, sn.Name))
+
         try:
-            return get_known_type_id(data.get('name'))
+            return get_known_type_id(name)
         except errors.SchemaError:
             return uuidgen.uuid1mc()
 
@@ -1345,7 +1353,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         schema: s_schema.Schema,
         cmdtype: Type[sd.ObjectCommand_T],
         *,
-        classname: Optional[str] = None,
+        classname: Optional[sn.Name] = None,
         **kwargs: Any,
     ) -> sd.ObjectCommand_T:
         from . import delta as sd
@@ -1374,7 +1382,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         schema: s_schema.Schema,
         cmdtype: Type[sd.ObjectCommand_T],
         *,
-        classname: Optional[str] = None,
+        classname: Optional[sn.Name] = None,
         referrer: Optional[Object] = None,
         **kwargs: Any,
     ) -> Tuple[sd.DeltaRoot, sd.ObjectCommand_T]:
@@ -1397,7 +1405,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         self: Object_T,
         schema: s_schema.Schema,
         context: ComparisonContext,
-    ) -> sd.Command:
+    ) -> sd.ObjectCommand[Object_T]:
         from . import delta as sd
 
         cls = type(self)
@@ -1449,8 +1457,9 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         *,
         self_schema: s_schema.Schema,
         other_schema: s_schema.Schema,
+        confidence: float,
         context: ComparisonContext,
-    ) -> sd.Command:
+    ) -> sd.ObjectCommand[Object_T]:
         from . import delta as sd
 
         cls = type(self)
@@ -1459,6 +1468,8 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
             sd.AlterObject,
             canonical=True,
         )
+
+        delta.set_annotation('confidence', confidence)
 
         if context.generate_prompts:
             svn = self.get_verbosename(self_schema, with_parent=True)
@@ -1518,6 +1529,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
                         orig_value=old_v,
                         orig_schema=self_schema,
                         orig_object=self,
+                        confidence=confidence,
                     )
 
         for refdict in cls.get_refdicts():
@@ -1553,7 +1565,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         *,
         schema: s_schema.Schema,
         context: ComparisonContext,
-    ) -> sd.Command:
+    ) -> sd.ObjectCommand[Object_T]:
         from . import delta as sd
 
         cls = type(self)
@@ -1637,6 +1649,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         orig_value: Any,
         orig_schema: s_schema.Schema,
         orig_object: Object_T,
+        confidence: float,
     ) -> None:
         from . import delta as sd
 
@@ -1646,6 +1659,8 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
                 sd.RenameObject,
                 new_name=value,
             )
+
+            rename_op.set_annotation('confidence', confidence)
 
             self.record_simple_field_delta(
                 schema,
@@ -1701,18 +1716,18 @@ class QualifiedObject(Object):
     name = SchemaField(
         # ignore below because Mypy doesn't understand fields which are not
         # inheritable.
-        sn.Name,  # type: ignore
+        sn.QualName,  # type: ignore
         inheritable=False,
         compcoef=0.670,
     )
 
     @classmethod
-    def get_shortname_static(cls, name: str) -> sn.Name:
-        shortname = sn.shortname_from_fullname(name)
-        assert isinstance(shortname, sn.Name)
-        return shortname
+    def get_shortname_static(cls, name: sn.Name) -> sn.QualName:
+        result = sn.shortname_from_fullname(name)
+        assert isinstance(result, sn.QualName)
+        return result
 
-    def get_shortname(self, schema: s_schema.Schema) -> sn.Name:
+    def get_shortname(self, schema: s_schema.Schema) -> sn.QualName:
         return type(self).get_shortname_static(self.get_name(schema))
 
 
@@ -1734,13 +1749,13 @@ class DerivableObject(QualifiedObject):
         schema: s_schema.Schema,
         source: QualifiedObject,
         *qualifiers: str,
-        derived_name_base: Optional[str] = None,
+        derived_name_base: Optional[sn.Name] = None,
         module: Optional[str] = None,
-    ) -> sn.SchemaName:
-        if module is None:
-            module = source.get_name(schema).module
+    ) -> sn.QualName:
         source_name = source.get_name(schema)
-        qualifiers = (source_name,) + qualifiers
+        if module is None:
+            module = source_name.module
+        qualifiers = (str(source_name),) + qualifiers
 
         return derive_name(
             schema,
@@ -1753,7 +1768,7 @@ class DerivableObject(QualifiedObject):
     def generic(self, schema: s_schema.Schema) -> bool:
         return self.get_shortname(schema) == self.get_name(schema)
 
-    def get_derived_name_base(self, schema: s_schema.Schema) -> str:
+    def get_derived_name_base(self, schema: s_schema.Schema) -> sn.Name:
         return self.get_shortname(schema)
 
     def get_derived_name(
@@ -1762,9 +1777,9 @@ class DerivableObject(QualifiedObject):
         source: QualifiedObject,
         *qualifiers: str,
         mark_derived: bool = False,
-        derived_name_base: Optional[str] = None,
+        derived_name_base: Optional[sn.Name] = None,
         module: Optional[str] = None,
-    ) -> sn.Name:
+    ) -> sn.QualName:
         return self.derive_name(
             schema, source, *qualifiers,
             derived_name_base=derived_name_base,
@@ -1782,10 +1797,10 @@ class ObjectShell(Shell):
     def __init__(
         self,
         *,
-        name: str,
+        name: sn.Name,
         schemaclass: Type[Object] = Object,
         displayname: Optional[str] = None,
-        origname: Optional[str] = None,
+        origname: Optional[sn.Name] = None,
         sourcectx: Optional[parsing.ParserContext] = None,
     ) -> None:
         self.name = name
@@ -1815,17 +1830,18 @@ class ObjectShell(Shell):
         else:
             return schema.get_global(self.schemaclass, self.name)
 
-    def get_refname(self, schema: s_schema.Schema) -> str:
+    def get_refname(self, schema: s_schema.Schema) -> sn.Name:
         if self.origname is not None:
             return self.origname
         else:
-            return self.get_displayname(schema)
+            # XXX: change get_displayname to return Name
+            return sn.name_from_string(self.get_displayname(schema))
 
-    def get_name(self, schema: s_schema.Schema) -> str:
+    def get_name(self, schema: s_schema.Schema) -> sn.Name:
         return self.name
 
     def get_displayname(self, schema: s_schema.Schema) -> str:
-        return self.displayname or self.name
+        return self.displayname or str(self.name)
 
     def get_schema_class_displayname(self) -> str:
         return self.schemaclass.get_schema_class_displayname()
@@ -2044,7 +2060,7 @@ class ObjectCollection(
     def ids(self, schema: s_schema.Schema) -> Tuple[uuid.UUID, ...]:
         return tuple(self._ids)
 
-    def names(self, schema: s_schema.Schema) -> Collection[str]:
+    def names(self, schema: s_schema.Schema) -> Collection[sn.Name]:
         result = []
 
         for item_id in self._ids:
@@ -2116,7 +2132,7 @@ class ObjectCollectionShell(Shell, Generic[Object_T]):
     def __repr__(self) -> str:
         tn = self.__class__.__name__
         cn = self.collection_type.__name__
-        items = ', '.join(e.name or '<anonymous>' for e in self.items)
+        items = ', '.join(str(e.name) or '<anonymous>' for e in self.items)
         return f'<{tn} {cn}({items}) at 0x{id(self):x}>'
 
 
@@ -2146,8 +2162,12 @@ class ObjectIndexBase(
         return cls._key(schema, obj)
 
     @classmethod
-    def get_key_for_name(cls, schema: s_schema.Schema, name: str) -> str:
-        return name
+    def get_key_for_name(
+        cls,
+        schema: s_schema.Schema,
+        name: sn.Name,
+    ) -> str:
+        return str(name)
 
     @classmethod
     def create(
@@ -2293,7 +2313,7 @@ class ObjectIndexBase(
 
 
 def _fullname_object_key(schema: s_schema.Schema, o: Object) -> str:
-    return o.get_name(schema)
+    return str(o.get_name(schema))
 
 
 class ObjectIndexByFullname(
@@ -2304,7 +2324,7 @@ class ObjectIndexByFullname(
 
 
 def _shortname_object_key(schema: s_schema.Schema, o: Object) -> str:
-    return o.get_shortname(schema)
+    return str(o.get_shortname(schema))
 
 
 class ObjectIndexByShortname(
@@ -2313,8 +2333,12 @@ class ObjectIndexByShortname(
 ):
 
     @classmethod
-    def get_key_for_name(cls, schema: s_schema.Schema, name: str) -> str:
-        return sn.shortname_from_fullname(name)
+    def get_key_for_name(
+        cls,
+        schema: s_schema.Schema,
+        name: sn.Name,
+    ) -> str:
+        return str(sn.shortname_from_fullname(name))
 
 
 def _unqualified_object_key(
@@ -2332,7 +2356,11 @@ class ObjectIndexByUnqualifiedName(
 ):
 
     @classmethod
-    def get_key_for_name(cls, schema: s_schema.Schema, name: str) -> str:
+    def get_key_for_name(
+        cls,
+        schema: s_schema.Schema,
+        name: sn.Name,
+    ) -> str:
         return sn.shortname_from_fullname(name).name
 
 
@@ -2473,7 +2501,7 @@ class ObjectSet(
                 else:
                     result._ids |= theirs._ids
 
-        return cast(ObjectSet[Object_T], result)
+        return result  # type: ignore
 
 
 class ObjectList(
@@ -2585,7 +2613,7 @@ class InheritingObject(SubclassableObject):
                 yield fn
 
     @classmethod
-    def get_default_base_name(self) -> Optional[str]:
+    def get_default_base_name(self) -> Optional[sn.Name]:
         return None
 
     # Redefinining bases and ancestors accessors to make them generic
@@ -2601,7 +2629,7 @@ class InheritingObject(SubclassableObject):
     ) -> ObjectList[InheritingObjectT]:
         return self.get_field_value(schema, 'ancestors')  # type: ignore
 
-    def get_base_names(self, schema: s_schema.Schema) -> Collection[str]:
+    def get_base_names(self, schema: s_schema.Schema) -> Collection[sn.Name]:
         return self.get_bases(schema).names(schema)
 
     def get_topmost_concrete_base(
@@ -2609,8 +2637,7 @@ class InheritingObject(SubclassableObject):
         schema: s_schema.Schema
     ) -> InheritingObjectT:
         """Get the topmost non-abstract base."""
-        lineage = [self]
-        lineage.extend(self.get_ancestors(schema).objects(schema))
+        lineage = self.get_ancestors(schema).objects(schema)
         for ancestor in reversed(lineage):
             if not ancestor.get_is_abstract(schema):
                 return ancestor
@@ -2625,7 +2652,7 @@ class InheritingObject(SubclassableObject):
         return self.get_topmost_concrete_base(schema)
 
     @classmethod
-    def get_root_classes(cls) -> Tuple[sn.Name, ...]:
+    def get_root_classes(cls) -> Tuple[sn.QualName, ...]:
         return tuple()
 
     def _issubclass(
@@ -2650,10 +2677,13 @@ class InheritingObject(SubclassableObject):
         """Return class descendants in ancestral order."""
         graph = {}
         for descendant in self.descendants(schema):
-            graph[descendant] = {
-                'item': descendant,
-                'deps': descendant.get_bases(schema).objects(schema),
-            }
+            graph[descendant] = topological.DepGraphEntry(
+                item=descendant,
+                deps=ordered.OrderedSet(
+                    descendant.get_bases(schema).objects(schema),
+                ),
+                extra=False,
+            )
 
         return list(topological.sort(graph, allow_unresolved=True))
 
@@ -2702,8 +2732,9 @@ class InheritingObject(SubclassableObject):
         *,
         self_schema: s_schema.Schema,
         other_schema: s_schema.Schema,
+        confidence: float,
         context: ComparisonContext,
-    ) -> sd.Command:
+    ) -> sd.ObjectCommand[InheritingObjectT]:
         from . import delta as sd
         from . import inheriting as s_inh
 
@@ -2711,6 +2742,7 @@ class InheritingObject(SubclassableObject):
             other,
             self_schema=self_schema,
             other_schema=other_schema,
+            confidence=confidence,
             context=context,
         )
 
@@ -2861,10 +2893,7 @@ class DerivableInheritingObject(DerivableObject, InheritingObject):
     ) -> DerivableInheritingObjectT:
         obj = self
         while obj.get_is_derived(schema):
-            obj = cast(
-                DerivableInheritingObjectT,
-                obj.get_bases(schema).first(schema),
-            )
+            obj = obj.get_bases(schema).first(schema)
         return obj
 
 
@@ -2941,12 +2970,10 @@ def derive_name(
     *qualifiers: str,
     module: str,
     parent: Optional[DerivableObject] = None,
-    derived_name_base: Optional[str] = None,
-) -> sn.Name:
+    derived_name_base: Optional[sn.Name] = None,
+) -> sn.QualName:
     if derived_name_base is None:
         assert parent is not None
         derived_name_base = parent.get_derived_name_base(schema)
-
     name = sn.get_specialized_name(derived_name_base, *qualifiers)
-
-    return sn.Name(name=name, module=module)
+    return sn.QualName(name=name, module=module)

@@ -86,41 +86,91 @@ def delta_objects(
 
     full_matrix: List[Tuple[so.Object_T, so.Object_T, float]] = []
 
+    # If there are any renames that are already decided on, honor those first
+    renames_x: Set[sn.Name] = set()
+    renames_y: Set[sn.Name] = set()
+    for y in old:
+        rename = context.renames.get((type(y), y.get_name(old_schema)))
+        if rename:
+            renames_x.add(rename.new_name)
+            renames_y.add(rename.classname)
+
+    if context.guidance is not None:
+        guidance = context.guidance
+
+        def can_create(name: sn.Name) -> bool:
+            return (sclass, name) not in guidance.banned_creations
+
+        def can_alter(old_name: sn.Name, new_name: sn.Name) -> bool:
+            return (sclass, (old_name, new_name)) not in guidance.banned_alters
+
+        def can_delete(name: sn.Name) -> bool:
+            return (sclass, name) not in guidance.banned_deletions
+    else:
+        def can_create(name: sn.Name) -> bool:
+            return True
+
+        def can_alter(old_name: sn.Name, new_name: sn.Name) -> bool:
+            return True
+
+        def can_delete(name: sn.Name) -> bool:
+            return True
+
     for x, y in pairs:
         x_name = x.get_name(new_schema)
         y_name = y.get_name(old_schema)
 
-        if (
-            context.guidance is not None
-            and (sclass, (y_name, x_name)) in context.guidance.banned_alters
-        ):
-            similarity = 0.0
-        else:
+        if can_alter(y_name, x_name):
             similarity = y.compare(
                 x,
                 our_schema=old_schema,
                 their_schema=new_schema,
                 context=context,
             )
+        else:
+            similarity = 0.0
 
         full_matrix.append((x, y, similarity))
 
     full_matrix.sort(
         key=lambda v: (
             1.0 - v[2],
-            v[0].get_name(new_schema),
-            v[1].get_name(old_schema),
+            str(v[0].get_name(new_schema)),
+            str(v[1].get_name(old_schema)),
         ),
     )
 
+    full_matrix_x = {}
+    full_matrix_y = {}
+
     seen_x = set()
     seen_y = set()
+    x_alter_variants: Dict[so.Object_T, int] = collections.defaultdict(int)
+    y_alter_variants: Dict[so.Object_T, int] = collections.defaultdict(int)
     comparison_map: Dict[so.Object_T, Tuple[float, so.Object_T]] = {}
+    comparison_map_y: Dict[so.Object_T, Tuple[float, so.Object_T]] = {}
+
+    # Find the top similarity pairs
     for x, y, similarity in full_matrix:
         if x not in seen_x and y not in seen_y:
             comparison_map[x] = (similarity, y)
+            comparison_map_y[y] = (similarity, x)
             seen_x.add(x)
             seen_y.add(y)
+
+        if x not in full_matrix_x:
+            full_matrix_x[x] = (similarity, y)
+
+        if y not in full_matrix_y:
+            full_matrix_y[y] = (similarity, x)
+
+        if (
+            can_alter(y.get_name(old_schema), x.get_name(new_schema))
+            and full_matrix_x[x][0] != 1.0
+            and full_matrix_y[y][0] != 1.0
+        ):
+            x_alter_variants[x] += 1
+            y_alter_variants[y] += 1
 
     alters = []
 
@@ -141,60 +191,65 @@ def delta_objects(
 
         for x in order_x:
             s, y = comparison_map[x]
-            if 0.6 < s < 1.0:
+            x_name = x.get_name(new_schema)
+            y_name = y.get_name(old_schema)
+            if (
+                0.6 < s < 1.0
+                or not can_create(x_name)
+                or not can_delete(y_name)
+                or x_name in renames_x
+            ):
                 alter = y.as_alter_delta(
                     other=x,
                     context=context,
                     self_schema=old_schema,
                     other_schema=new_schema,
+                    confidence=s,
                 )
 
+                if x_alter_variants[x] > 1 or can_create(x_name):
+                    confidence = s
+                else:
+                    confidence = 1.0
+                alter.set_annotation('confidence', confidence)
                 alters.append(alter)
 
     created = new - {x for x, (s, _) in comparison_map.items() if s > 0.6}
 
     for x in created:
-        if (
-            context.guidance is None
-            or (
-                (sclass, x.get_name(new_schema))
-                not in context.guidance.banned_creations
-            )
-        ):
-            delta.add(
-                x.as_create_delta(
-                    schema=new_schema,
-                    context=context,
-                ),
-            )
+        x_name = x.get_name(new_schema)
+        if can_create(x_name) and x_name not in renames_x:
+            create = x.as_create_delta(schema=new_schema, context=context)
+            if x_alter_variants[x] > 0:
+                confidence = full_matrix_x[x][0]
+            else:
+                confidence = 1.0
+            create.set_annotation('confidence', confidence)
+            delta.add(create)
 
     delta.update(alters)
 
-    deleted_order: Iterable[so.Object]
+    deleted_order: Iterable[so.Object_T]
     deleted = old - {y for _, (s, y) in comparison_map.items() if s > 0.6}
 
     if issubclass(sclass, so.InheritingObject):
-        deleted_order = _sort_by_inheritance(
+        deleted_order = _sort_by_inheritance(  # type: ignore
             old_schema,
             cast(Iterable[so.InheritingObject], deleted),
         )
     else:
         deleted_order = deleted
 
-    for obj in deleted_order:
-        if (
-            context.guidance is None
-            or (
-                (sclass, obj.get_name(old_schema))
-                not in context.guidance.banned_deletions
-            )
-        ):
-            delta.add(
-                obj.as_delete_delta(
-                    schema=old_schema,
-                    context=context,
-                ),
-            )
+    for y in deleted_order:
+        y_name = y.get_name(old_schema)
+        if can_delete(y_name) and y_name not in renames_y:
+            delete = y.as_delete_delta(schema=old_schema, context=context)
+            if y_alter_variants[y] > 0:
+                confidence = full_matrix_y[y][0]
+            else:
+                confidence = 1.0
+            delete.set_annotation('confidence', confidence)
+            delta.add(delete)
 
     return delta
 
@@ -205,15 +260,13 @@ def _sort_by_inheritance(
 ) -> Iterable[so.InheritingObjectT]:
     graph = {}
     for x in objs:
-        graph[x] = {
-            'item': x,
-            'deps': x.get_bases(schema).objects(schema),
-        }
+        graph[x] = topological.DepGraphEntry(
+            item=x,
+            deps=ordered.OrderedSet(x.get_bases(schema).objects(schema)),
+            extra=False,
+        )
 
-    return cast(
-        Iterable[so.InheritingObjectT],
-        topological.sort(graph, allow_unresolved=True),
-    )
+    return topological.sort(graph, allow_unresolved=True)
 
 
 CommandMeta_T = TypeVar("CommandMeta_T", bound="CommandMeta")
@@ -293,25 +346,23 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
 
     _context_class: Optional[Type[CommandContextToken[Command]]] = None
 
-    ops: ordered.OrderedSet[Command]
-    before_ops: ordered.OrderedSet[Command]
+    ops: List[Command]
+    before_ops: List[Command]
 
     #: AlterObjectProperty lookup table for get|set_attribute_value
     _attrs: Dict[str, AlterObjectProperty]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.ops = ordered.OrderedSet()
-        self.before_ops = ordered.OrderedSet()
+        self.ops = []
+        self.before_ops = []
         self.qlast: qlast.DDLOperation
         self._attrs = {}
 
     def copy(self: Command_T) -> Command_T:
         result = super().copy()
-        result.ops = ordered.OrderedSet(
-            op.copy() for op in self.ops)
-        result.before_ops = ordered.OrderedSet(
-            op.copy() for op in self.before_ops)
+        result.ops = [op.copy() for op in self.ops]
+        result.before_ops = [op.copy() for op in self.before_ops]
         return result
 
     @classmethod
@@ -323,6 +374,24 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         for op in obj.get_subcommands(include_prerequisites=False):
             result.add(mcls.adapt(op))
         return result
+
+    def resolve_obj_collection(
+        self,
+        value: Any,
+        schema: s_schema.Schema,
+    ) -> Sequence[so.Object]:
+        sequence: Sequence[so.Object]
+        if isinstance(value, so.ObjectCollection):
+            sequence = value.objects(schema)
+        else:
+            sequence = []
+            for v in value:
+                if isinstance(v, so.Shell):
+                    val = v.resolve(schema)
+                else:
+                    val = v
+                sequence.append(val)
+        return sequence
 
     def _resolve_attr_value(
         self,
@@ -351,17 +420,7 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
                 value = ftype.create(schema, items)
 
             elif issubclass(ftype, so.ObjectCollection):
-                sequence: Sequence[so.Object]
-                if isinstance(value, so.ObjectCollection):
-                    sequence = value.objects(schema)
-                else:
-                    sequence = []
-                    for v in value:
-                        if isinstance(v, so.Shell):
-                            val = v.resolve(schema)
-                        else:
-                            val = v
-                        sequence.append(val)
+                sequence = self.resolve_obj_collection(value, schema)
                 value = ftype.create(schema, sequence)
 
             elif issubclass(ftype, s_expr.Expression):
@@ -559,13 +618,13 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
             for op in reversed(command.get_subcommands()):
                 self.prepend_prerequisite(op)
         else:
-            self.before_ops.add(command, last=False)
+            self.before_ops.insert(0, command)
 
     def add_prerequisite(self, command: Command) -> None:
         if isinstance(command, CommandGroup):
-            self.before_ops.update(command.get_subcommands())  # type: ignore
+            self.before_ops.extend(command.get_subcommands())
         else:
-            self.before_ops.add(command)
+            self.before_ops.append(command)
 
     def prepend(self, command: Command) -> None:
         if isinstance(command, CommandGroup):
@@ -574,7 +633,7 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         else:
             if isinstance(command, AlterObjectProperty):
                 self._attrs[command.property] = command
-            self.ops.add(command, last=False)
+            self.ops.insert(0, command)
 
     def add(self, command: Command) -> None:
         if isinstance(command, CommandGroup):
@@ -582,14 +641,15 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         else:
             if isinstance(command, AlterObjectProperty):
                 self._attrs[command.property] = command
-            self.ops.add(command)
+            self.ops.append(command)
 
     def update(self, commands: Iterable[Command]) -> None:  # type: ignore
         for command in commands:
             self.add(command)
 
     def replace(self, existing: Command, new: Command) -> None:  # type: ignore
-        self.ops.replace(existing, new)
+        i = self.ops.index(existing)
+        self.ops[i] = new
 
     def replace_all(self, commands: Iterable[Command]) -> None:
         self.ops.clear()
@@ -597,8 +657,14 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         self.update(commands)
 
     def discard(self, command: Command) -> None:
-        self.ops.discard(command)
-        self.before_ops.discard(command)
+        try:
+            self.ops.remove(command)
+        except ValueError:
+            pass
+        try:
+            self.before_ops.remove(command)
+        except ValueError:
+            pass
         if isinstance(command, AlterObjectProperty):
             self._attrs.pop(command.property)
 
@@ -738,10 +804,7 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
     def get_context_class(
         cls: Type[Command_T],
     ) -> Optional[Type[CommandContextToken[Command_T]]]:
-        return cast(
-            Optional[Type[CommandContextToken[Command_T]]],
-            cls._context_class,
-        )
+        return cls._context_class  # type: ignore
 
     @classmethod
     def get_context_class_or_die(
@@ -842,9 +905,9 @@ class CommandContext:
         disable_dep_verification: bool = False,
         descriptive_mode: bool = False,
         schema_object_ids: Optional[
-            Mapping[Tuple[str, Optional[str]], uuid.UUID]
+            Mapping[Tuple[sn.Name, Optional[str]], uuid.UUID]
         ] = None,
-        backend_superuser_role: Optional[str] = None,
+        backend_runtime_params: Optional[Any] = None,
         compat_ver: Optional[verutils.Version] = None,
     ) -> None:
         self.stack: List[CommandContextToken[Command]] = []
@@ -859,11 +922,12 @@ class CommandContext:
         self.testmode = testmode
         self.descriptive_mode = descriptive_mode
         self.disable_dep_verification = disable_dep_verification
-        self.renames: Dict[str, str] = {}
+        self.renames: Dict[sn.Name, sn.Name] = {}
+        self.early_renames: Dict[sn.Name, sn.Name] = {}
         self.renamed_objs: Set[so.Object] = set()
         self.altered_targets: Set[so.Object] = set()
         self.schema_object_ids = schema_object_ids
-        self.backend_superuser_role = backend_superuser_role
+        self.backend_runtime_params = backend_runtime_params
         self.affected_finalization: \
             Dict[Command, List[Tuple[DeltaRoot, Command, bool]]] = dict()
         self.compat_ver = compat_ver
@@ -960,6 +1024,14 @@ class CommandContext:
 
     def pop(self) -> CommandContextToken[Command]:
         return self.stack.pop()
+
+    def get_referrer_name(
+        self, referrer_ctx: CommandContextToken[ObjectCommand[so.Object]],
+    ) -> sn.QualName:
+        referrer_name = referrer_ctx.op.classname
+        referrer_name = self.early_renames.get(referrer_name, referrer_name)
+        assert isinstance(referrer_name, sn.QualName)
+        return referrer_name
 
     def get(
         self,
@@ -1149,10 +1221,8 @@ class ObjectCommandMeta(CommandMeta):
         schema_metaclass: Type[so.Object],
     ) -> Optional[Type[Command_T]]:
         assert issubclass(cmdtype, ObjectCommand)
-        return cast(
-            Optional[Type[Command_T]],
-            mcls._schema_metaclasses.get(
-                (cmdtype._delta_action, schema_metaclass)),
+        return mcls._schema_metaclasses.get(  # type: ignore
+            (cmdtype._delta_action, schema_metaclass),
         )
 
     @classmethod
@@ -1179,7 +1249,7 @@ class ObjectCommand(
     """Base class for all Object-related commands."""
 
     #: Full name of the object this command operates on.
-    classname = struct.Field(str)
+    classname = struct.Field(sn.Name)
     #: An optional set of values neceessary to render the command in DDL.
     ddl_identity = struct.Field(
         dict,  # type: ignore
@@ -1203,8 +1273,8 @@ class ObjectCommand(
         schema: s_schema.Schema,
         astnode: qlast.NamedDDL,
         context: CommandContext,
-    ) -> str:
-        return astnode.name.name
+    ) -> sn.Name:
+        return sn.UnqualName(astnode.name.name)
 
     @classmethod
     def _cmd_from_ast(
@@ -1410,13 +1480,15 @@ class ObjectCommand(
             # constraint, since that is the infrastructure we have for
             # computing the classname.
             name = sn.shortname_from_fullname(cmd.classname)
+            assert isinstance(name, sn.QualName), \
+                "expected qualified name"
             ast = qlast.CreateConcreteConstraint(
                 name=qlast.ObjectRef(name=name.name, module=name.module),
                 subjectexpr=subjectexpr.qlast,
             )
             quals = sn.quals_from_fullname(cmd.classname)
             new_name = cmd._classname_from_ast_and_referrer(
-                schema, sn.SchemaName(quals[0]), ast, context)
+                schema, sn.QualName.from_string(quals[0]), ast, context)
             if new_name == cmd.classname:
                 return
 
@@ -1443,7 +1515,7 @@ class ObjectCommand(
             )
             quals = sn.quals_from_fullname(cmd.classname)
             new_name = cmd._classname_from_ast_and_referrer(
-                schema, sn.SchemaName(quals[0]), ast, context)
+                schema, sn.QualName.from_string(quals[0]), ast, context)
             if new_name == cmd.classname:
                 return
 
@@ -1461,6 +1533,8 @@ class ObjectCommand(
             params = s_func.CallableCommand._get_param_desc_from_params_ast(
                 schema, context.modaliases, param_list.get_ast(schema))
             name = sn.shortname_from_fullname(cmd.classname)
+            assert isinstance(name, sn.QualName), \
+                "expected qualified name"
             new_fname = s_func.CallableObject.get_fqname(schema, name, params)
             if new_fname == cmd.classname:
                 return
@@ -1523,16 +1597,18 @@ class ObjectCommand(
         self,
         schema: s_schema.Schema,
         context: CommandContext,
-        name: str,
+        name: sn.Name,
     ) -> qlast.ObjectRef:
         qlclass = self.get_schema_metaclass().get_ql_class()
 
-        if isinstance(name, sn.Name):
+        if isinstance(name, sn.QualName):
             nname = sn.shortname_from_fullname(name)
+            assert isinstance(nname, sn.QualName), \
+                "expected qualified name"
             ref = qlast.ObjectRef(
                 module=nname.module, name=nname.name, itemclass=qlclass)
         else:
-            ref = qlast.ObjectRef(module='', name=name, itemclass=qlclass)
+            ref = qlast.ObjectRef(module='', name=str(name), itemclass=qlclass)
 
         return ref
 
@@ -1562,9 +1638,6 @@ class ObjectCommand(
         context: CommandContext,
         node: qlast.DDLOperation,
     ) -> None:
-        for op in self.get_subcommands(type=AlterObjectFragment):
-            self._append_subcmd_ast(schema, node, op, context)
-
         mcls = self.get_schema_metaclass()
 
         if not isinstance(self, DeleteObject):
@@ -1577,15 +1650,17 @@ class ObjectCommand(
                     new_value = field.get_default()
 
                 if (
-                    # For all properties other than cardinality, if they
-                    # are inherited and have the default value, skip them.
-                    # Cardinality is special and should be explicitly
-                    # included, though.
-                    fop.property == 'cardinality'
-                    or
                     (
-                        fop.source != 'inheritance'
-                        or context.descriptive_mode
+                        # For all properties other than cardinality, if they
+                        # are inherited and have the default value, skip them.
+                        # Cardinality is special and should be explicitly
+                        # included, though.
+                        fop.property == 'cardinality'
+                        or
+                        (
+                            fop.source != 'inheritance'
+                            or context.descriptive_mode
+                        )
                     )
                     and fop.old_value != new_value
                 ):
@@ -1633,18 +1708,20 @@ class ObjectCommand(
 
                     setattr(node, ast_attr, attr_val)
 
-            for refdict in mcls.get_refdicts():
-                self._apply_refs_fields_ast(schema, context, node, refdict)
+            # Keep subcommands from refdicts and alter fragments (like
+            # rename, rebase) in order when producing DDL asts
+            refdicts = tuple(x.ref_cls for x in mcls.get_refdicts())
+            for op in self.get_subcommands():
+                if (
+                    isinstance(op, AlterObjectFragment)
+                    or (isinstance(op, ObjectCommand)
+                        and issubclass(op.get_schema_metaclass(), refdicts))
+                ):
+                    self._append_subcmd_ast(schema, node, op, context)
 
-    def _apply_refs_fields_ast(
-        self,
-        schema: s_schema.Schema,
-        context: CommandContext,
-        node: qlast.DDLOperation,
-        refdict: so.RefDict,
-    ) -> None:
-        for op in self.get_subcommands(metaclass=refdict.ref_cls):
-            self._append_subcmd_ast(schema, node, op, context)
+        else:
+            for op in self.get_subcommands(type=AlterObjectFragment):
+                self._append_subcmd_ast(schema, node, op, context)
 
     def _apply_field_ast(
         self,
@@ -1692,25 +1769,16 @@ class ObjectCommand(
         context: CommandContext,
     ) -> None:
         from . import functions as s_func
-        from . import modules as s_mod
 
         if (not context.stdmode and not context.testmode and
                 not isinstance(self, s_func.ParameterCommand)):
 
-            shortname: str
-            modname: Optional[str]
-            if isinstance(self.classname, sn.Name):
-                shortname = sn.shortname_from_fullname(self.classname)
-                modname = self.classname.module
-            elif issubclass(self.get_schema_metaclass(), s_mod.Module):
-                # modules have classname as simple strings
-                shortname = modname = self.classname
-            else:
-                modname = None
-
-            if modname is not None and modname in s_schema.STD_MODULES:
+            if (
+                isinstance(self.classname, sn.QualName)
+                and (modname := self.classname.module) in s_schema.STD_MODULES
+            ):
                 raise errors.SchemaDefinitionError(
-                    f'cannot {self._delta_action} `{shortname}`: '
+                    f'cannot {self._delta_action} {self.get_verbosename()}: '
                     f'module {modname} is read-only',
                     context=self.source_context)
 
@@ -1728,7 +1796,7 @@ class ObjectCommand(
         schema: s_schema.Schema,
         context: CommandContext,
         *,
-        name: Optional[str] = None,
+        name: Optional[sn.Name] = None,
         default: Union[so.Object_T, so.NoDefaultT] = so.NoDefault,
     ) -> so.Object_T:
         ...
@@ -1739,7 +1807,7 @@ class ObjectCommand(
         schema: s_schema.Schema,
         context: CommandContext,
         *,
-        name: Optional[str] = None,
+        name: Optional[sn.Name] = None,
         default: None = None,
     ) -> Optional[so.Object_T]:
         ...
@@ -1749,7 +1817,7 @@ class ObjectCommand(
         schema: s_schema.Schema,
         context: CommandContext,
         *,
-        name: Optional[str] = None,
+        name: Optional[sn.Name] = None,
         default: Union[so.Object_T, so.NoDefaultT, None] = so.NoDefault,
     ) -> Optional[so.Object_T]:
         metaclass = self.get_schema_metaclass()
@@ -1876,11 +1944,9 @@ class ObjectCommand(
     ) -> CommandContextWrapper[ObjectCommand[so.Object_T]]:
         ctxcls = type(self).get_context_class()
         assert ctxcls is not None
-        obj_ctxcls = cast(
-            Type[ObjectCommandContext[so.Object_T]],
-            ctxcls,
+        return context(
+            ctxcls(schema=schema, op=self, scls=scls),  # type: ignore
         )
-        return context(obj_ctxcls(schema=schema, op=self, scls=scls))
 
     def get_ast(
         self,
@@ -1948,7 +2014,7 @@ class ObjectCommandContext(CommandContextToken[ObjectCommand[so.Object_T]]):
 
 class QualifiedObjectCommand(ObjectCommand[so.QualifiedObject_T]):
 
-    classname = struct.Field(sn.Name)
+    classname = struct.Field(sn.QualName)
 
     @classmethod
     def _classname_from_ast(
@@ -1956,7 +2022,7 @@ class QualifiedObjectCommand(ObjectCommand[so.QualifiedObject_T]):
         schema: s_schema.Schema,
         astnode: qlast.NamedDDL,
         context: CommandContext,
-    ) -> sn.Name:
+    ) -> sn.QualName:
         objref = astnode.name
         module = context.modaliases.get(objref.module, objref.module)
         if module is None:
@@ -1965,7 +2031,7 @@ class QualifiedObjectCommand(ObjectCommand[so.QualifiedObject_T]):
                 context=objref.context,
             )
 
-        return sn.Name(module=module, name=objref.name)
+        return sn.QualName(module=module, name=objref.name)
 
     @overload
     def get_object(
@@ -1973,7 +2039,7 @@ class QualifiedObjectCommand(ObjectCommand[so.QualifiedObject_T]):
         schema: s_schema.Schema,
         context: CommandContext,
         *,
-        name: Optional[str] = None,
+        name: Optional[sn.Name] = None,
         default: Union[so.QualifiedObject_T, so.NoDefaultT] = so.NoDefault,
     ) -> so.QualifiedObject_T:
         ...
@@ -1984,7 +2050,7 @@ class QualifiedObjectCommand(ObjectCommand[so.QualifiedObject_T]):
         schema: s_schema.Schema,
         context: CommandContext,
         *,
-        name: Optional[str] = None,
+        name: Optional[sn.Name] = None,
         default: None = None,
     ) -> Optional[so.QualifiedObject_T]:
         ...
@@ -1994,7 +2060,7 @@ class QualifiedObjectCommand(ObjectCommand[so.QualifiedObject_T]):
         schema: s_schema.Schema,
         context: CommandContext,
         *,
-        name: Optional[str] = None,
+        name: Optional[sn.Name] = None,
         default: Union[
             so.QualifiedObject_T, so.NoDefaultT, None] = so.NoDefault,
     ) -> Optional[so.QualifiedObject_T]:
@@ -2032,7 +2098,8 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
 
         if astnode.sdl_alter_if_exists:
             modaliases = cls._modaliases_from_ast(schema, astnode, context)
-            dummy_op = cls(classname=sn.Name('placeholder::placeholder'))
+            dummy_op = cls(
+                classname=sn.QualName('placeholder', 'placeholder'))
             ctxcls = cast(
                 Type[ObjectCommandContext[so.Object_T]],
                 cls.get_context_class_or_die(),
@@ -2106,7 +2173,7 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
                 )
             ):
                 # Pre alpha.5 used to have a different name mangling scheme.
-                objname = sn.compat_name_remangle(objname)
+                objname = sn.compat_name_remangle(str(objname))
 
             key = (objname, qlclass)
             specified_id = context.schema_object_ids.get(key)
@@ -2123,7 +2190,7 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
 
         # Check if functions by this name exist
         fn = props.get('name')
-        if fn is not None:
+        if fn is not None and not sn.is_fullname(str(fn)):
             funcs = schema.get_functions(fn, tuple())
             if funcs:
                 raise errors.SchemaError(
@@ -2184,8 +2251,7 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         schema: s_schema.Schema,
         context: CommandContext,
     ) -> s_schema.Schema:
-        dummy = cast(so.Object_T, _dummy_object)
-        with self.new_context(schema, context, dummy):
+        with self.new_context(schema, context, _dummy_object):  # type: ignore
             if self.if_not_exists:
                 scls = self.get_object(schema, context, default=None)
 
@@ -2271,7 +2337,7 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
 
     astnode = qlast.Rename
 
-    new_name = struct.Field(str)
+    new_name = struct.Field(sn.Name)
 
     def _fix_referencing_expr(
         self,
@@ -2298,12 +2364,21 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
         for ref in compiled.irast.schema_ref_exprs.get(self.scls, []):
             if isinstance(ref, qlast.Ptr):
                 ref = ref.ptr
-            assert isinstance(ref, qlast.ObjectRef), (
-                f"only support object refs but got {ref}")
-            assert ref.name == old_shortname, (ref.name, old_shortname)
-            ref.name = new_shortname.name
-            if new_shortname.module != "__":
-                ref.module = new_shortname.module
+
+            assert isinstance(ref, (qlast.ObjectRef, qlast.FunctionCall)), (
+                f"only support object refs and func calls but got {ref}")
+            if isinstance(ref, qlast.FunctionCall):
+                ref.func = ((new_shortname.module, new_shortname.name)
+                            if isinstance(new_shortname, sn.QualName)
+                            else new_shortname.name)
+            elif isinstance(ref, qlast.ObjectRef):
+                assert ref.name == old_shortname, (ref.name, old_shortname)
+                ref.name = new_shortname.name
+                if (
+                    isinstance(new_shortname, sn.QualName)
+                    and new_shortname.module != "__"
+                ):
+                    ref.module = new_shortname.module
 
         # say as_fragment=True as a hack to avoid renormalizing it
         out = s_expr.Expression.from_ast(
@@ -2327,6 +2402,7 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
             fixer=self._fix_referencing_expr)
 
         if not context.canonical:
+            self.validate_rename(schema, context)
             self.set_attribute_value(
                 'name',
                 value=self.new_name,
@@ -2363,6 +2439,13 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
         schema = self._finalize_affected_refs(schema, context)
         return schema
 
+    def validate_rename(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> None:
+        pass
+
     def apply(
         self,
         schema: s_schema.Schema,
@@ -2383,8 +2466,8 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
     def _canonicalize_ref_rename(
         self,
         ref: so.Object,
-        ref_name: str,
-        new_ref_name: str,
+        ref_name: sn.Name,
+        new_ref_name: sn.Name,
         schema: s_schema.Schema,
         context: CommandContext,
         scls: so.Object,
@@ -2426,12 +2509,12 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
             for ref in all_refs:
                 ref_name = ref.get_name(schema)
                 quals = list(sn.quals_from_fullname(ref_name))
-                quals[0] = self.new_name
+                assert isinstance(self.new_name, sn.QualName)
+                quals[0] = str(self.new_name)
                 shortname = sn.shortname_from_fullname(ref_name)
-
-                new_ref_name = sn.Name(
+                new_ref_name = sn.QualName(
                     name=sn.get_specialized_name(shortname, *quals),
-                    module=sn.Name(self.new_name).module,
+                    module=self.new_name.module,
                 )
 
                 commands.append(self._canonicalize_ref_rename(
@@ -2492,6 +2575,12 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
             RenameObject, parent_class)
 
         new_name = cls._classname_from_ast(schema, astnode, context)
+
+        # Populate the early_renames map of the context as we go, since
+        # in-flight renames will affect the generated names of later
+        # operations.
+        context.early_renames[parent_op.classname] = new_name
+
         return rename_class(
             metaclass=parent_class,
             classname=parent_op.classname,
@@ -2501,7 +2590,7 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
 
 class RenameQualifiedObject(AlterObjectFragment[so.Object_T]):
 
-    new_name = struct.Field(sn.Name)
+    new_name = struct.Field(sn.QualName)
 
     def _get_ast(
         self,
@@ -2538,68 +2627,6 @@ class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         if getattr(astnode, 'is_abstract', False):
             cmd.set_attribute_value('is_abstract', True)
 
-        added_bases = []
-        dropped_bases: List[so.ObjectShell] = []
-
-        if getattr(astnode, 'commands', None):
-            for astcmd in astnode.commands:
-                if isinstance(astcmd, qlast.AlterDropInherit):
-                    dropped_bases.extend(
-                        utils.ast_to_object_shell(
-                            b,
-                            metaclass=cls.get_schema_metaclass(),
-                            modaliases=context.modaliases,
-                            schema=schema,
-                        )
-                        for b in astcmd.bases
-                    )
-
-                elif isinstance(astcmd, qlast.AlterAddInherit):
-                    bases = [
-                        utils.ast_to_object_shell(
-                            b,
-                            metaclass=cls.get_schema_metaclass(),
-                            modaliases=context.modaliases,
-                            schema=schema,
-                        )
-                        for b in astcmd.bases
-                    ]
-
-                    pos_node = astcmd.position
-                    pos: Optional[Union[str, Tuple[str, so.ObjectShell]]]
-                    if pos_node is not None:
-                        if pos_node.ref is not None:
-                            ref = so.ObjectShell(
-                                name=(
-                                    f'{pos_node.ref.module}::'
-                                    f'{pos_node.ref.name}'
-                                ),
-                                schemaclass=cls.get_schema_metaclass(),
-                            )
-                            pos = (pos_node.position, ref)
-                        else:
-                            pos = pos_node.position
-                    else:
-                        pos = None
-
-                    added_bases.append((bases, pos))
-
-        if added_bases or dropped_bases:
-            from . import inheriting
-
-            parent_class = cmd.get_schema_metaclass()
-            rebase_class = ObjectCommandMeta.get_command_class_or_die(
-                inheriting.RebaseInheritingObject, parent_class)
-
-            cmd.add(
-                rebase_class(
-                    metaclass=parent_class,
-                    classname=cmd.classname,
-                    removed_bases=tuple(dropped_bases),
-                    added_bases=tuple(added_bases)
-                )
-            )
-
         return cmd
 
     def _get_ast(
@@ -2628,9 +2655,6 @@ class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         for op in self.get_prerequisites():
             schema = op.apply(schema, context)
 
-        for op in self.get_subcommands(type=AlterObjectFragment):
-            schema = op.apply(schema, context)
-
         if not context.canonical:
             schema = self.populate_ddl_identity(schema, context)
             schema = self.canonicalize_attributes(schema, context)
@@ -2646,7 +2670,7 @@ class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         context: CommandContext,
     ) -> s_schema.Schema:
         for op in self.get_subcommands(include_prerequisites=False):
-            if not isinstance(op, (AlterObjectFragment, AlterObjectProperty)):
+            if not isinstance(op, AlterObjectProperty):
                 schema = op.apply(schema, context=context)
 
         return schema
@@ -2696,6 +2720,11 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
     #: If True, apply the command only if the object has no referrers
     #: in the schema.
     if_unused = struct.Field(bool, default=False)
+
+    #: Potential references to this object that we know are being
+    #: deleted, which we use to resolve if_unused.
+    expiring_refs = struct.Field(AbstractSet[so.Object],
+                                 default=frozenset())
 
     def _delete_begin(
         self,
@@ -2785,6 +2814,7 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
             if refs:
                 for ref in refs:
                     if (not context.is_deleting(ref)
+                            and ref not in self.expiring_refs
                             and ref.is_blocking_ref(orig_schema, self.scls)):
                         ref_strs.append(
                             ref.get_verbosename(orig_schema, with_parent=True))
@@ -2815,7 +2845,7 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
             if (
                 not self.canonical
                 and self.if_unused
-                and schema.get_referrers(scls)
+                and (schema.get_referrers(scls) - self.expiring_refs)
             ):
                 parent_ctx = context.parent()
                 if parent_ctx is not None:
@@ -2850,6 +2880,7 @@ class AlterSpecialObjectProperty(Command):
         field = parent_cls.get_field(propname)
 
         new_value: Any = astnode.value
+        old_value: Any = None
 
         if field.type is s_expr.Expression:
             if parent_cls.has_field(f'orig_{field.name}'):
@@ -2857,17 +2888,20 @@ class AlterSpecialObjectProperty(Command):
                     schema, parent_op.qlast, field.name)
             else:
                 orig_text = None
-            new_value = s_expr.Expression.from_ast(
-                astnode.value,
-                schema,
-                context.modaliases,
-                context.localnames,
-                orig_text=orig_text,
-            )
+
+            if astnode.value is not None:
+                new_value = s_expr.Expression.from_ast(
+                    astnode.value,
+                    schema,
+                    context.modaliases,
+                    context.localnames,
+                    orig_text=orig_text,
+                )
 
         return AlterObjectProperty(
             property=astnode.name,
             new_value=new_value,
+            old_value=old_value,
             source_context=astnode.context,
         )
 
@@ -2926,7 +2960,7 @@ class AlterObjectProperty(Command):
                 schema,
                 context.modaliases,
                 orig_text=orig_text,
-            )
+            ) if astnode.value else None
         else:
             if isinstance(astnode.value, qlast.Tuple):
                 new_value = tuple(
@@ -2950,7 +2984,7 @@ class AlterObjectProperty(Command):
 
             else:
                 new_value = qlcompiler.evaluate_ast_to_python_val(
-                    astnode.value, schema=schema)
+                    astnode.value, schema=schema) if astnode.value else None
 
         return cls(property=propname, new_value=new_value,
                    source_context=astnode.context)
@@ -2968,6 +3002,10 @@ class AlterObjectProperty(Command):
         new_value_empty = \
             (value is None or
                 (isinstance(value, collections.abc.Container) and not value))
+        old_value_empty = \
+            (self.old_value is None or
+                (isinstance(self.old_value, collections.abc.Container)
+                 and not self.old_value))
 
         parent_ctx = context.current()
         parent_op = parent_ctx.op
@@ -3014,9 +3052,11 @@ class AlterObjectProperty(Command):
                 return None
 
         if new_value_empty:
-            return None
-
-        if issubclass(field.type, s_expr.Expression):
+            if old_value_empty:
+                return None
+            else:
+                value = None
+        elif issubclass(field.type, s_expr.Expression):
             return self._get_expr_field_ast(
                 schema,
                 context,
@@ -3148,16 +3188,12 @@ def compile_ddl(
     return cmd
 
 
-# See _dummy_command
-_dummy_object_command: ObjectCommand[Any] = ObjectCommand(classname="dummy")
-
-
 def get_object_delta_command(
     *,
     objtype: Type[so.Object_T],
     cmdtype: Type[ObjectCommand_T],
     schema: s_schema.Schema,
-    name: str,
+    name: sn.Name,
     ddl_identity: Optional[Mapping[str, Any]] = None,
     **kwargs: Any,
 ) -> ObjectCommand_T:
@@ -3177,12 +3213,12 @@ def get_object_delta_command(
 def get_object_command_id(delta: ObjectCommand[so.Object]) -> str:
     quoted_name: str
 
-    if isinstance(delta.classname, sn.Name):
+    if isinstance(delta.classname, sn.QualName):
         quoted_module = qlquote.quote_ident(delta.classname.module)
         quoted_nqname = qlquote.quote_ident(delta.classname.name)
-        quoted_name = sn.Name(module=quoted_module, name=quoted_nqname)
+        quoted_name = f'{quoted_module}::{quoted_nqname}'
     else:
-        quoted_name = qlquote.quote_ident(delta.classname)
+        quoted_name = qlquote.quote_ident(str(delta.classname))
 
     if isinstance(delta, CreateObject):
         qlop = 'CREATE'

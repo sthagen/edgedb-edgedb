@@ -61,6 +61,7 @@ def compile_FunctionCall(
 
     env = ctx.env
 
+    funcname: sn.Name
     if isinstance(expr.func, str):
         if (
             ctx.env.options.func_params is not None
@@ -72,9 +73,9 @@ def compile_FunctionCall(
                 f'parameter `{expr.func}` is not callable',
                 context=expr.context)
 
-        funcname = expr.func
+        funcname = sn.UnqualName(expr.func)
     else:
-        funcname = sn.Name(expr.func[1], expr.func[0])
+        funcname = sn.QualName(*expr.func)
 
     funcs = env.schema.get_functions(funcname, module_aliases=ctx.modaliases)
 
@@ -219,6 +220,7 @@ def compile_FunctionCall(
         func_module_id=env.schema.get_global(
             s_mod.Module, func_name.module).id,
         func_shortname=func_name,
+        backend_name=func.get_backend_name(env.schema),
         func_polymorphic=is_polymorphic,
         func_sql_function=func.get_from_function(env.schema),
         force_return_cast=func.get_force_return_cast(env.schema),
@@ -244,8 +246,8 @@ def compile_FunctionCall(
 #: A dictionary of conditional callables and the indices
 #: of the arguments that are evaluated conditionally.
 CONDITIONAL_OPS = {
-    'std::IF': {0, 2},
-    'std::??': {1},
+    sn.QualName('std', 'IF'): {0, 2},
+    sn.QualName('std', '??'): {1},
 }
 
 
@@ -475,6 +477,7 @@ def compile_operator(
     assert isinstance(oper, s_oper.Operator)
     env.add_schema_ref(oper, expr=qlexpr)
     oper_name = oper.get_shortname(env.schema)
+    str_oper_name = str(oper_name)
 
     matched_params = oper.get_params(env.schema)
     rtype = matched_call.return_type
@@ -493,10 +496,10 @@ def compile_operator(
         ctx=ctx,
     )
 
-    if oper_name in {'std::UNION', 'std::IF'} and rtype.is_object_type():
+    if str_oper_name in {'std::UNION', 'std::IF'} and rtype.is_object_type():
         # Special case for the UNION and IF operators, instead of common
         # parent type, we return a union type.
-        if oper_name == 'std::UNION':
+        if str_oper_name == 'std::UNION':
             larg, rarg = (a.expr for a in final_args)
         else:
             larg, _, rarg = (a.expr for a in final_args)
@@ -526,7 +529,7 @@ def compile_operator(
             not in_polymorphic_func):
         sql_operator = tuple(from_op)
 
-    origin_name: Optional[sn.SchemaName]
+    origin_name: Optional[sn.QualName]
     origin_module_id: Optional[uuid.UUID]
     if derivative_op is not None:
         origin_name = oper_name
@@ -614,13 +617,15 @@ def compile_call_arg(
 
 
 def compile_call_args(
-        expr: qlast.FunctionCall, funcname: str, *,
-        ctx: context.ContextLevel) \
-        -> Tuple[
-            List[Tuple[s_types.Type, irast.Set]],
-            Dict[str, Tuple[s_types.Type, irast.Set]],
-            Dict[irast.Set, context.ContextLevel]]:
-
+    expr: qlast.FunctionCall,
+    funcname: sn.Name,
+    *,
+    ctx: context.ContextLevel
+) -> Tuple[
+    List[Tuple[s_types.Type, irast.Set]],
+    Dict[str, Tuple[s_types.Type, irast.Set]],
+    Dict[irast.Set, context.ContextLevel],
+]:
     args = []
     kwargs = {}
     arg_ctxs = {}

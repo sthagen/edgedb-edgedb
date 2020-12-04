@@ -48,7 +48,6 @@ class ObjectType(
     s_types.InheritingType,
     sources.Source,
     constraints.ConsistencySubject,
-    s_anno.AnnotationSubject,
     s_abc.ObjectType,
     qlkind=qltypes.SchemaObjectClass.TYPE,
 ):
@@ -140,11 +139,11 @@ class ObjectType(
     def getrptrs(
         self,
         schema: s_schema.Schema,
-        name: Union[sn.Name, str],
+        name: str,
         *,
         sources: Iterable[so.Object] = ()
     ) -> Set[links.Link]:
-        if sn.Name.is_qualified(name):
+        if sn.is_qualified(name):
             raise ValueError(
                 'references to concrete pointers must not be qualified')
         ptrs = {
@@ -172,6 +171,12 @@ class ObjectType(
                 )
             )
 
+        unions = schema.get_referrers(
+            self, scls_type=ObjectType, field_name='union_of')
+
+        for union in unions:
+            ptrs.update(union.getrptrs(schema, name, sources=sources))
+
         return ptrs
 
     def implicitly_castable_to(
@@ -198,15 +203,15 @@ class ObjectType(
         )
 
     @classmethod
-    def get_root_classes(cls) -> Tuple[sn.Name, ...]:
+    def get_root_classes(cls) -> Tuple[sn.QualName, ...]:
         return (
-            sn.Name(module='std', name='BaseObject'),
-            sn.Name(module='std', name='Object'),
+            sn.QualName(module='std', name='BaseObject'),
+            sn.QualName(module='std', name='Object'),
         )
 
     @classmethod
-    def get_default_base_name(cls) -> sn.Name:
-        return sn.Name(module='std', name='Object')
+    def get_default_base_name(cls) -> sn.QualName:
+        return sn.QualName(module='std', name='Object')
 
     def _issubclass(
         self,

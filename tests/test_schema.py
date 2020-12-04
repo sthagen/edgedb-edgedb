@@ -150,8 +150,7 @@ _123456789_123456789_123456789 -> str
 
     @tb.must_fail(errors.InvalidReferenceError,
                   "type 'test::int' does not exist",
-                  position=73,
-                  hint='did you mean one of these: int16, int32, int64?')
+                  position=73)
     def test_schema_bad_type_01(self):
         """
             type Object {
@@ -593,7 +592,7 @@ _123456789_123456789_123456789 -> str
         constr = name_prop.get_constraints(schema).objects(schema)[0]
         base_names = constr.get_bases(schema).names(schema)
         self.assertEqual(len(base_names), 1)
-        self.assertTrue(base_names[0].startswith(
+        self.assertTrue(str(base_names[0]).startswith(
             'default::std|exclusive@default|__||name&default||Named@'))
 
     def test_schema_constraint_inheritance_02(self):
@@ -618,7 +617,7 @@ _123456789_123456789_123456789 -> str
         constr = name_prop.get_constraints(schema).objects(schema)[0]
         base_names = constr.get_bases(schema).names(schema)
         self.assertEqual(len(base_names), 1)
-        self.assertTrue(base_names[0].startswith(
+        self.assertTrue(str(base_names[0]).startswith(
             'default::std|exclusive@default|__||name&default||Named@'))
 
     def test_schema_constraint_inheritance_03(self):
@@ -1116,6 +1115,8 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
     This tests that schemas produced by `COMMIT MIGRATION foo` and
     by deparsed DDL via `GET MIGRATION foo` are identical.
     """
+
+    std_schema: s_schema.Schema
 
     @classmethod
     def setUpClass(cls):
@@ -1864,6 +1865,100 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
     def test_schema_get_migration_35(self):
         schema = r'''
             function bar() -> str using(SELECT <str>Object.id LIMIT 1);
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_get_migration_36(self):
+        # Make sure that awkward order of computables and types
+        # extending each other doesn't affect the migraiton.
+        #
+        # Issue #1941.
+        schema = r'''
+        type Owner {
+            multi link professional_skills := .<user[IS Pencil];
+        };
+        abstract type Thing {
+            required link user -> Owner;
+        };
+        type Pencil extending Thing;
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_get_migration_37(self):
+        # Make sure that awkward order of computables and types
+        # extending each other doesn't affect the migraiton.
+        #
+        # Issue #1941.
+        schema = r'''
+        type Owner {
+            multi link professional_skills := .<user[IS Pencil];
+        };
+        abstract type Thing {
+            required link user -> Owner;
+        };
+        type Pencil extending Thing;
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_get_migration_38(self):
+        # Make sure that awkward order of computables and types
+        # extending each other doesn't affect the migraiton.
+        #
+        # Issue #1941.
+        schema = r'''
+        type Owner {
+            multi link professional_skills := .<user[IS Thing][IS Pencil];
+        };
+        abstract type Thing {
+            required link user -> Owner;
+        };
+        type Pencil extending Thing;
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_get_migration_39(self):
+        # Make sure that awkward order of computables and types
+        # extending each other doesn't affect the migraiton.
+        #
+        # Issue #1941.
+        schema = r'''
+        type Owner {
+            multi link professional_skills := .<user[IS Thing][IS Pencil];
+        };
+        type Color {
+        };
+        abstract type Thing {
+            required link user -> Owner;
+            required link color -> Color;
+            required property enabled -> bool;
+        };
+        type Pencil extending Thing {
+            constraint exclusive on ((.user, .color));
+        };
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_get_migration_40(self):
+        # Make sure that awkward order of computables and types
+        # extending each other doesn't affect the migraiton.
+        #
+        # Issue #1941.
+        schema = r'''
+        type Owner {
+            multi property notes := .<user[IS Pencil]@note;
+        };
+        abstract type Thing {
+            required link user extending base_user -> Owner;
+        };
+        type Pencil extending Thing;
+        abstract link base_user {
+            property note -> str;
+        };
         '''
 
         self._assert_migration_consistency(schema)
@@ -3699,6 +3794,18 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             }
         """])
 
+    def test_schema_migrations_equivalence_collections_05b(self):
+        self._assert_migration_equivalence([r"""
+            type Base {
+                property foo -> array<float32>;
+            }
+        """, r"""
+            type Base {
+                # convert property type to array
+                property foo -> float32;
+            }
+        """])
+
     def test_schema_migrations_equivalence_collections_06(self):
         self._assert_migration_equivalence([r"""
             type Base {
@@ -3927,7 +4034,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 property bar -> int32;
             };
 
-            # aliases with array<flaot32>
+            # aliases with array<float32>
             alias BaseAlias := Base { data := [Base.foo] };
             alias CollAlias := [Base.foo];
         """])
@@ -4395,6 +4502,88 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             type RenameObj {
                 property prop EXTENDING new_abs_prop -> str;
             };
+        """])
+
+    def test_schema_migrations_drop_parent_01(self):
+        self._assert_migration_equivalence([r"""
+            type Parent {
+                property name -> str {
+                    constraint exclusive;
+                }
+            }
+            type Child extending Parent {
+                overloaded property name -> str;
+            };
+        """, r"""
+            type Parent {
+                property name -> str {
+                    constraint exclusive;
+                }
+            }
+            type Child {
+                property name -> str;
+            };
+        """])
+
+    def test_schema_migrations_drop_parent_02(self):
+        self._assert_migration_equivalence([r"""
+            type Parent {
+                property name -> str {
+                    constraint exclusive;
+                }
+            }
+            type Child extending Parent;
+        """, r"""
+            type Parent {
+                property name -> str {
+                    constraint exclusive;
+                }
+            }
+            type Child {
+                property name -> str;
+            }
+        """])
+
+    def test_schema_migrations_drop_parent_03(self):
+        self._assert_migration_equivalence([r"""
+            type Parent {
+                property name -> str {
+                    delegated constraint exclusive;
+                }
+            }
+            type Child extending Parent;
+        """, r"""
+            type Parent {
+                property name -> str {
+                    delegated constraint exclusive;
+                }
+            }
+            type Child {
+                property name -> str {
+                    constraint exclusive;
+                }
+            }
+        """])
+
+    def test_schema_migrations_drop_parent_04(self):
+        self._assert_migration_equivalence([r"""
+            type Parent {
+                link foo -> Object {
+                    property x -> str;
+                }
+            }
+            type Child extending Parent;
+        """, r"""
+            type Parent {
+                link foo -> Object {
+                    property x -> str;
+                }
+            }
+            type Child {
+                link foo -> Object {
+                    property x -> str;
+                }
+            }
         """])
 
 
@@ -5454,7 +5643,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 CREATE OPTIONAL MULTI LINK intersection_of
                     -> schema::ObjectType;
                 CREATE OPTIONAL MULTI LINK union_of -> schema::ObjectType;
-                CREATE OPTIONAL SINGLE PROPERTY is_compound_type := (
+                CREATE REQUIRED SINGLE PROPERTY is_compound_type := (
                     (EXISTS (.union_of) OR EXISTS (.intersection_of))
                 );
                 CREATE OPTIONAL MULTI LINK links := (
@@ -5482,7 +5671,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                     .pointers[IS schema::Property]
                 );
                 optional multi link union_of -> schema::ObjectType;
-                optional single property is_compound_type := (
+                required single property is_compound_type := (
                     (EXISTS (.union_of) OR EXISTS (.intersection_of))
                 );
             };
@@ -5732,7 +5921,7 @@ class TestCreateMigration(tb.BaseSchemaTest):
         with self.assertRaisesRegex(
             errors.SchemaDefinitionError,
             f"specified migration parent is not the most recent migration, "
-            f"expected {m2!r}",
+            f"expected {str(m2)!r}",
         ):
             m3 = 'm1vrzjotjgjxhdratq7jz5vdxmhvg2yun2xobiddag4aqr3y4gavgq'
             schema = self.run_ddl(

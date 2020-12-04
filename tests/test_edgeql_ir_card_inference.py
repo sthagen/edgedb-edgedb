@@ -58,7 +58,7 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
         if field is not None:
             shape = ir.expr.expr.result.shape
             for el, _ in shape:
-                if el.path_id.rptr_name().endswith(field):
+                if str(el.path_id.rptr_name()).endswith(field):
                     card = el.rptr.ptrref.out_cardinality
                     self.assertEqual(card, expected_cardinality,
                                      'unexpected cardinality:\n' + source)
@@ -480,4 +480,14 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
         }
 % OK %
         as_card: AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_47(self):
+        """
+        WITH MODULE test
+        SELECT User {
+            foo := EXISTS(.friends)
+        }
+% OK %
+        foo: ONE
         """

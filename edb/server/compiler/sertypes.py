@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+
 #
 # This source file is part of the EdgeDB open source project.
 #
@@ -367,7 +369,7 @@ class TypeSerializer:
         *,
         follow_links: bool = True,
         inline_typenames: bool = False,
-    ) -> bytes:
+    ) -> typing.Tuple[bytes, uuid.UUID]:
         builder = cls(
             schema,
             inline_typenames=inline_typenames,
@@ -387,7 +389,7 @@ class TypeSerializer:
         return cls._JSON_DESC
 
     @classmethod
-    def _describe_json(cls) -> bytes:
+    def _describe_json(cls) -> typing.Tuple[bytes, uuid.UUID]:
         json_id = s_obj.get_known_type_id('std::str')
 
         buf = []
@@ -463,9 +465,10 @@ class TypeSerializer:
             return ArrayDesc(
                 tid=tid, dim_len=dim_len, subtype=codecs_list[pos])
 
-        elif (t >= 0x7f and t <= 0xff):
+        elif (t >= 0x80 and t <= 0xff):
             # Ignore all type annotations.
             desc.read_len32_prefixed_bytes()
+            return None
 
         else:
             raise NotImplementedError(
@@ -480,7 +483,9 @@ class TypeSerializer:
             desc = cls._parse(wrapped, codecs_list)
             if desc is not None:
                 codecs_list.append(desc)
-        return desc
+        if not codecs_list:
+            raise errors.InternalServerError('could not parse type descriptor')
+        return codecs_list[-1]
 
 
 @dataclasses.dataclass(frozen=True)

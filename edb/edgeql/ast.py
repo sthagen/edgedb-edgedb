@@ -324,7 +324,8 @@ class BooleanConstant(BaseConstant):
 
 
 class BytesConstant(BaseConstant):
-    value: bytes
+    # This should really just be str to match, though
+    value: bytes  # type: ignore[assignment]
 
     @classmethod
     def from_python(cls, s: bytes) -> BytesConstant:
@@ -647,7 +648,7 @@ class OnTargetDelete(DDLOperation):
 class BaseSetField(DDLOperation):
     __abstract_node__ = True
     name: str
-    value: Expr
+    value: typing.Optional[Expr]
 
 
 class SetField(BaseSetField):
@@ -689,7 +690,7 @@ class Rename(NamedDDL):
     new_name: ObjectRef
 
     @property
-    def name(self) -> ObjectRef:
+    def name(self) -> ObjectRef:  # type: ignore[override]  # mypy bug?
         return self.new_name
 
 

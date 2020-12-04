@@ -32,6 +32,7 @@ from . import expr as s_expr
 from . import functions as s_func
 from . import migrations as s_migr
 from . import modules as s_mod
+from . import name as sn
 from . import objects as so
 from . import objtypes as s_objtypes
 from . import ordering as s_ordering
@@ -50,8 +51,8 @@ def delta_schemas(
     *,
     included_modules: Optional[Iterable[str]]=None,
     excluded_modules: Optional[Iterable[str]]=None,
-    included_items: Optional[Iterable[str]]=None,
-    excluded_items: Optional[Iterable[str]]=None,
+    included_items: Optional[Iterable[sn.Name]]=None,
+    excluded_items: Optional[Iterable[sn.Name]]=None,
     schema_a_filters: Iterable[
         Callable[[s_schema.Schema, so.Object], bool]
     ] = (),
@@ -153,12 +154,12 @@ def delta_schemas(
                         and (obj.get_name(schema).module
                              in s_schema.STD_MODULES))
                     or (isinstance(obj, s_mod.Module)
-                        and obj.get_name(schema) in s_schema.STD_MODULES)
+                        and str(obj.get_name(schema)) in s_schema.STD_MODULES)
                 )
             schema_a_filters.append(_filter)
 
     my_modules = {
-        m.get_name(schema_b)
+        str(m.get_name(schema_b))
         for m in schema_b.get_objects(
             type=s_mod.Module,
             extra_filters=schema_b_filters,
@@ -166,7 +167,7 @@ def delta_schemas(
     }
 
     other_modules = {
-        m.get_name(schema_a)
+        str(m.get_name(schema_a))
         for m in schema_a.get_objects(
             type=s_mod.Module,
             extra_filters=schema_a_filters,
@@ -224,11 +225,10 @@ def delta_schemas(
                     schema=schema_b,
                     context=context,
                 )
+                assert isinstance(create, sd.CreateObject)
                 create.if_not_exists = True
 
                 result.add(create)
-
-    objects = sd.DeltaRoot(canonical=True)
 
     schemaclasses = [
         schemacls
@@ -244,51 +244,62 @@ def delta_schemas(
         )
     ]
 
-    for sclass in schemaclasses:
-        filters: List[Callable[[s_schema.Schema, so.Object], bool]] = []
+    assert not context.renames
+    # We retry performing the diff until we stop finding new
+    # renames. This allows us to be agnostic to the order that we
+    # process schemaclasses.
+    old_count = -1
+    while old_count != len(context.renames):
+        old_count = len(context.renames)
+        context.deletions.clear()
 
-        if not issubclass(sclass, so.QualifiedObject):
-            # UnqualifiedObjects (like anonymous tuples and arrays)
-            # should not use an included_modules filter.
-            incl_modules = None
-        else:
-            if issubclass(sclass, so.DerivableObject):
-                def _only_generic(
-                    schema: s_schema.Schema,
-                    obj: so.Object,
-                ) -> bool:
-                    assert isinstance(obj, so.DerivableObject)
-                    return obj.generic(schema)
-                filters.append(_only_generic)
-            incl_modules = included_modules
+        objects = sd.DeltaRoot(canonical=True)
 
-        new = schema_b.get_objects(
-            type=sclass,
-            included_modules=incl_modules,
-            excluded_modules=excluded_modules,
-            included_items=included_items,
-            excluded_items=excluded_items,
-            extra_filters=filters + schema_b_filters,
-        )
-        old = schema_a.get_objects(
-            type=sclass,
-            included_modules=incl_modules,
-            excluded_modules=excluded_modules,
-            included_items=included_items,
-            excluded_items=excluded_items,
-            extra_filters=filters + schema_a_filters,
-        )
+        for sclass in schemaclasses:
+            filters: List[Callable[[s_schema.Schema, so.Object], bool]] = []
 
-        objects.add(
-            sd.delta_objects(
-                old,
-                new,
-                sclass=sclass,
-                old_schema=schema_a,
-                new_schema=schema_b,
-                context=context,
+            if not issubclass(sclass, so.QualifiedObject):
+                # UnqualifiedObjects (like anonymous tuples and arrays)
+                # should not use an included_modules filter.
+                incl_modules = None
+            else:
+                if issubclass(sclass, so.DerivableObject):
+                    def _only_generic(
+                        schema: s_schema.Schema,
+                        obj: so.Object,
+                    ) -> bool:
+                        assert isinstance(obj, so.DerivableObject)
+                        return obj.generic(schema)
+                    filters.append(_only_generic)
+                incl_modules = included_modules
+
+            new = schema_b.get_objects(
+                type=sclass,
+                included_modules=incl_modules,
+                excluded_modules=excluded_modules,
+                included_items=included_items,
+                excluded_items=excluded_items,
+                extra_filters=filters + schema_b_filters,
             )
-        )
+            old = schema_a.get_objects(
+                type=sclass,
+                included_modules=incl_modules,
+                excluded_modules=excluded_modules,
+                included_items=included_items,
+                excluded_items=excluded_items,
+                extra_filters=filters + schema_a_filters,
+            )
+
+            objects.add(
+                sd.delta_objects(
+                    old,
+                    new,
+                    sclass=sclass,
+                    old_schema=schema_a,
+                    new_schema=schema_b,
+                    context=context,
+                )
+            )
 
     if linearize_delta:
         objects = s_ordering.linearize_delta(
@@ -347,7 +358,9 @@ def cmd_from_ddl(
         context = sd.CommandContext(
             schema=schema, modaliases=modaliases, testmode=testmode)
 
-    return sd.compile_ddl(schema, ddl, context=context)
+    res = sd.compile_ddl(schema, ddl, context=context)
+    context.early_renames.clear()
+    return res
 
 
 def apply_sdl(
@@ -467,7 +480,7 @@ def delta_from_ddl(
     stdmode: bool=False,
     testmode: bool=False,
     schema_object_ids: Optional[
-        Mapping[Tuple[str, Optional[str]], uuid.UUID]
+        Mapping[Tuple[sn.Name, Optional[str]], uuid.UUID]
     ]=None,
     compat_ver: Optional[verutils.Version] = None,
 ) -> sd.DeltaRoot:
@@ -492,7 +505,7 @@ def _delta_from_ddl(
     internal_schema_mode: bool=False,
     testmode: bool=False,
     schema_object_ids: Optional[
-        Mapping[Tuple[str, Optional[str]], uuid.UUID]
+        Mapping[Tuple[sn.Name, Optional[str]], uuid.UUID]
     ]=None,
     compat_ver: Optional[verutils.Version] = None,
 ) -> Tuple[s_schema.Schema, sd.DeltaRoot]:
@@ -523,21 +536,36 @@ def _delta_from_ddl(
 
 
 def ddlast_from_delta(
-    schema: s_schema.Schema,
+    schema_a: Optional[s_schema.Schema],
+    schema_b: s_schema.Schema,
     delta: sd.DeltaRoot,
     *,
     sdlmode: bool = False,
     descriptive_mode: bool = False,
 ) -> Tuple[qlast.DDLOperation, ...]:
-
     context = sd.CommandContext(
         descriptive_mode=descriptive_mode,
         declarative=sdlmode,
     )
 
+    if schema_a is None:
+        schema = schema_b
+        update_schema = False
+    else:
+        schema = schema_a
+        update_schema = True
+
     stmts = []
     for command in delta.get_subcommands():
         with context(sd.DeltaRootContext(schema=schema, op=delta)):
+            # The reason we do this instead of just directly using the new
+            # schema is to populate the renames field of the context.
+            # We do this one part at a time to avoid referring to things
+            # that have not been renamed yet.
+            # XXX: Is this fine-grained enough, though?
+            if update_schema:
+                schema = command.apply(schema, context)
+
             ql_ast = command.get_ast(schema, context)
             if ql_ast:
                 stmts.append(ql_ast)
@@ -546,7 +574,8 @@ def ddlast_from_delta(
 
 
 def statements_from_delta(
-    schema: s_schema.Schema,
+    schema_a: Optional[s_schema.Schema],
+    schema_b: s_schema.Schema,
     delta: sd.DeltaRoot,
     *,
     sdlmode: bool = False,
@@ -555,7 +584,8 @@ def statements_from_delta(
 ) -> Tuple[str, ...]:
 
     stmts = ddlast_from_delta(
-        schema,
+        schema_a,
+        schema_b,
         delta,
         sdlmode=sdlmode,
         descriptive_mode=descriptive_mode,
@@ -581,7 +611,8 @@ def statements_from_delta(
 
 
 def text_from_delta(
-    schema: s_schema.Schema,
+    schema_a: Optional[s_schema.Schema],
+    schema_b: s_schema.Schema,
     delta: sd.DeltaRoot,
     *,
     sdlmode: bool = False,
@@ -589,7 +620,8 @@ def text_from_delta(
     limit_ref_classes: Iterable[so.ObjectMeta] = tuple(),
 ) -> str:
     stmts = statements_from_delta(
-        schema,
+        schema_a,
+        schema_b,
         delta,
         sdlmode=sdlmode,
         descriptive_mode=descriptive_mode,
@@ -599,13 +631,16 @@ def text_from_delta(
 
 
 def ddl_text_from_delta(
-    schema: s_schema.Schema,
+    schema_a: Optional[s_schema.Schema],
+    schema_b: s_schema.Schema,
     delta: sd.DeltaRoot,
 ) -> str:
     """Return DDL text corresponding to a delta plan.
 
     Args:
-        schema:
+        schema_a:
+            The original schema (or None if starting from empty/std)
+        schema_b:
             The schema to which the *delta* has **already** been
             applied.
         delta:
@@ -614,14 +649,20 @@ def ddl_text_from_delta(
     Returns:
         DDL text corresponding to *delta*.
     """
-    return text_from_delta(schema, delta, sdlmode=False)
+    return text_from_delta(schema_a, schema_b, delta, sdlmode=False)
 
 
-def sdl_text_from_delta(schema: s_schema.Schema, delta: sd.DeltaRoot) -> str:
+def sdl_text_from_delta(
+    schema_a: Optional[s_schema.Schema],
+    schema_b: s_schema.Schema,
+    delta: sd.DeltaRoot,
+) -> str:
     """Return SDL text corresponding to a delta plan.
 
     Args:
-        schema:
+        schema_a:
+            The original schema (or None if starting from empty/std)
+        schema_b:
             The schema to which the *delta* has **already** been
             applied.
         delta:
@@ -630,11 +671,12 @@ def sdl_text_from_delta(schema: s_schema.Schema, delta: sd.DeltaRoot) -> str:
     Returns:
         SDL text corresponding to *delta*.
     """
-    return text_from_delta(schema, delta, sdlmode=True)
+    return text_from_delta(schema_a, schema_b, delta, sdlmode=True)
 
 
 def descriptive_text_from_delta(
-    schema: s_schema.Schema,
+    schema_a: Optional[s_schema.Schema],
+    schema_b: s_schema.Schema,
     delta: sd.DeltaRoot,
     *,
     limit_ref_classes: Iterable[so.ObjectMeta]=tuple(),
@@ -642,7 +684,9 @@ def descriptive_text_from_delta(
     """Return descriptive text corresponding to a delta plan.
 
     Args:
-        schema:
+        schema_a:
+            The original schema (or None if starting from empty/std)
+        schema_b:
             The schema to which the *delta* has **already** been
             applied.
         delta:
@@ -655,7 +699,8 @@ def descriptive_text_from_delta(
         Descriptive text corresponding to *delta*.
     """
     return text_from_delta(
-        schema,
+        schema_a,
+        schema_b,
         delta,
         sdlmode=True,
         descriptive_mode=True,
@@ -667,8 +712,8 @@ def ddl_text_from_schema(
     schema: s_schema.Schema, *,
     included_modules: Optional[Iterable[str]]=None,
     excluded_modules: Optional[Iterable[str]]=None,
-    included_items: Optional[Iterable[str]]=None,
-    excluded_items: Optional[Iterable[str]]=None,
+    included_items: Optional[Iterable[sn.Name]]=None,
+    excluded_items: Optional[Iterable[sn.Name]]=None,
     included_ref_classes: Iterable[so.ObjectMeta]=tuple(),
     include_module_ddl: bool=True,
     include_std_ddl: bool=False,
@@ -684,15 +729,15 @@ def ddl_text_from_schema(
         include_std_diff=include_std_ddl,
         include_derived_types=False,
     )
-    return ddl_text_from_delta(schema, diff)
+    return ddl_text_from_delta(None, schema, diff)
 
 
 def sdl_text_from_schema(
     schema: s_schema.Schema, *,
     included_modules: Optional[Iterable[str]]=None,
     excluded_modules: Optional[Iterable[str]]=None,
-    included_items: Optional[Iterable[str]]=None,
-    excluded_items: Optional[Iterable[str]]=None,
+    included_items: Optional[Iterable[sn.Name]]=None,
+    excluded_items: Optional[Iterable[sn.Name]]=None,
     included_ref_classes: Iterable[so.ObjectMeta]=tuple(),
     include_module_ddl: bool=True,
     include_std_ddl: bool=False,
@@ -709,15 +754,15 @@ def sdl_text_from_schema(
         include_derived_types=False,
         linearize_delta=False,
     )
-    return sdl_text_from_delta(schema, diff)
+    return sdl_text_from_delta(None, schema, diff)
 
 
 def descriptive_text_from_schema(
     schema: s_schema.Schema, *,
     included_modules: Optional[Iterable[str]]=None,
     excluded_modules: Optional[Iterable[str]]=None,
-    included_items: Optional[Iterable[str]]=None,
-    excluded_items: Optional[Iterable[str]]=None,
+    included_items: Optional[Iterable[sn.Name]]=None,
+    excluded_items: Optional[Iterable[sn.Name]]=None,
     included_ref_classes: Iterable[so.ObjectMeta]=tuple(),
     include_module_ddl: bool=True,
     include_std_ddl: bool=False,
@@ -736,4 +781,4 @@ def descriptive_text_from_schema(
         linearize_delta=False,
     )
     return descriptive_text_from_delta(
-        schema, diff, limit_ref_classes=included_ref_classes)
+        None, schema, diff, limit_ref_classes=included_ref_classes)

@@ -226,6 +226,9 @@ def merge_target(
     return target
 
 
+Pointer_T = TypeVar("Pointer_T", bound="Pointer")
+
+
 class Pointer(referencing.ReferencedInheritingObject,
               constraints.ConsistencySubject,
               s_anno.AnnotationSubject,
@@ -257,7 +260,7 @@ class Pointer(referencing.ReferencedInheritingObject,
     # but expr=None.
     computable = so.SchemaField(
         bool,
-        default=None,
+        default=False,
         compcoef=0.99,
     )
 
@@ -308,12 +311,12 @@ class Pointer(referencing.ReferencedInheritingObject,
         return bool(self.get_is_from_alias(schema))
 
     @classmethod
-    def get_displayname_static(cls, name: str) -> str:
+    def get_displayname_static(cls, name: sn.Name) -> str:
         sn = cls.get_shortname_static(name)
         if sn.module == '__':
             return sn.name
         else:
-            return sn
+            return str(sn)
 
     def get_verbosename(
         self,
@@ -447,33 +450,38 @@ class Pointer(referencing.ReferencedInheritingObject,
             return schema, current_target
 
     def get_derived(
-        self,
+        self: Pointer_T,
         schema: s_schema.Schema,
         source: s_sources.Source,
         target: s_types.Type,
         *,
-        derived_name_base: Optional[str] = None,
+        derived_name_base: Optional[sn.Name] = None,
         **kwargs: Any
-    ) -> Tuple[s_schema.Schema, Pointer]:
+    ) -> Tuple[s_schema.Schema, Pointer_T]:
         fqname = self.derive_name(
             schema, source, derived_name_base=derived_name_base)
         ptr = schema.get(fqname, default=None)
 
         if ptr is None:
             fqname = self.derive_name(
-                schema, source, target.get_name(schema),
-                derived_name_base=derived_name_base)
+                schema,
+                source,
+                str(target.get_name(schema)),
+                derived_name_base=derived_name_base,
+            )
             ptr = schema.get(fqname, default=None)
             if ptr is None:
                 schema, ptr = self.derive_ref(
                     schema, source, target=target,
                     derived_name_base=derived_name_base, **kwargs)
-        assert isinstance(ptr, Pointer)
-        return schema, ptr
+        return schema, ptr  # type: ignore
 
-    def get_derived_name_base(self, schema: s_schema.Schema) -> sn.Name:
+    def get_derived_name_base(
+        self,
+        schema: s_schema.Schema,
+    ) -> sn.QualName:
         shortname = self.get_shortname(schema)
-        return sn.Name(module='__', name=shortname.name)
+        return sn.QualName(module='__', name=shortname.name)
 
     def derive_ref(
         self,
@@ -689,14 +697,14 @@ class PseudoPointer(s_abc.Pointer):
     def get_ancestors(self, schema: s_schema.Schema) -> so.ObjectList[Pointer]:
         return so.ObjectList.create(schema, [])
 
-    def get_name(self, schema: s_schema.Schema) -> str:
+    def get_name(self, schema: s_schema.Schema) -> sn.QualName:
         raise NotImplementedError
 
-    def get_shortname(self, schema: s_schema.Schema) -> str:
+    def get_shortname(self, schema: s_schema.Schema) -> sn.QualName:
         return self.get_name(schema)
 
     def get_displayname(self, schema: s_schema.Schema) -> str:
-        return self.get_name(schema)
+        return str(self.get_name(schema))
 
     def has_user_defined_properties(self, schema: s_schema.Schema) -> bool:
         return False
@@ -710,7 +718,7 @@ class PseudoPointer(s_abc.Pointer):
     ) -> qltypes.SchemaCardinality:
         raise NotImplementedError
 
-    def get_path_id_name(self, schema: s_schema.Schema) -> str:
+    def get_path_id_name(self, schema: s_schema.Schema) -> sn.QualName:
         return self.get_name(schema)
 
     def get_is_derived(self, schema: s_schema.Schema) -> bool:
@@ -863,6 +871,11 @@ class PointerCommandOrFragment(
             schema = s_types.materialize_type_in_attribute(
                 schema, context, self, 'target')
 
+        expr = self.get_local_attribute_value('expr')
+        if expr is not None:
+            # There is an expression, therefore it is a computable.
+            self.set_attribute_value('computable', True)
+
         return schema
 
     def _parse_computable(
@@ -879,8 +892,8 @@ class PointerCommandOrFragment(
         # "source" attribute is set automatically as a refdict back-attr
         parent_ctx = self.get_referrer_context(context)
         assert parent_ctx is not None
-        source_name = parent_ctx.op.classname
-        assert isinstance(source_name, sn.Name)
+        source_name = context.get_referrer_name(parent_ctx)
+        assert isinstance(source_name, sn.QualName)
 
         source = schema.get(source_name, type=s_objtypes.ObjectType)
 
@@ -989,7 +1002,7 @@ class PointerCommandOrFragment(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
-        name: str,
+        name: sn.Name,
     ) -> qlast.ObjectRef:
 
         ref = super()._deparse_name(schema, context, name)
@@ -999,6 +1012,68 @@ class PointerCommandOrFragment(
         else:
             ref.module = ''
             return ref
+
+
+class PointerAlterFragment(
+    referencing.ReferencedObjectCommandBase[Pointer]
+):
+    @classmethod
+    def _cmd_tree_from_ast(
+        cls,
+        schema: s_schema.Schema,
+        astnode: qlast.DDLOperation,
+        context: sd.CommandContext,
+    ) -> referencing.AlterReferencedInheritingObject[Any]:
+        cmd = super()._cmd_tree_from_ast(schema, astnode, context)
+        assert isinstance(cmd, PointerCommand)
+        if isinstance(astnode, qlast.CreateConcreteLink):
+            cmd._process_create_or_alter_ast(schema, astnode, context)
+        else:
+            expr_cmd = qlast.get_ddl_field_command(astnode, 'expr')
+            if expr_cmd is not None:
+                expr = expr_cmd.value
+                if expr is None:
+                    # `DROP EXPRESSION` detected
+                    aop = sd.AlterObjectProperty(
+                        property='expr',
+                        new_value=None,
+                        source_context=astnode.context,
+                    )
+                    cmd.add(aop)
+
+        assert isinstance(cmd, referencing.AlterReferencedInheritingObject)
+        return cmd
+
+    def canonicalize_attributes(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        schema = super().canonicalize_attributes(schema, context)
+        expr_cmd = self.get_attribute_set_cmd('expr')
+
+        # Handle `DROP EXPRESSION` here
+        if expr_cmd is not None and expr_cmd.source != 'inheritance':
+            if expr_cmd.new_value is None:
+                old_expr = expr_cmd.old_value
+
+                if old_expr is None:
+                    # Get the old value from the schema if the old_expr
+                    # attribute isn't set.
+                    pointer = cast(
+                        Pointer, schema.get(self.classname))
+                    old_expr = pointer.get_expr(schema)
+
+                if old_expr is not None:
+                    # If the expression was explicitly set to None,
+                    # that means that `DROP EXPRESSION` was executed
+                    # and this is no longer a computable.
+                    self.set_attribute_value('computable', False)
+
+                # Clear the placeholder value for 'expr'.
+                self.set_attribute_value('expr', None)
+
+        return schema
 
 
 class PointerCommand(
@@ -1098,30 +1173,30 @@ class PointerCommand(
         schema: s_schema.Schema,
         astnode: qlast.NamedDDL,
         context: sd.CommandContext,
-    ) -> sn.Name:
+    ) -> sn.QualName:
         referrer_ctx = cls.get_referrer_context(context)
         if referrer_ctx is not None:
 
-            referrer_name = referrer_ctx.op.classname
-            assert isinstance(referrer_name, sn.Name)
+            referrer_name = context.get_referrer_name(referrer_ctx)
 
-            shortname = sn.Name(
+            shortname = sn.QualName(
                 module='__',
                 name=astnode.name.name,
             )
 
-            name = sn.Name(
+            name = sn.QualName(
                 module=referrer_name.module,
                 name=sn.get_specialized_name(
                     shortname,
-                    referrer_name,
+                    str(referrer_name),
                 ),
             )
         else:
             name = super()._classname_from_ast(schema, astnode, context)
 
-        shortname = sn.shortname_from_fullname(name)
-        if len(shortname.name) > s_def.MAX_NAME_LENGTH:
+        sname = sn.shortname_from_fullname(name)
+        assert isinstance(sname, sn.QualName), "expected qualified name"
+        if len(sname.name) > s_def.MAX_NAME_LENGTH:
             raise errors.SchemaDefinitionError(
                 f'link or property name length exceeds the maximum of '
                 f'{s_def.MAX_NAME_LENGTH} characters',
@@ -1167,7 +1242,7 @@ class PointerCommand(
             )
 
         parent_ctx = self.get_referrer_context_or_die(context)
-        source_name = parent_ctx.op.classname
+        source_name = context.get_referrer_name(parent_ctx)
         self.set_attribute_value('source', so.ObjectShell(name=source_name))
 
         # FIXME: this is an approximate solution
@@ -1175,7 +1250,7 @@ class PointerCommand(
         target_ref: Union[None, s_types.TypeShell, ComputableRef]
 
         if len(targets) > 1:
-            assert isinstance(source_name, sn.Name)
+            assert isinstance(source_name, sn.QualName)
 
             new_targets = [
                 utils.ast_to_type_shell(
@@ -1361,6 +1436,15 @@ class SetPointerType(
             schema, context, action=f'alter the type of {vn}')
 
         if not context.canonical:
+            if (
+                orig_target is not None
+                and isinstance(orig_target, s_types.Collection)
+            ):
+                parent_ctx = context.parent()
+                assert parent_ctx
+                parent_ctx.op.add(orig_target.as_colltype_delete_delta(
+                    schema, expiring_refs={scls}))
+
             implicit_bases = scls.get_implicit_bases(schema)
             non_altered_bases = []
 
@@ -1505,7 +1589,7 @@ def get_or_create_union_pointer(
         schema,
         source,
         target,
-        derived_name_base=sn.Name(
+        derived_name_base=sn.QualName(
             module='__',
             name=ptrname),
         attrs={
@@ -1559,7 +1643,7 @@ def get_or_create_intersection_pointer(
         schema,
         source,
         target,
-        derived_name_base=sn.Name(
+        derived_name_base=sn.QualName(
             module='__',
             name=ptrname),
         attrs={

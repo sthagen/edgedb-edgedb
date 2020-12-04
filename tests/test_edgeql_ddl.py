@@ -330,6 +330,217 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             }]
         )
 
+    async def test_edgeql_ddl_rename_type_and_add_01(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE TYPE Foo {
+                CREATE PROPERTY x -> str;
+            };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                DROP PROPERTY x;
+                RENAME TO Bar;
+                CREATE PROPERTY a -> str;
+                CREATE LINK b -> Object;
+                CREATE CONSTRAINT expression ON (true);
+                CREATE ANNOTATION description := 'hello';
+            };
+        """)
+
+        await self.assert_query_result(
+            r"""
+            SELECT schema::ObjectType {
+                links: {name} ORDER BY .name,
+                properties: {name} ORDER BY .name,
+                constraints: {name},
+                annotations: {name}
+            }
+            FILTER .name = 'test::Bar';
+            """,
+            [
+                {
+                    "annotations": [{"name": "std::description"}],
+                    "constraints": [{"name": "std::expression"}],
+                    "links": [{"name": "__type__"}, {"name": "b"}],
+                    "properties": [{"name": "a"}, {"name": "id"}],
+                }
+            ],
+        )
+
+        await self.con.execute("""
+            ALTER TYPE Bar {
+                DROP PROPERTY a;
+                DROP link b;
+                DROP CONSTRAINT expression ON (true);
+                DROP ANNOTATION description;
+            };
+        """)
+
+    async def test_edgeql_ddl_rename_type_and_add_02(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE TYPE Foo;
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                CREATE PROPERTY a -> str;
+                CREATE LINK b -> Object;
+                CREATE CONSTRAINT expression ON (true);
+                CREATE ANNOTATION description := 'hello';
+                RENAME TO Bar;
+            };
+        """)
+
+        await self.assert_query_result(
+            r"""
+            SELECT schema::ObjectType {
+                links: {name} ORDER BY .name,
+                properties: {name} ORDER BY .name,
+                constraints: {name},
+                annotations: {name}
+            }
+            FILTER .name = 'test::Bar';
+            """,
+            [
+                {
+                    "annotations": [{"name": "std::description"}],
+                    "constraints": [{"name": "std::expression"}],
+                    "links": [{"name": "__type__"}, {"name": "b"}],
+                    "properties": [{"name": "a"}, {"name": "id"}],
+                }
+            ],
+        )
+
+        await self.con.execute("""
+            ALTER TYPE Bar {
+                DROP PROPERTY a;
+                DROP link b;
+                DROP CONSTRAINT expression ON (true);
+                DROP ANNOTATION description;
+            };
+        """)
+
+    async def test_edgeql_ddl_rename_type_and_drop_01(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE TYPE Foo {
+                CREATE PROPERTY a -> str;
+                CREATE LINK b -> Object;
+                CREATE CONSTRAINT expression ON (true);
+                CREATE ANNOTATION description := 'hello';
+            };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                RENAME TO Bar;
+                DROP PROPERTY a;
+                DROP link b;
+                DROP CONSTRAINT expression ON (true);
+                DROP ANNOTATION description;
+            };
+        """)
+
+        await self.assert_query_result(
+            r"""
+            SELECT schema::ObjectType {
+                links: {name} ORDER BY .name,
+                properties: {name} ORDER BY .name,
+                constraints: {name},
+                annotations: {name}
+            }
+            FILTER .name = 'test::Bar';
+            """,
+            [
+                {
+                    "annotations": [],
+                    "constraints": [],
+                    "links": [{"name": "__type__"}],
+                    "properties": [{"name": "id"}],
+                }
+            ],
+        )
+
+        await self.con.execute("""
+            DROP TYPE Bar;
+        """)
+
+    async def test_edgeql_ddl_rename_type_and_drop_02(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE TYPE Foo {
+                CREATE PROPERTY a -> str;
+                CREATE LINK b -> Object;
+                CREATE CONSTRAINT expression ON (true);
+                CREATE ANNOTATION description := 'hello';
+            };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                DROP PROPERTY a;
+                DROP link b;
+                DROP CONSTRAINT expression ON (true);
+                DROP ANNOTATION description;
+                RENAME TO Bar;
+            };
+        """)
+
+        await self.assert_query_result(
+            r"""
+            SELECT schema::ObjectType {
+                links: {name} ORDER BY .name,
+                properties: {name} ORDER BY .name,
+                constraints: {name},
+                annotations: {name}
+            }
+            FILTER .name = 'test::Bar';
+            """,
+            [
+                {
+                    "annotations": [],
+                    "constraints": [],
+                    "links": [{"name": "__type__"}],
+                    "properties": [{"name": "id"}],
+                }
+            ],
+        )
+        await self.con.execute("""
+            DROP TYPE Bar;
+        """)
+
+    async def test_edgeql_ddl_rename_type_and_prop_01(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Note {
+                CREATE PROPERTY note -> str;
+                CREATE LINK friend -> Object;
+            };
+        """)
+
+        await self.con.execute(r"""
+            ALTER TYPE Note {
+                RENAME TO Remark;
+                ALTER PROPERTY note RENAME TO remark;
+                ALTER LINK friend RENAME TO enemy;
+            };
+        """)
+
+        await self.con.execute(r"""
+            ALTER TYPE Remark {
+                DROP PROPERTY remark;
+                DROP LINK enemy;
+            };
+        """)
+
     async def test_edgeql_ddl_11(self):
         await self.con.execute(r"""
             CREATE TYPE test::TestContainerLinkObjectType {
@@ -902,7 +1113,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                             required,
                             properties: {
                                 name,
-                            }
+                            } ORDER BY .name
                         }
                         FILTER .name = 'target'
                     };
@@ -912,7 +1123,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                     'links': [{
                         '@is_owned': False,
                         'required': False,
-                        'properties': [],
+                        'properties': [{"name": "source"}, {"name": "target"}],
                     }],
                 },
             ],
@@ -1042,6 +1253,342 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 CREATE PROPERTY `link` -> str;
             };
         """)
+
+    async def test_edgeql_ddl_drop_extending_01(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE TYPE Parent {
+                CREATE PROPERTY name -> str {
+                    CREATE CONSTRAINT exclusive;
+                };
+            };
+            CREATE TYPE Child EXTENDING Parent;
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Child DROP EXTENDING Parent;
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.QueryError,
+            "object type 'test::Child' has no link or property 'name'",
+        ):
+            await self.con.execute("""
+                SELECT Child.name
+            """)
+
+        # Should be able to drop parent
+        await self.con.execute("""
+            DROP TYPE Parent;
+        """)
+
+    async def test_edgeql_ddl_drop_extending_02(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE TYPE Parent {
+                CREATE PROPERTY name -> str {
+                    CREATE CONSTRAINT exclusive;
+                };
+            };
+            CREATE TYPE Child EXTENDING Parent {
+                ALTER PROPERTY name {
+                    SET OWNED;
+                    ALTER CONSTRAINT exclusive SET OWNED;
+                };
+            };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Child DROP EXTENDING Parent;
+        """)
+
+        # The constraint shouldn't be linked anymore
+        await self.con.execute("""
+            INSERT Child { name := "foo" };
+            INSERT Parent { name := "foo" };
+        """)
+        await self.con.execute("""
+            INSERT Parent { name := "bar" };
+            INSERT Child { name := "bar" };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'name violates exclusivity constraint',
+        ):
+            await self.con.execute("""
+                INSERT Parent { name := "bar" };
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'name violates exclusivity constraint',
+        ):
+            await self.con.execute("""
+                INSERT Child { name := "bar" };
+            """)
+
+        # Should be able to drop parent
+        await self.con.execute("""
+            DROP TYPE Parent;
+        """)
+
+    async def test_edgeql_ddl_drop_extending_03(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE TYPE Parent {
+                CREATE PROPERTY name -> str {
+                    CREATE CONSTRAINT exclusive;
+                };
+            };
+            CREATE TYPE Child EXTENDING Parent {
+                ALTER PROPERTY name {
+                    SET OWNED;
+                    ALTER CONSTRAINT exclusive SET OWNED;
+                };
+            };
+            CREATE TYPE Grandchild EXTENDING Child;
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Child DROP EXTENDING Parent;
+        """)
+
+        # Should be able to drop parent
+        await self.con.execute("""
+            DROP TYPE Parent;
+        """)
+
+    async def test_edgeql_ddl_drop_extending_04(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE TYPE Parent {
+                CREATE PROPERTY name -> str {
+                    CREATE CONSTRAINT exclusive;
+                };
+            };
+            CREATE TYPE Child EXTENDING Parent {
+                ALTER PROPERTY name {
+                    SET OWNED;
+                    ALTER CONSTRAINT exclusive SET OWNED;
+                };
+            };
+            CREATE TYPE Grandchild EXTENDING Child {
+                ALTER PROPERTY name {
+                    SET OWNED;
+                    ALTER CONSTRAINT exclusive SET OWNED;
+                };
+            };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Grandchild DROP EXTENDING Child;
+        """)
+
+        # Should be able to drop parent
+        await self.con.execute("""
+            DROP TYPE Child;
+            DROP TYPE Parent;
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'name violates exclusivity constraint',
+        ):
+            await self.con.execute("""
+                INSERT Grandchild { name := "bar" };
+                INSERT Grandchild { name := "bar" };
+            """)
+
+    async def test_edgeql_ddl_drop_extending_05(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE TYPE Parent {
+                CREATE PROPERTY name -> str {
+                    CREATE CONSTRAINT exclusive;
+                };
+            };
+            CREATE TYPE Child EXTENDING Parent {
+                ALTER PROPERTY name {
+                    SET OWNED;
+                };
+            };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Child DROP EXTENDING Parent;
+        """)
+
+        # The constraint on Child should be dropped
+        await self.con.execute("""
+            INSERT Child { name := "foo" };
+            INSERT Child { name := "foo" };
+        """)
+
+    async def test_edgeql_ddl_drop_extending_06(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE ABSTRACT TYPE Named {
+                CREATE OPTIONAL SINGLE PROPERTY name -> str;
+            };
+            CREATE TYPE Foo EXTENDING Named;
+        """)
+
+        await self.con.execute("""
+            INSERT Foo { name := "Phil Emarg" };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                ALTER PROPERTY name {
+                    SET OWNED;
+                };
+                DROP EXTENDING Named;
+            };
+            DROP TYPE Named;
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT Foo.name;
+            """,
+            ["Phil Emarg"],
+        )
+
+    async def test_edgeql_ddl_drop_extending_07(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE ABSTRACT TYPE Named {
+                CREATE PROPERTY name -> str;
+            };
+            CREATE ABSTRACT TYPE Noted {
+                CREATE PROPERTY note -> str;
+            };
+            CREATE TYPE Foo EXTENDING Named {
+                CREATE PROPERTY note -> str;
+            };
+        """)
+
+        await self.con.execute("""
+            INSERT Foo { name := "Phil Emarg", note := "foo" };
+        """)
+
+        # swap parent from Named to Noted, and drop ownership of note
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                ALTER PROPERTY name {
+                    SET OWNED;
+                };
+                DROP EXTENDING Named;
+                EXTENDING Noted LAST;
+                ALTER PROPERTY note {
+                    DROP OWNED;
+                };
+            };
+            DROP TYPE Named;
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT Foo { note, name };
+            """,
+            [{"name": "Phil Emarg", "note": "foo"}],
+        )
+
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                DROP EXTENDING Noted;
+            };
+        """)
+
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                "has no link or property 'note'"):
+            await self.con.execute(r"""
+                SELECT Foo.note;
+            """)
+
+    async def test_edgeql_ddl_drop_extending_08(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE ABSTRACT TYPE Named {
+                CREATE OPTIONAL SINGLE PROPERTY name -> str;
+            };
+            CREATE ABSTRACT TYPE Named2 {
+                CREATE OPTIONAL SINGLE PROPERTY name -> str;
+            };
+            CREATE TYPE Foo EXTENDING Named;
+        """)
+
+        await self.con.execute("""
+            INSERT Foo { name := "Phil Emarg" };
+        """)
+
+        # swap parent from Named to Named2; this should preserve the name prop
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                DROP EXTENDING Named;
+                EXTENDING Named2 LAST;
+            };
+            DROP TYPE Named;
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT Foo.name;
+            """,
+            ["Phil Emarg"],
+        )
+
+    async def test_edgeql_ddl_add_extending_01(self):
+        await self.con.execute("""
+            SET MODULE test;
+
+            CREATE TYPE Thing;
+
+            CREATE TYPE Foo {
+                CREATE LINK item -> Object {
+                    CREATE PROPERTY foo -> str;
+                };
+            };
+
+            INSERT Foo { item := (INSERT Thing { @foo := "test" }) };
+        """)
+
+        await self.con.execute("""
+            CREATE TYPE Base {
+                CREATE OPTIONAL SINGLE LINK item -> Object {
+                    CREATE OPTIONAL SINGLE PROPERTY foo -> str;
+                };
+            };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                EXTENDING Base LAST;
+                ALTER LINK item {
+                    ALTER PROPERTY foo {
+                        DROP OWNED;
+                    };
+                    DROP OWNED;
+                };
+            };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT Foo { item: {@foo} };
+            """,
+            [{"item": {"@foo": "test"}}],
+        )
 
     async def test_edgeql_ddl_default_01(self):
         with self.assertRaisesRegex(
@@ -1508,6 +2055,21 @@ class TestEdgeQLDDL(tb.DDLTestCase):
 
             ALTER TYPE Base1 CREATE LINK foo -> A;
         ''')
+
+    async def test_edgeql_ddl_prop_target_alter_array_01(self):
+        await self.con.execute(r"""
+            CREATE TYPE test::Foo {
+                CREATE PROPERTY foo -> array<int32>;
+            };
+
+            ALTER TYPE test::Foo {
+                ALTER PROPERTY foo SET TYPE array<float32>;
+            };
+
+            ALTER TYPE test::Foo {
+                ALTER PROPERTY foo SET TYPE array<int32>;
+            };
+        """)
 
     async def test_edgeql_ddl_link_property_01(self):
         with self.assertRaisesRegex(
@@ -2642,6 +3204,137 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 CREATE TYPE test::foo;
             ''')
 
+    async def test_edgeql_ddl_function_rename_01(self):
+        await self.con.execute("""
+            CREATE FUNCTION test::foo(s: str) -> str {
+                USING (SELECT s)
+            }
+        """)
+
+        await self.assert_query_result(
+            """SELECT test::foo("a")""",
+            ["a"],
+        )
+
+        await self.con.execute("""
+            ALTER FUNCTION test::foo(s: str)
+            RENAME TO test::bar;
+        """)
+
+        await self.assert_query_result(
+            """SELECT test::bar("a")""",
+            ["a"],
+        )
+
+        await self.con.execute("""
+            DROP FUNCTION test::bar(s: str)
+        """)
+
+    async def test_edgeql_ddl_function_rename_02(self):
+        await self.con.execute("""
+            CREATE FUNCTION test::foo(s: str) -> str {
+                USING (SELECT s)
+            };
+
+            CREATE FUNCTION test::bar(s: int64) -> str {
+                USING (SELECT <str>s)
+            };
+        """)
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r"can not rename function to 'test::foo' because "
+                r"a function with the same name already exists"):
+            await self.con.execute("""
+                ALTER FUNCTION test::bar(s: int64)
+                RENAME TO test::foo;
+            """)
+
+    async def test_edgeql_ddl_function_rename_03(self):
+        await self.con.execute("""
+            CREATE FUNCTION test::foo(s: str) -> str {
+                USING (SELECT s)
+            };
+
+            CREATE FUNCTION test::foo(s: int64) -> str {
+                USING (SELECT <str>s)
+            };
+        """)
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r"renaming an overloaded function is not allowed"):
+            await self.con.execute("""
+                ALTER FUNCTION test::foo(s: int64)
+                RENAME TO test::bar;
+            """)
+
+    async def test_edgeql_ddl_function_rename_04(self):
+        await self.con.execute("""
+            CREATE FUNCTION test::foo(s: str) -> str {
+                USING (SELECT s)
+            };
+            CREATE MODULE foo;
+        """)
+
+        await self.assert_query_result(
+            """SELECT test::foo("a")""",
+            ["a"],
+        )
+
+        await self.con.execute("""
+            ALTER FUNCTION test::foo(s: str)
+            RENAME TO foo::bar;
+        """)
+
+        await self.assert_query_result(
+            """SELECT foo::bar("a")""",
+            ["a"],
+        )
+
+        await self.con.execute("""
+            DROP FUNCTION foo::bar(s: str)
+        """)
+
+    async def test_edgeql_ddl_function_rename_05(self):
+        await self.con.execute("""
+            CREATE FUNCTION test::foo(s: str) -> str {
+                USING (SELECT s)
+            };
+            CREATE FUNCTION test::call(s: str) -> str {
+                USING (SELECT test::foo(s))
+            };
+        """)
+
+        await self.con.execute("""
+            ALTER FUNCTION test::foo(s: str) RENAME TO test::bar;
+        """)
+
+        await self.assert_query_result(
+            """SELECT test::call("a")""",
+            ["a"],
+        )
+
+    async def test_edgeql_ddl_function_rename_06(self):
+        await self.con.execute("""
+            CREATE FUNCTION test::foo(s: str) -> str {
+                USING (SELECT s)
+            };
+            CREATE FUNCTION test::call(s: str) -> str {
+                USING (SELECT test::foo(s))
+            };
+        """)
+
+        await self.con.execute("""
+            CREATE MODULE foo;
+            ALTER FUNCTION test::foo(s: str) RENAME TO foo::foo;
+        """)
+
+        await self.assert_query_result(
+            """SELECT test::call("a")""",
+            ["a"],
+        )
+
     async def test_edgeql_ddl_module_01(self):
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -2967,6 +3660,81 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 };
             ''')
 
+    async def test_edgeql_ddl_scalar_01(self):
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r'may not have more than one concrete base type'):
+            await self.con.execute('''
+                CREATE SCALAR TYPE test::myint EXTENDING std::int64, std::str;
+            ''')
+
+    async def test_edgeql_ddl_scalar_02(self):
+        await self.con.execute('''
+            CREATE ABSTRACT SCALAR TYPE test::a EXTENDING std::int64;
+            CREATE ABSTRACT SCALAR TYPE test::b EXTENDING std::str;
+        ''')
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r'may not have more than one concrete base type'):
+            await self.con.execute('''
+                CREATE SCALAR TYPE test::myint EXTENDING test::a, test::b;
+            ''')
+
+    async def test_edgeql_ddl_scalar_03(self):
+        await self.con.execute('''
+            CREATE ABSTRACT SCALAR TYPE test::a EXTENDING std::int64;
+            CREATE ABSTRACT SCALAR TYPE test::b EXTENDING std::str;
+            CREATE SCALAR TYPE test::myint EXTENDING test::a;
+        ''')
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r'may not have more than one concrete base type'):
+            await self.con.execute('''
+                ALTER SCALAR TYPE test::myint EXTENDING test::b;
+            ''')
+
+    async def test_edgeql_ddl_scalar_04(self):
+        await self.con.execute('''
+            CREATE ABSTRACT SCALAR TYPE test::a;
+            CREATE SCALAR TYPE test::myint EXTENDING int64, test::a;
+        ''')
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r'may not have more than one concrete base type'):
+            await self.con.execute('''
+                ALTER SCALAR TYPE test::a EXTENDING str;
+            ''')
+
+    async def test_edgeql_ddl_scalar_05(self):
+        await self.con.execute('''
+            CREATE ABSTRACT SCALAR TYPE test::a EXTENDING std::int64;
+            CREATE ABSTRACT SCALAR TYPE test::b EXTENDING std::int64;
+            CREATE SCALAR TYPE test::myint EXTENDING test::a, test::b;
+        ''')
+
+    async def test_edgeql_ddl_scalar_06(self):
+        await self.con.execute('''
+            CREATE SCALAR TYPE test::myint EXTENDING int64;
+            CREATE SCALAR TYPE test::myint2 EXTENDING test::myint;
+        ''')
+
+    async def test_edgeql_ddl_scalar_07(self):
+        await self.con.execute('''
+            CREATE SCALAR TYPE test::a EXTENDING std::str;
+            CREATE SCALAR TYPE test::b EXTENDING std::str;
+        ''')
+
+        # I think we want to prohibit this kind of diamond pattern
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r'may not have more than one concrete base type'):
+            await self.con.execute('''
+                CREATE SCALAR TYPE test::myint EXTENDING test::a, test::b;
+            ''')
+
     async def test_edgeql_ddl_cast_01(self):
         await self.con.execute('''
             CREATE SCALAR TYPE test::type_a EXTENDING std::str;
@@ -3080,6 +3848,44 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             }]
         )
 
+    async def test_edgeql_ddl_property_computable_02(self):
+        await self.con.execute('''\
+            CREATE TYPE test::CompProp {
+                CREATE PROPERTY prop := 'I am a computable';
+            };
+            INSERT test::CompProp;
+        ''')
+
+        await self.assert_query_result(
+            r'''
+                SELECT test::CompProp {
+                    prop
+                };
+            ''',
+            [{
+                'prop': 'I am a computable',
+            }],
+        )
+
+        await self.con.execute('''\
+            ALTER TYPE test::CompProp {
+                ALTER PROPERTY prop {
+                    DROP EXPRESSION;
+                };
+            };
+        ''')
+
+        await self.assert_query_result(
+            r'''
+                SELECT test::CompProp {
+                    prop
+                };
+            ''',
+            [{
+                'prop': None,
+            }],
+        )
+
     async def test_edgeql_ddl_property_computable_circular(self):
         await self.con.execute('''\
             CREATE TYPE test::CompPropCircular {
@@ -3097,6 +3903,51 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                     CREATE PROPERTY prop := (SELECT std::Object LIMIT 1);
                 };
             ''')
+
+    async def test_edgeql_ddl_link_computable_01(self):
+        await self.con.execute('''\
+            CREATE TYPE test::LinkTarget;
+            CREATE TYPE test::CompLink {
+                CREATE MULTI LINK l := test::LinkTarget;
+            };
+
+            INSERT test::LinkTarget;
+            INSERT test::CompLink;
+        ''')
+        await self.assert_query_result(
+            r'''
+                SELECT test::CompLink {
+                    l: {
+                        id
+                    }
+                };
+            ''',
+            [{
+                'l': [{
+                    'id': uuid.UUID
+                }],
+            }],
+        )
+
+        await self.con.execute('''\
+            ALTER TYPE test::CompLink {
+                ALTER LINK l {
+                    DROP EXPRESSION;
+                };
+            };
+        ''')
+        await self.assert_query_result(
+            r'''
+                SELECT test::CompLink {
+                    l: {
+                        id
+                    }
+                };
+            ''',
+            [{
+                'l': [],
+            }],
+        )
 
     async def test_edgeql_ddl_link_computable_circular_01(self):
         await self.con.execute('''\
@@ -3742,6 +4593,33 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             await self.con.execute("""
                 ALTER ABSTRACT ANNOTATION test::anno13 RENAME TO bogus::anno13;
             """)
+
+    async def test_edgeql_ddl_annotation_14(self):
+        await self.con.execute("""
+            CREATE ABSTRACT ANNOTATION test::anno;
+            CREATE TYPE test::Foo {
+                CREATE ANNOTATION test::anno := "test";
+            };
+        """)
+
+        await self.con.execute("""
+            ALTER ABSTRACT ANNOTATION test::anno
+                RENAME TO test::anno_new_name;
+        """)
+
+        await self.assert_query_result(
+            "DESCRIBE MODULE test as sdl",
+            ["""
+abstract annotation test::anno_new_name;
+type test::Foo {
+    annotation test::anno_new_name := 'test';
+};
+            """.strip()]
+        )
+
+        await self.con.execute("""
+            DROP TYPE test::Foo;
+        """)
 
     async def test_edgeql_ddl_anytype_01(self):
         with self.assertRaisesRegex(
@@ -5196,6 +6074,27 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                     };
                 """)
 
+    async def test_edgeql_ddl_constraint_08(self):
+        # Test non-delegated object constraints on abstract types
+        await self.con.execute(r"""
+            CREATE TYPE test::Base {
+                CREATE PROPERTY x -> str {
+                    CREATE CONSTRAINT exclusive;
+                }
+            };
+            CREATE TYPE test::Foo EXTENDING test::Base;
+            CREATE TYPE test::Bar EXTENDING test::Base;
+
+            INSERT test::Foo { x := "a" };
+        """)
+
+        with self.assertRaisesRegex(
+                edgedb.ConstraintViolationError,
+                r'violates exclusivity constraint'):
+            await self.con.execute(r"""
+                INSERT test::Foo { x := "a" };
+            """)
+
     async def test_edgeql_ddl_constraint_alter_01(self):
         await self.con.execute(r"""
             CREATE TYPE test::ConTest01 {
@@ -5754,19 +6653,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
 
         with self.assertRaisesRegex(
                 edgedb.UnsupportedFeatureError,
-                'altering enum composition is not supported'):
-            await self.con.execute('''
-                ALTER SCALAR TYPE test::my_enum_2
-                    EXTENDING enum<'foo', 'bar', 'baz'>;
-            ''')
-
-        # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t1;')
-
-        await self.con.execute('DECLARE SAVEPOINT t2;')
-
-        with self.assertRaisesRegex(
-                edgedb.UnsupportedFeatureError,
                 'constraints cannot be defined on enumerated type.*'):
             await self.con.execute('''
                 CREATE SCALAR TYPE test::my_enum_3
@@ -5776,7 +6662,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ''')
 
         # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t2;')
+        await self.con.execute('ROLLBACK TO SAVEPOINT t1;')
 
         await self.con.execute('''
             ALTER SCALAR TYPE test::my_enum_2
@@ -5815,6 +6701,131 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         await self.con.execute('''
             DROP TYPE test::Obj;
             DROP SCALAR TYPE foo::my_enum_2;
+        ''')
+
+    async def test_edgeql_ddl_enum_03(self):
+        with self.assertRaisesRegex(
+                edgedb.SchemaDefinitionError,
+                'enums cannot contain duplicate values'):
+            await self.con.execute('''
+                CREATE SCALAR TYPE test::Color
+                    EXTENDING enum<Red, Green, Blue, Red>;
+            ''')
+
+    async def test_edgeql_ddl_enum_04(self):
+        await self.con.execute('''
+            CREATE SCALAR TYPE test::Color
+                EXTENDING enum<Red, Green, Blue>;
+        ''')
+
+        await self.con.execute('DECLARE SAVEPOINT t0;')
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                'cannot DROP EXTENDING enum'):
+            await self.con.execute('''
+                ALTER SCALAR TYPE test::Color
+                    DROP EXTENDING enum<Red, Green, Blue>;
+            ''')
+
+        # Recover.
+        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                'enumeration must be the only supertype specified'):
+            await self.con.execute('''
+                ALTER SCALAR TYPE test::Color EXTENDING str FIRST;
+            ''')
+
+        # Recover.
+        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                'cannot add another enum as supertype, '
+                'use EXTENDING without position qualification'):
+            await self.con.execute('''
+                ALTER SCALAR TYPE test::Color
+                    EXTENDING enum<Bad> LAST;
+            ''')
+
+        # Recover.
+        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                'cannot set more than one enum as supertype'):
+            await self.con.execute('''
+                ALTER SCALAR TYPE test::Color
+                    EXTENDING enum<Bad>, enum<AlsoBad>;
+            ''')
+
+        # Recover.
+        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                'enums cannot contain duplicate values'):
+            await self.con.execute('''
+                ALTER SCALAR TYPE test::Color
+                    EXTENDING enum<Red, Green, Blue, Red>;
+            ''')
+
+        # Recover.
+        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                'cannot remove labels from an enumeration type'):
+            await self.con.execute('''
+                ALTER SCALAR TYPE test::Color
+                    EXTENDING enum<Red, Green>;
+            ''')
+
+        # Recover.
+        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                'only appending new labels is allowed'):
+            await self.con.execute('''
+                ALTER SCALAR TYPE test::Color
+                    EXTENDING enum<Blue, Red, Green>;
+            ''')
+
+        # Recover.
+        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                'only appending new labels is allowed'):
+            await self.con.execute('''
+                ALTER SCALAR TYPE test::Color
+                    EXTENDING enum<Red, Green, Bad, Blue>;
+            ''')
+
+        # Recover.
+        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+
+        await self.con.execute(r'''
+            ALTER SCALAR TYPE test::Color
+                EXTENDING enum<Red, Green, Blue, Magic>;
+
+            # Commit the changes and start a new transaction for more testing.
+            COMMIT;
+            START TRANSACTION;
+        ''')
+        await self.assert_query_result(
+            r"""
+                SELECT <test::Color>'Magic' >
+                    <test::Color>'Red';
+            """,
+            [True],
+        )
+
+        await self.con.execute('''
+            DROP SCALAR TYPE test::Color;
         ''')
 
     async def test_edgeql_ddl_explicit_id(self):
@@ -7145,6 +8156,17 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             type_refs=2,
         )
 
+    async def test_edgeql_ddl_rename_ref_function_04(self):
+        await self._simple_rename_ref_tests(
+            """
+            CREATE FUNCTION foo(x: str) -> Note {
+                USING (SELECT Note FILTER .note = x LIMIT 1)
+            }
+            """,
+            """SELECT foo("test");""",
+            type_refs=2,
+        )
+
     async def test_edgeql_ddl_rename_ref_default_01(self):
         await self._simple_rename_ref_tests(
             """
@@ -7260,3 +8282,334 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             """CREATE ALIAS Alias := Note { command := .note ++ "!" };""",
             """DROP ALIAS Alias;""",
         )
+
+    async def test_edgeql_ddl_collection_cleanup_01(self):
+        count_query = "SELECT count(schema::Array);"
+        orig_count = await self.con.query_one(count_query)
+
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE SCALAR TYPE a extending str;
+            CREATE SCALAR TYPE b extending str;
+            CREATE SCALAR TYPE c extending str;
+
+            CREATE TYPE TestArrays {
+                CREATE PROPERTY x -> array<a>;
+                CREATE PROPERTY y -> array<b>;
+            };
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 2)
+
+        await self.con.execute(r"""
+            ALTER TYPE TestArrays {
+                DROP PROPERTY x;
+            };
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 1)
+
+        await self.con.execute(r"""
+            ALTER TYPE TestArrays {
+                ALTER PROPERTY y {
+                    SET TYPE array<c>;
+                }
+            };
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 1)
+
+        await self.con.execute(r"""
+            DROP TYPE TestArrays;
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count)
+
+    async def test_edgeql_ddl_collection_cleanup_01b(self):
+        count_query = "SELECT count(schema::Array);"
+        orig_count = await self.con.query_one(count_query)
+
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE SCALAR TYPE a extending str;
+            CREATE SCALAR TYPE b extending str;
+            CREATE SCALAR TYPE c extending str;
+
+            CREATE TYPE TestArrays {
+                CREATE PROPERTY x -> array<a>;
+                CREATE PROPERTY y -> array<b>;
+                CREATE PROPERTY z -> array<b>;
+            };
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 2)
+
+        await self.con.execute(r"""
+            ALTER TYPE TestArrays {
+                DROP PROPERTY x;
+            };
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 1)
+
+        await self.con.execute(r"""
+            ALTER TYPE TestArrays {
+                ALTER PROPERTY y {
+                    SET TYPE array<c>;
+                }
+            };
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 2)
+
+        await self.con.execute(r"""
+            DROP TYPE TestArrays;
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count)
+
+    async def test_edgeql_ddl_collection_cleanup_02(self):
+        count_query = "SELECT count(schema::CollectionType);"
+        orig_count = await self.con.query_one(count_query)
+
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE SCALAR TYPE a extending str;
+            CREATE SCALAR TYPE b extending str;
+            CREATE SCALAR TYPE c extending str;
+
+            CREATE TYPE TestArrays {
+                CREATE PROPERTY x -> array<tuple<a, b>>;
+            };
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 2)
+
+        await self.con.execute(r"""
+            DROP TYPE TestArrays;
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count)
+
+    async def test_edgeql_ddl_collection_cleanup_03(self):
+        count_query = "SELECT count(schema::CollectionType);"
+        orig_count = await self.con.query_one(count_query)
+
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE SCALAR TYPE a extending str;
+            CREATE SCALAR TYPE b extending str;
+            CREATE SCALAR TYPE c extending str;
+
+            CREATE FUNCTION foo(x: array<a>, z: tuple<b, c>,
+                                y: array<tuple<b, c>>)
+                 -> array<b> USING (SELECT [<b>""]);
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 4)
+
+        await self.con.execute(r"""
+            DROP FUNCTION foo(
+                x: array<a>, z: tuple<b, c>, y: array<tuple<b, c>>);
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count)
+
+    async def test_edgeql_ddl_collection_cleanup_04(self):
+        count_query = "SELECT count(schema::CollectionType);"
+        orig_count = await self.con.query_one(count_query)
+
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE SCALAR TYPE a extending str;
+            CREATE SCALAR TYPE b extending str;
+            CREATE SCALAR TYPE c extending str;
+
+            CREATE TYPE Foo {
+                CREATE PROPERTY a -> a;
+                CREATE PROPERTY b -> b;
+                CREATE PROPERTY c -> c;
+            };
+
+            CREATE ALIAS Bar := Foo { thing := (.a, .b) };
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 1)
+
+        await self.con.execute(r"""
+            ALTER ALIAS Bar USING (Foo { thing := (.a, .b, .c) });
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 1)
+
+        await self.con.execute(r"""
+            ALTER ALIAS Bar USING (Foo { thing := (.a, (.b, .c)) });
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 2)
+
+        await self.con.execute(r"""
+            ALTER ALIAS Bar USING (Foo { thing := ((.a, .b), .c) });
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 2)
+
+        await self.con.execute(r"""
+            ALTER ALIAS Bar USING (Foo { thing := ((.a, .b), .c, "foo") });
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 2)
+
+        # Make a change that doesn't change the types
+        await self.con.execute(r"""
+            ALTER ALIAS Bar USING (Foo { thing := ((.a, .b), .c, "bar") });
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 2)
+
+        await self.con.execute(r"""
+            DROP ALIAS Bar;
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count)
+
+    async def test_edgeql_ddl_collection_cleanup_05(self):
+        count_query = "SELECT count(schema::CollectionType);"
+        orig_count = await self.con.query_one(count_query)
+
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE SCALAR TYPE a extending str;
+            CREATE SCALAR TYPE b extending str;
+
+            CREATE ALIAS Bar := (<a>"", <b>"");
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 1)
+
+        await self.con.execute(r"""
+            ALTER ALIAS Bar USING ((<b>"", <a>""));
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count + 1)
+
+        await self.con.execute(r"""
+            DROP ALIAS Bar;
+        """)
+
+        self.assertEqual(await self.con.query_one(count_query), orig_count)
+
+    async def test_edgeql_ddl_drop_field_01(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Foo {
+                CREATE REQUIRED PROPERTY a -> str {
+                    SET default := "test";
+                }
+            };
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo;
+        """)
+
+        await self.con.execute(r"""
+            ALTER TYPE Foo {
+                ALTER PROPERTY a {
+                    DROP default;
+                }
+            };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.MissingRequiredError,
+            'missing value for required property test::Foo.a',
+        ):
+            await self.con.execute(r"""
+                INSERT Foo;
+            """)
+
+    async def test_edgeql_ddl_drop_field_02(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Foo {
+                CREATE REQUIRED PROPERTY a -> str {
+                    CREATE CONSTRAINT exclusive {
+                        SET errmessage := "whoops";
+                    }
+                }
+            };
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { a := "x" };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'whoops',
+        ):
+            await self.con.execute(r"""
+                INSERT Foo { a := "x" };
+            """)
+
+        await self.con.execute(r"""
+            ALTER TYPE Foo {
+                ALTER PROPERTY a {
+                    ALTER CONSTRAINT exclusive {
+                        DROP errmessage;
+                    }
+                }
+            };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'a violates exclusivity constraint',
+        ):
+            await self.con.execute(r"""
+                INSERT Foo { a := "x" };
+            """)
+
+    async def test_edgeql_ddl_drop_field_03(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE ABSTRACT CONSTRAINT bogus {
+                USING (false);
+                SET errmessage := "never!";
+            };
+
+            CREATE TYPE Foo {
+                CREATE CONSTRAINT bogus;
+            };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'never!',
+        ):
+            await self.con.execute(r"""
+                INSERT Foo;
+            """)
+
+        await self.con.execute(r"""
+            ALTER ABSTRACT CONSTRAINT bogus
+            DROP errmessage;
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'invalid Foo',
+        ):
+            await self.con.execute(r"""
+                INSERT Foo;
+            """)

@@ -163,15 +163,15 @@ class Link(sources.Source, pointers.Pointer, s_abc.Link,
         return schema
 
     @classmethod
-    def get_root_classes(cls) -> Tuple[sn.Name, ...]:
+    def get_root_classes(cls) -> Tuple[sn.QualName, ...]:
         return (
-            sn.Name(module='std', name='link'),
-            sn.Name(module='schema', name='__type__'),
+            sn.QualName(module='std', name='link'),
+            sn.QualName(module='schema', name='__type__'),
         )
 
     @classmethod
-    def get_default_base_name(self) -> sn.Name:
-        return sn.Name('std::link')
+    def get_default_base_name(self) -> sn.QualName:
+        return sn.QualName('std', 'link')
 
 
 class LinkSourceCommandContext(sources.SourceCommandContext):
@@ -207,25 +207,23 @@ class LinkCommand(lproperties.PropertySourceCommand,
             'target', target_ref, source_context=astnode.target.context)
         self.add(slt)
 
-    def _apply_refs_fields_ast(
+    def _append_subcmd_ast(
         self,
         schema: s_schema.Schema,
-        context: sd.CommandContext,
         node: qlast.DDLOperation,
-        refdict: so.RefDict,
+        subcmd: sd.Command,
+        context: sd.CommandContext,
     ) -> None:
-        if issubclass(refdict.ref_cls, pointers.Pointer):
-            for op in self.get_subcommands(metaclass=refdict.ref_cls):
-                if (
-                    isinstance(op, pointers.PointerCommand)
-                    and op.classname != self.classname
+        if (
+            isinstance(subcmd, pointers.PointerCommand)
+            and subcmd.classname != self.classname
 
-                ):
-                    pname = sn.shortname_from_fullname(op.classname)
-                    if pname.name not in {'source', 'target'}:
-                        self._append_subcmd_ast(schema, node, op, context)
-        else:
-            super()._apply_refs_fields_ast(schema, context, node, refdict)
+        ):
+            pname = sn.shortname_from_fullname(subcmd.classname)
+            if pname.name in {'source', 'target'}:
+                return
+
+        super()._append_subcmd_ast(schema, node, subcmd, context)
 
     def _validate_pointer_def(
         self,
@@ -270,6 +268,20 @@ class LinkCommand(lproperties.PropertySourceCommand,
             if node.name.name == '__type__':
                 node.is_required = True
         return node
+
+    def _reinherit_classref_dict(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        refdict: so.RefDict,
+    ) -> s_schema.Schema:
+        if self.scls.get_computable(schema) and refdict.attr != 'pointers':
+            # If the link is a computable, the inheritance would only
+            # happen in the case of aliasing, and in that case we only
+            # need to inherit the link properties and nothing else.
+            return schema
+
+        return super()._reinherit_classref_dict(schema, context, refdict)
 
 
 class CreateLink(
@@ -368,11 +380,11 @@ class CreateLink(
         if parent_ctx is None:
             return cmd
 
-        base_prop_name = sn.Name('std::source')
+        base_prop_name = sn.QualName('std', 'source')
         s_name = sn.get_specialized_name(
-            sn.Name('__::source'), self.classname)
-        src_prop_name = sn.Name(name=s_name,
-                                module=self.classname.module)
+            sn.QualName('__', 'source'), str(self.classname))
+        src_prop_name = sn.QualName(
+            name=s_name, module=self.classname.module)
 
         src_prop = lproperties.CreateProperty(
             classname=src_prop_name,
@@ -400,11 +412,11 @@ class CreateLink(
 
         cmd.prepend(src_prop)
 
-        base_prop_name = sn.Name('std::target')
+        base_prop_name = sn.QualName('std', 'target')
         s_name = sn.get_specialized_name(
-            sn.Name('__::target'), self.classname)
-        tgt_prop_name = sn.Name(name=s_name,
-                                module=self.classname.module)
+            sn.QualName('__', 'target'), str(self.classname))
+        tgt_prop_name = sn.QualName(
+            name=s_name, module=self.classname.module)
 
         tgt_prop = lproperties.CreateProperty(
             classname=tgt_prop_name,
@@ -485,12 +497,14 @@ class SetTargetDeletePolicy(sd.Command):
     ) -> sd.Command:
         assert isinstance(astnode, qlast.OnTargetDelete)
         cmd = super()._cmd_tree_from_ast(schema, astnode, context)
+        assert isinstance(cmd, sd.AlterObjectProperty)
         cmd.new_value = astnode.cascade
         return cmd
 
 
 class AlterLink(
     LinkCommand,
+    pointers.PointerAlterFragment,
     referencing.AlterReferencedInheritingObject[Link],
 ):
     astnode = [qlast.AlterConcreteLink, qlast.AlterLink]
@@ -511,21 +525,22 @@ class AlterLink(
             expr_cmd = qlast.get_ddl_field_command(astnode, 'expr')
             if expr_cmd is not None:
                 expr = expr_cmd.value
-                qlnorm.normalize(
-                    expr,
-                    schema=schema,
-                    modaliases=context.modaliases
-                )
-                target_ref = pointers.ComputableRef(expr)
+                if expr is not None:
+                    qlnorm.normalize(
+                        expr,
+                        schema=schema,
+                        modaliases=context.modaliases
+                    )
+                    target_ref = pointers.ComputableRef(expr)
 
-                slt = SetLinkType(classname=cmd.classname, type=target_ref)
-                slt.set_attribute_value(
-                    'target',
-                    target_ref,
-                    source_context=expr_cmd.value.context,
-                )
-                cmd.add(slt)
-                cmd.discard_attribute('expr')
+                    slt = SetLinkType(classname=cmd.classname, type=target_ref)
+                    slt.set_attribute_value(
+                        'target',
+                        target_ref,
+                        source_context=expr.context,
+                    )
+                    cmd.add(slt)
+                    cmd.discard_attribute('expr')
 
         assert isinstance(cmd, referencing.AlterReferencedInheritingObject)
         return cmd
@@ -559,6 +574,14 @@ class AlterLink(
                     value=op.new_value,
                 ),
             )
+        elif op.property == 'computable':
+            if not op.new_value:
+                node.commands.append(
+                    qlast.SetSpecialField(
+                        name='expr',
+                        value=None,
+                    ),
+                )
         else:
             super()._apply_field_ast(schema, context, node, op)
 
