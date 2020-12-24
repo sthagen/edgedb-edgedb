@@ -64,11 +64,12 @@ class RoleCommandContext(
     pass
 
 
-class RoleCommand(sd.GlobalObjectCommand,
-                  inheriting.InheritingObjectCommand[Role],
-                  s_anno.AnnotationSubjectCommand,
-                  schema_metaclass=Role,
-                  context_class=RoleCommandContext):
+class RoleCommand(
+    sd.GlobalObjectCommand[Role],
+    inheriting.InheritingObjectCommand[Role],
+    s_anno.AnnotationSubjectCommand[Role],
+    context_class=RoleCommandContext,
+):
 
     @classmethod
     def _process_role_body(
@@ -141,18 +142,18 @@ class CreateRole(RoleCommand, inheriting.CreateInheritingObject[Role]):
         cls._process_role_body(cmd, schema, astnode, context)
         return cmd
 
-    def _apply_field_ast(
+    def get_ast_attr_for_field(
         self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        node: qlast.DDLOperation,
-        op: sd.AlterObjectProperty,
-    ) -> None:
-        if op.property == 'is_superuser':
-            node.superuser = op.new_value
-            return
-
-        super()._apply_field_ast(schema, context, node, op)
+        field: str,
+        astnode: Type[qlast.DDLOperation],
+    ) -> Optional[str]:
+        if (
+            field == 'is_superuser'
+            and issubclass(astnode, qlast.CreateRole)
+        ):
+            return 'superuser'
+        else:
+            return super().get_ast_attr_for_field(field, astnode)
 
 
 class RebaseRole(RoleCommand, inheriting.RebaseInheritingObject[Role]):

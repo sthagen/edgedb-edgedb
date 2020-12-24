@@ -82,6 +82,7 @@ class Query(BaseQuery):
     in_type_args: Optional[List[Param]] = None
 
     is_transactional: bool = True
+    has_dml: bool = False
     single_unit: bool = False
     cacheable: bool = True
 
@@ -91,6 +92,7 @@ class SimpleQuery(BaseQuery):
 
     sql: Tuple[bytes, ...]
     is_transactional: bool = True
+    has_dml: bool = False
     single_unit: bool = False
 
 
@@ -111,6 +113,8 @@ class DDLQuery(BaseQuery):
     new_types: FrozenSet[str] = frozenset()
     is_transactional: bool = True
     single_unit: bool = False
+    drop_db: Optional[str] = None
+    has_role_ddl: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -168,14 +172,17 @@ class QueryUnit:
     # If False, they will be executed separately.
     is_transactional: bool = True
 
-    # True if this unit contains DDL commands.
-    has_ddl: bool = False
+    # Capabilities used in this query
+    capabilities: enums.Capability = enums.Capability(0)
 
     # A set of ids of types added by this unit.
     new_types: FrozenSet[str] = frozenset()
 
     # True if this unit contains SET commands.
     has_set: bool = False
+
+    # True if this unit contains ALTER/DROP/CREATE ROLE commands.
+    has_role_ddl: bool = False
 
     # If tx_id is set, it means that the unit
     # starts a new transaction.
@@ -195,6 +202,11 @@ class QueryUnit:
 
     # True if it is safe to cache this unit.
     cacheable: bool = False
+
+    # If non-None, contains a name of the DB that is about to be
+    # deleted. The server should close all inactive unused pooled
+    # connections to it.
+    drop_db: Optional[str] = None
 
     # Cardinality of the result set.  Set to NO_RESULT if the
     # unit represents multiple queries compiled as one script.
@@ -219,6 +231,10 @@ class QueryUnit:
     config_ops: List[config.Operation] = (
         dataclasses.field(default_factory=list))
     modaliases: Optional[immutables.Map] = None
+
+    @property
+    def has_ddl(self) -> bool:
+        return bool(self.capabilities & enums.Capability.DDL)
 
 
 #############################
@@ -419,7 +435,7 @@ class CompilerConnectionState:
 
     _savepoints_log: Mapping[int, Transaction]
 
-    __slots__ = ('_savepoints_log', '_dbver', '_current_tx', '_capability')
+    __slots__ = ('_savepoints_log', '_dbver', '_current_tx')
 
     def __init__(
         self,
@@ -427,13 +443,11 @@ class CompilerConnectionState:
         schema: s_schema.Schema,
         modaliases: immutables.Map,
         config: immutables.Map,
-        capability: enums.Capability,
         cached_reflection: FrozenSet[str],
     ):
         self._dbver = dbver
         self._savepoints_log = {}
         self._init_current_tx(schema, modaliases, config, cached_reflection)
-        self._capability = capability
 
     def _init_current_tx(self, schema, modaliases, config, cached_reflection):
         self._current_tx = Transaction(
@@ -466,10 +480,6 @@ class CompilerConnectionState:
     @property
     def dbver(self):
         return self._dbver
-
-    @property
-    def capability(self):
-        return self._capability
 
     def current_tx(self) -> Transaction:
         return self._current_tx

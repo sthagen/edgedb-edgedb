@@ -22,6 +22,7 @@ cpdef enum SideEffects:
     SchemaChanges = 1 << 0
     DatabaseConfigChanges = 1 << 1
     SystemConfigChanges = 1 << 2
+    RoleChanges = 1 << 3
 
 
 cdef class DatabaseIndex:
@@ -31,8 +32,6 @@ cdef class DatabaseIndex:
         object _server
 
         object _sys_config
-        object _sys_queries
-        object _instance_data
 
 
 cdef class Database:
@@ -42,6 +41,7 @@ cdef class Database:
         object _dbver
         object _eql_to_compiled
         DatabaseIndex _index
+        object _views
 
     cdef _signal_ddl(self, new_dbver)
     cdef _invalidate_caches(self)
@@ -58,6 +58,8 @@ cdef class DatabaseConnectionView:
 
         object _config
         object _modaliases
+        object _in_tx_modaliases
+        tuple _session_state_cache
 
         object _eql_to_compiled
 
@@ -65,16 +67,16 @@ cdef class DatabaseConnectionView:
         object _in_tx_config
         bint _in_tx
         bint _in_tx_with_ddl
+        bint _in_tx_with_role_ddl
         bint _in_tx_with_sysconfig
         bint _in_tx_with_dbconfig
         bint _in_tx_with_set
         bint _tx_error
 
+        object __weakref__
+
     cdef _invalidate_local_cache(self)
     cdef _reset_tx_state(self)
-
-    cdef on_remote_ddl(self, bytes new_dbver)
-    cdef on_remote_config_change(self)
 
     cdef rollback_tx_to_savepoint(self, spid, modaliases, config)
     cdef recover_aliases_and_config(self, modaliases, config)
@@ -94,3 +96,8 @@ cdef class DatabaseConnectionView:
 
     cdef get_session_config(self)
     cdef set_session_config(self, new_conf)
+
+    cdef set_modaliases(self, new_aliases)
+    cdef get_modaliases(self)
+
+    cdef bytes serialize_state(self)

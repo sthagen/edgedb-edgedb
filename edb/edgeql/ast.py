@@ -320,7 +320,10 @@ class DecimalConstant(BaseRealConstant):
 
 
 class BooleanConstant(BaseConstant):
-    pass
+
+    @classmethod
+    def from_python(cls, b: bool) -> BooleanConstant:
+        return cls(value=str(b).lower())
 
 
 class BytesConstant(BaseConstant):
@@ -621,26 +624,6 @@ class AlterDropInherit(DDLOperation, BasesMixin):
     pass
 
 
-class AlterOwned(DDLOperation):
-    owned: bool
-
-
-class AlterPropertyOwned(AlterOwned):
-    pass
-
-
-class AlterLinkOwned(AlterOwned):
-    pass
-
-
-class AlterConstraintOwned(AlterOwned):
-    pass
-
-
-class AlterIndexOwned(AlterOwned):
-    pass
-
-
 class OnTargetDelete(DDLOperation):
     cascade: qltypes.LinkTargetDeleteAction
 
@@ -649,14 +632,16 @@ class BaseSetField(DDLOperation):
     __abstract_node__ = True
     name: str
     value: typing.Optional[Expr]
+    #: Indicates that this AST originated from a special DDL syntax
+    #: rather than from a generic `SET field := value` statement, and
+    #: so must not be subject to the "allow_ddl_set" constraint.
+    #: This attribute is also considered by the codegen to emit appropriate
+    #: syntax.
+    special_syntax: bool = False
 
 
 class SetField(BaseSetField):
     pass
-
-
-class SetSpecialField(BaseSetField):
-    value: typing.Any
 
 
 class NamedDDL(DDLCommand):
@@ -708,6 +693,7 @@ class CreateMigration(CreateObject, Migration):
     body: MigrationBody
     parent: typing.Optional[ObjectRef] = None
     message: typing.Optional[str] = None
+    metadata_only: bool = False
 
 
 class StartMigration(DDLCommand, Migration):
@@ -773,15 +759,19 @@ class DropModule(DropObject):
     pass
 
 
-class CreateRole(CreateObject, BasesMixin):
+class Role:
+    __abstract_node__ = True
+
+
+class CreateRole(CreateObject, BasesMixin, Role):
     superuser: bool = False
 
 
-class AlterRole(AlterObject):
+class AlterRole(AlterObject, Role):
     pass
 
 
-class DropRole(DropObject):
+class DropRole(DropObject, Role):
     pass
 
 
@@ -1123,9 +1113,9 @@ def get_targets(target: typing.Union[None, TypeExpr, Expr]):
 def get_ddl_field_command(
     ddlcmd: DDLOperation,
     name: str,
-) -> typing.Optional[typing.Union[SetField, SetSpecialField]]:
+) -> typing.Optional[SetField]:
     for cmd in ddlcmd.commands:
-        if isinstance(cmd, (SetField, SetSpecialField)) and cmd.name == name:
+        if isinstance(cmd, SetField) and cmd.name == name:
             return cmd
 
     return None

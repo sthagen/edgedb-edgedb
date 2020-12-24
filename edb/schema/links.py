@@ -178,21 +178,23 @@ class LinkSourceCommandContext(sources.SourceCommandContext):
     pass
 
 
-class LinkSourceCommand(inheriting.InheritingObjectCommand[Link]):
+class LinkSourceCommand(inheriting.InheritingObjectCommand[sources.Source_T]):
     pass
 
 
-class LinkCommandContext(pointers.PointerCommandContext,
+class LinkCommandContext(pointers.PointerCommandContext[Link],
                          constraints.ConsistencySubjectCommandContext,
                          lproperties.PropertySourceContext,
                          indexes.IndexSourceCommandContext):
     pass
 
 
-class LinkCommand(lproperties.PropertySourceCommand,
-                  pointers.PointerCommand,
-                  schema_metaclass=Link, context_class=LinkCommandContext,
-                  referrer_context_class=LinkSourceCommandContext):
+class LinkCommand(
+    lproperties.PropertySourceCommand[Link],
+    pointers.PointerCommand[Link],
+    context_class=LinkCommandContext,
+    referrer_context_class=LinkSourceCommandContext,
+):
 
     def _set_pointer_type(
         self,
@@ -311,6 +313,24 @@ class CreateLink(
         assert isinstance(cmd, sd.Command)
         return cmd
 
+    def get_ast_attr_for_field(
+        self,
+        field: str,
+        astnode: Type[qlast.DDLOperation],
+    ) -> Optional[str]:
+        if (
+            field == 'required'
+            and issubclass(astnode, qlast.CreateConcreteLink)
+        ):
+            return 'is_required'
+        elif (
+            field == 'cardinality'
+            and issubclass(astnode, qlast.CreateConcreteLink)
+        ):
+            return 'cardinality'
+        else:
+            return super().get_ast_attr_for_field(field, astnode)
+
     def _apply_field_ast(
         self,
         schema: s_schema.Schema,
@@ -320,22 +340,7 @@ class CreateLink(
     ) -> None:
         objtype = self.get_referrer_context(context)
 
-        if op.property == 'required':
-            # Due to how SDL is processed the underlying AST may be an
-            # AlterConcreteLink, which requires different handling.
-            if isinstance(node, qlast.CreateConcreteLink):
-                assert isinstance(op.new_value, bool)
-                node.is_required = op.new_value
-            else:
-                node.commands.append(
-                    qlast.SetSpecialField(
-                        name='required',
-                        value=op.new_value,
-                    )
-                )
-        elif op.property == 'cardinality':
-            node.cardinality = op.new_value
-        elif op.property == 'target' and objtype:
+        if op.property == 'target' and objtype:
             # Due to how SDL is processed the underlying AST may be an
             # AlterConcreteLink, which requires different handling.
             if isinstance(node, qlast.CreateConcreteLink):
@@ -456,12 +461,27 @@ class RebaseLink(
     LinkCommand,
     referencing.RebaseReferencedInheritingObject[Link],
 ):
-    pass
+    def apply(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext
+    ) -> s_schema.Schema:
+        schema = super().apply(schema, context)
+
+        if not context.canonical:
+            new_target = self.get_attribute_value('target')
+            if new_target:
+                slt = SetLinkType(classname=self.classname, type=new_target)
+                schema = slt.apply(schema, context)
+                self.add(slt)
+
+        return schema
 
 
-class SetLinkType(pointers.SetPointerType,
-                  schema_metaclass=Link,
-                  referrer_context_class=LinkSourceCommandContext):
+class SetLinkType(
+    pointers.SetPointerType[Link],
+    referrer_context_class=LinkSourceCommandContext,
+):
 
     astnode = qlast.SetLinkType
 
@@ -491,12 +511,20 @@ class SetLinkType(pointers.SetPointerType,
         return schema
 
 
+class AlterLinkUpperCardinality(
+    pointers.AlterPointerUpperCardinality[Link],
+    referrer_context_class=LinkSourceCommandContext,
+    field='cardinality',
+):
+    pass
+
+
 class AlterLinkOwned(
     referencing.AlterOwned[Link],
-    schema_metaclass=Link,
     referrer_context_class=LinkSourceCommandContext,
+    field='is_owned',
 ):
-    astnode = qlast.AlterLinkOwned
+    pass
 
 
 class SetTargetDeletePolicy(sd.Command):
@@ -529,7 +557,7 @@ class SetTargetDeletePolicy(sd.Command):
 
 class AlterLink(
     LinkCommand,
-    pointers.PointerAlterFragment,
+    pointers.PointerAlterFragment[Link],
     referencing.AlterReferencedInheritingObject[Link],
 ):
     astnode = [qlast.AlterConcreteLink, qlast.AlterLink]
@@ -585,26 +613,13 @@ class AlterLink(
                         type=utils.typeref_to_ast(schema, op.new_value),
                     ),
                 )
-        elif op.property == 'required':
-            node.commands.append(
-                qlast.SetSpecialField(
-                    name='required',
-                    value=op.new_value,
-                ),
-            )
-        elif op.property == 'cardinality':
-            node.commands.append(
-                qlast.SetSpecialField(
-                    name='cardinality',
-                    value=op.new_value,
-                ),
-            )
         elif op.property == 'computable':
             if not op.new_value:
                 node.commands.append(
-                    qlast.SetSpecialField(
+                    qlast.SetField(
                         name='expr',
                         value=None,
+                        special_syntax=True,
                     ),
                 )
         elif op.property == 'on_target_delete':

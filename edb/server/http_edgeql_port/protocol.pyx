@@ -31,8 +31,14 @@ from edb.common import markup
 
 from edb.server import compiler
 from edb.server.compiler import IoFormat
+from edb.server.compiler import enums
 from edb.server.http import http
 from edb.server.http cimport http
+
+
+ALLOWED_CAPABILITIES = (
+    enums.Capability.MODIFICATIONS
+)
 
 
 cdef class Protocol(http.HttpProtocol):
@@ -140,7 +146,6 @@ cdef class Protocol(http.HttpProtocol):
                 False,          # no inlining of type IDs
                 False,          # no inlining of type names
                 compiler.CompileStatementMode.SINGLE,
-                compiler.Capability.QUERY,
                 True,           # json parameters
             )
             return units[0]
@@ -157,6 +162,11 @@ cdef class Protocol(http.HttpProtocol):
 
         if query_unit is None:
             query_unit = await self.compile(dbver, query)
+            if query_unit.capabilities & ~ALLOWED_CAPABILITIES:
+                raise query_unit.capabilities.make_error(
+                    ALLOWED_CAPABILITIES,
+                    errors.UnsupportedCapabilityError,
+                )
             self.query_cache[cache_key] = query_unit
         else:
             # This is at least the second time this query is used.
@@ -175,13 +185,14 @@ cdef class Protocol(http.HttpProtocol):
                             f'parameter ${param.name} is required')
                     args.append(value)
 
-        pgcon = await self.server.pgcons.get()
+        pgcon = await self.server.get_server().acquire_pgcon(
+            self.server.database)
         try:
             data = await pgcon.parse_execute_json(
                 query_unit.sql[0], query_unit.sql_hash, query_unit.dbver,
                 use_prep_stmt, args)
         finally:
-            self.server.pgcons.put_nowait(pgcon)
+            self.server.get_server().release_pgcon(self.server.database, pgcon)
 
         if data is None:
             raise errors.InternalServerError(

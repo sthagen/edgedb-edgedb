@@ -71,12 +71,14 @@ def init_context(
     _ = context.CompilerContext(initial=ctx)
 
     if options.singletons:
-        # The caller wants us to treat these type references
-        # as singletons for the purposes of the overall expression
-        # cardinality inference, so we set up the scope tree in
-        # the necessary fashion.
+        # The caller wants us to treat these type and pointer
+        # references as singletons for the purposes of the overall
+        # expression cardinality inference, so we set up the scope
+        # tree in the necessary fashion.
         for singleton in options.singletons:
-            path_id = pathctx.get_path_id(singleton, ctx=ctx)
+            path_id = (pathctx.get_path_id(singleton, ctx=ctx)
+                       if isinstance(singleton, s_types.Type)
+                       else pathctx.get_pointer_path_id(singleton, ctx=ctx))
             ctx.env.path_scope.attach_path(path_id, context=None)
 
         ctx.path_scope = ctx.env.path_scope.attach_fence()
@@ -89,8 +91,8 @@ def init_context(
 
     if options.path_prefix_anchor is not None:
         path_prefix = options.anchors[options.path_prefix_anchor]
-        assert isinstance(path_prefix, s_types.Type)
-        ctx.partial_path_prefix = setgen.class_set(path_prefix, ctx=ctx)
+        ctx.partial_path_prefix = compile_anchor(
+            options.path_prefix_anchor, path_prefix, ctx=ctx)
         ctx.partial_path_prefix.anchor = options.path_prefix_anchor
         ctx.partial_path_prefix.show_as_anchor = options.path_prefix_anchor
 
@@ -478,4 +480,62 @@ def declare_view_from_schema(
         ctx.view_nodes[vc.get_name(ctx.env.schema)] = vc
         ctx.view_sets[vc] = subctx.view_sets[vc]
 
+        # XXX: The current cardinality inference machine does not look
+        # into unreferenced expression parts, which includes computables
+        # that may be declared on an alias that another alias is referencing,
+        # leaving Unknown cardinalities in place.  To fix this, copy
+        # cardinalities for computed pointers from the alias object in the
+        # schema.
+        view_type = setgen.get_set_type(view_set, ctx=subctx)
+        if isinstance(view_type, s_objtypes.ObjectType):
+            assert isinstance(viewcls, s_objtypes.ObjectType)
+            _fixup_cardinalities(
+                view_type,
+                viewcls,
+                ctx=ctx,
+            )
+
     return vc
+
+
+def _fixup_cardinalities(
+    subj_source: s_sources.Source,
+    tpl_source: s_sources.Source,
+    *,
+    ctx: context.ContextLevel,
+) -> None:
+    """Copy pointer cardinalities from *tpl_source* to *subj_source*."""
+
+    subj_ptrs = subj_source.get_pointers(ctx.env.schema).items(ctx.env.schema)
+    tpl_ptrs = dict(
+        tpl_source.get_pointers(ctx.env.schema).items(ctx.env.schema))
+
+    for pn, ptrcls in subj_ptrs:
+        card = ptrcls.get_cardinality(ctx.env.schema)
+        tpl_ptrcls = tpl_ptrs.get(pn)
+        if tpl_ptrcls is None:
+            raise AssertionError(
+                f'expected to find {pn!r} in template source object'
+            )
+
+        if not card.is_known():
+            tpl_card = tpl_ptrcls.get_cardinality(ctx.env.schema)
+            if not tpl_card.is_known():
+                raise AssertionError(
+                    f'{pn!r} cardinality in template source is unknown'
+                )
+
+            ctx.env.schema = ptrcls.set_field_value(
+                ctx.env.schema,
+                'cardinality',
+                tpl_card,
+            )
+
+        subj_target = ptrcls.get_target(ctx.env.schema)
+        if (
+            isinstance(subj_target, s_sources.Source)
+            and subj_target.is_view(ctx.env.schema)
+        ):
+            tpl_target = tpl_ptrcls.get_target(ctx.env.schema)
+            assert isinstance(tpl_target, s_sources.Source)
+            _fixup_cardinalities(subj_target, tpl_target, ctx=ctx)

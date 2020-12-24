@@ -23,10 +23,11 @@ import codecs
 import hashlib
 import json
 import os.path
-import weakref
 
 cimport cython
 cimport cpython
+
+from . cimport cpythonx
 
 from libc.stdint cimport int8_t, uint8_t, int16_t, uint16_t, \
                          int32_t, uint32_t, int64_t, uint64_t, \
@@ -35,7 +36,6 @@ from libc.stdint cimport int8_t, uint8_t, int16_t, uint16_t, \
 from edb import errors
 
 from edb.schema import objects as s_obj
-from edb.server import defines
 
 from edb.pgsql.common import quote_literal as pg_ql
 
@@ -44,9 +44,11 @@ from edb.server.pgproto cimport pgproto
 from edb.server.pgproto.pgproto cimport (
     WriteBuffer,
     ReadBuffer,
+
     FRBuffer,
     frb_init,
     frb_read,
+    frb_get_len,
 )
 
 from edb.server import buildmeta
@@ -87,13 +89,24 @@ def _build_init_con_script() -> bytes:
             UNIQUE(_sentinel)
         );
 
+        PREPARE _clear_state AS
+            DELETE FROM _edgecon_state
+            WHERE _edgecon_state.type != 'R';
+
+        PREPARE _apply_state(jsonb) AS
+            INSERT INTO
+                _edgecon_state(name, value, type)
+            SELECT
+                e->>'name' AS name,
+                e->>'value' AS value,
+                e->>'type' AS type
+            FROM
+                jsonb_array_elements($1::jsonb) AS e;
+
         INSERT INTO _edgecon_state
             (name, value, type)
         VALUES
-            ('', {pg_ql(defines.DEFAULT_MODULE_ALIAS)}, 'A'),
             ('server_version', {pg_ql(buildmeta.get_version_json())}, 'R');
-
-        LISTEN __edgedb_sysevent__;
     ''').encode('utf-8')
 
 
@@ -107,17 +120,17 @@ async def connect(connargs, dbname):
 
     if host.startswith('/'):
         addr = os.path.join(host, f'.s.PGSQL.{port}')
-        _, protocol = await loop.create_unix_connection(
-            lambda: PGProto(dbname, loop, connargs), addr)
+        _, pgcon = await loop.create_unix_connection(
+            lambda: PGConnection(dbname, loop, connargs), addr)
 
     else:
-        _, protocol = await loop.create_connection(
-            lambda: PGProto(dbname, loop, connargs), host=host, port=port)
+        _, pgcon = await loop.create_connection(
+            lambda: PGConnection(dbname, loop, connargs), host=host, port=port)
 
-    await protocol.connect()
+    await pgcon.connect()
 
     if connargs['user'] != defines.EDGEDB_SUPERUSER:
-        await protocol.simple_query(
+        await pgcon.simple_query(
             f'SET SESSION AUTHORIZATION {defines.EDGEDB_SUPERUSER}'.encode(),
             ignore_data=True,
         )
@@ -125,9 +138,9 @@ async def connect(connargs, dbname):
     if INIT_CON_SCRIPT is None:
         INIT_CON_SCRIPT = _build_init_con_script()
 
-    await protocol.simple_query(INIT_CON_SCRIPT, ignore_data=True)
+    await pgcon.simple_query(INIT_CON_SCRIPT, ignore_data=True)
 
-    return protocol
+    return pgcon
 
 
 @cython.final
@@ -147,7 +160,7 @@ cdef class EdegDBCodecContext(pgproto.CodecContext):
 
 
 @cython.final
-cdef class PGProto:
+cdef class PGConnection:
 
     def __init__(self, dbname, loop, addr):
         self.buffer = ReadBuffer()
@@ -173,18 +186,15 @@ cdef class PGProto:
         self.debug = debug.flags.server_proto
 
         self.pgaddr = addr
-        self.edgecon_ref = None
+        self.server = None
 
         self.idle = True
 
     def debug_print(self, *args):
         print(
-            '::PGPROTO::',
+            '::PGCONN::',
             *args,
         )
-
-    def set_edgecon(self, edgecon.EdgeConnection edgecon):
-        self.edgecon_ref = weakref.ref(edgecon)
 
     def get_pgaddr(self):
         return self.pgaddr
@@ -217,7 +227,16 @@ cdef class PGProto:
             self.msg_waiter.set_exception(ConnectionAbortedError())
             self.msg_waiter = None
 
+    async def set_server(self, server):
+        assert self.dbname == defines.EDGEDB_SYSTEM_DB
+        await self.simple_query(
+            b'LISTEN __edgedb_sysevent__;',
+            ignore_data=True
+        )
+        self.server = server
+
     async def signal_sysevent(self, event, **kwargs):
+        assert self.dbname == defines.EDGEDB_SYSTEM_DB
         event = json.dumps({
             'event': event,
             'args': kwargs,
@@ -495,46 +514,104 @@ cdef class PGProto:
         finally:
             self.after_command()
 
+    def _build_apply_state_req(self, bytes serstate, WriteBuffer out):
+        cdef:
+            WriteBuffer buf
+
+        buf = WriteBuffer.new_message(b'B')
+        buf.write_bytestring(b'')  # portal name
+        buf.write_bytestring(b'_clear_state')  # statement name
+        buf.write_int16(0)  # number of format codes
+        buf.write_int16(0)  # number of parameters
+        buf.write_int16(0)  # number of result columns
+        out.write_buffer(buf.end_message())
+
+        buf = WriteBuffer.new_message(b'E')
+        buf.write_bytestring(b'')  # portal name
+        buf.write_int32(0)  # limit: 0 - return all rows
+        out.write_buffer(buf.end_message())
+
+        if serstate is not None:
+            buf = WriteBuffer.new_message(b'B')
+            buf.write_bytestring(b'')  # portal name
+            buf.write_bytestring(b'_apply_state')  # statement name
+            buf.write_int16(1)  # number of format codes
+            buf.write_int16(1)  # binary
+            buf.write_int16(1)  # number of parameters
+            buf.write_int32(len(serstate) + 1)
+            buf.write_byte(1)  # jsonb format version
+            buf.write_bytes(serstate)
+            buf.write_int16(0)  # number of result columns
+            out.write_buffer(buf.end_message())
+
+            buf = WriteBuffer.new_message(b'E')
+            buf.write_bytestring(b'')  # portal name
+            buf.write_int32(0)  # limit: 0 - return all rows
+            out.write_buffer(buf.end_message())
+
+    async def _parse_apply_state_resp(self, bytes serstate):
+        cdef int num_completed = 0
+        while True:
+            if not self.buffer.take_message():
+                await self.wait_for_message()
+            mtype = self.buffer.get_message_type()
+
+            if mtype == b'2':
+                # BindComplete
+                self.buffer.discard_message()
+
+            elif mtype == b'E':
+                er = self.parse_error_message()
+                raise pgerror.BackendError(fields=er)
+
+            elif mtype == b'C':
+                self.buffer.discard_message()
+                num_completed += 1
+                if (
+                    (serstate is not None and num_completed == 2) or
+                    (serstate is None and num_completed == 1)
+                ):
+                    return
+            else:
+                self.fallthrough()
+
     async def _parse_execute(
         self,
-        bint parse,
-        bint execute,
         object query,
         edgecon.EdgeConnection edgecon,
         WriteBuffer bind_data,
-        bint send_sync,
         bint use_prep_stmt,
+        bytes state
     ):
         cdef:
-            WriteBuffer packet
+            WriteBuffer out
             WriteBuffer buf
             bytes stmt_name
             bint store_stmt = 0
+            bint parse = 1
 
             bint has_result = query.cardinality is not CARD_NO_RESULT
 
             uint64_t msgs_num = <uint64_t>(len(query.sql))
-            uint64_t msgs_parsed = 0
             uint64_t msgs_executed = 0
             uint64_t i
 
-        if not parse and not execute:
-            raise RuntimeError('invalid parse/execute call')
+        out = WriteBuffer.new()
 
-        packet = WriteBuffer.new()
+        if state is not None:
+            self._build_apply_state_req(state, out)
 
         if use_prep_stmt:
-            assert parse and execute
             stmt_name = query.sql_hash
             parse, store_stmt = self.before_prepare(
-                stmt_name, query.dbver, packet)
+                stmt_name, query.dbver, out)
         else:
             stmt_name = b''
 
         if parse:
             if len(self.last_parse_prep_stmts):
                 for stmt_name_to_clean in self.last_parse_prep_stmts:
-                    packet.write_buffer(
+                    out.write_buffer(
                         self.make_clean_stmt_message(stmt_name_to_clean))
                 self.last_parse_prep_stmts.clear()
 
@@ -547,7 +624,7 @@ cdef class PGProto:
                     buf.write_bytestring(pname)
                     buf.write_bytestring(sql)
                     buf.write_int16(0)
-                    packet.write_buffer(buf.end_message())
+                    out.write_buffer(buf.end_message())
                     i += 1
             else:
                 if len(query.sql) != 1:
@@ -559,44 +636,41 @@ cdef class PGProto:
                 buf.write_bytestring(stmt_name)
                 buf.write_bytestring(query.sql[0])
                 buf.write_int16(0)
-                packet.write_buffer(buf.end_message())
+                out.write_buffer(buf.end_message())
 
-        if execute:
-            assert bind_data is not None
-
-            if stmt_name == b'' and msgs_num > 1:
-                for s in self.last_parse_prep_stmts:
-                    buf = WriteBuffer.new_message(b'B')
-                    buf.write_bytestring(b'')  # portal name
-                    buf.write_bytestring(s)  # statement name
-                    buf.write_buffer(bind_data)
-                    packet.write_buffer(buf.end_message())
-
-                    buf = WriteBuffer.new_message(b'E')
-                    buf.write_bytestring(b'')  # portal name
-                    buf.write_int32(0)  # limit: 0 - return all rows
-                    packet.write_buffer(buf.end_message())
-
-            else:
+        assert bind_data is not None
+        if stmt_name == b'' and msgs_num > 1:
+            for s in self.last_parse_prep_stmts:
                 buf = WriteBuffer.new_message(b'B')
                 buf.write_bytestring(b'')  # portal name
-                buf.write_bytestring(stmt_name)  # statement name
+                buf.write_bytestring(s)  # statement name
                 buf.write_buffer(bind_data)
-                packet.write_buffer(buf.end_message())
+                out.write_buffer(buf.end_message())
 
                 buf = WriteBuffer.new_message(b'E')
                 buf.write_bytestring(b'')  # portal name
                 buf.write_int32(0)  # limit: 0 - return all rows
-                packet.write_buffer(buf.end_message())
-
-        if send_sync:
-            packet.write_bytes(SYNC_MESSAGE)
-            self.waiting_for_sync = True
+                out.write_buffer(buf.end_message())
         else:
-            packet.write_bytes(FLUSH_MESSAGE)
-        self.write(packet)
+            buf = WriteBuffer.new_message(b'B')
+            buf.write_bytestring(b'')  # portal name
+            buf.write_bytestring(stmt_name)  # statement name
+            buf.write_buffer(bind_data)
+            out.write_buffer(buf.end_message())
+
+            buf = WriteBuffer.new_message(b'E')
+            buf.write_bytestring(b'')  # portal name
+            buf.write_int32(0)  # limit: 0 - return all rows
+            out.write_buffer(buf.end_message())
+
+        out.write_bytes(SYNC_MESSAGE)
+        self.waiting_for_sync = True
+        self.write(out)
 
         try:
+            if state is not None:
+                await self._parse_apply_state_resp(state)
+
             buf = None
             while True:
                 if not self.buffer.take_message():
@@ -604,7 +678,7 @@ cdef class PGProto:
                 mtype = self.buffer.get_message_type()
 
                 try:
-                    if mtype == b'D' and execute:
+                    if mtype == b'D':
                         # DataRow
                         if not has_result:
                             raise errors.InternalServerError(
@@ -620,7 +694,7 @@ cdef class PGProto:
                             edgecon.write(buf)
                             buf = None
 
-                    elif mtype == b'C' and execute:  ## result
+                    elif mtype == b'C':  ## result
                         # CommandComplete
                         self.buffer.discard_message()
                         if buf is not None:
@@ -635,29 +709,26 @@ cdef class PGProto:
                         self.buffer.discard_message()
                         if store_stmt:
                             self.prep_stmts[stmt_name] = query.dbver
-                        msgs_parsed += 1
-                        if not execute and msgs_parsed == msgs_num:
-                            return
 
                     elif mtype == b'E':  ## result
                         # ErrorResponse
                         er = self.parse_error_message()
                         raise pgerror.BackendError(fields=er)
 
-                    elif mtype == b'n' and execute:
+                    elif mtype == b'n':
                         # NoData
                         self.buffer.discard_message()
 
-                    elif mtype == b's' and execute:  ## result
+                    elif mtype == b's':  ## result
                         # PortalSuspended
                         self.buffer.discard_message()
                         return
 
-                    elif mtype == b'2' and execute:
+                    elif mtype == b'2':
                         # BindComplete
                         self.buffer.discard_message()
 
-                    elif mtype == b'I' and execute:  ## result
+                    elif mtype == b'I':  ## result
                         # EmptyQueryResponse
                         self.buffer.discard_message()
                         return
@@ -672,47 +743,54 @@ cdef class PGProto:
                 finally:
                     self.buffer.finish_message()
         finally:
-            if send_sync:
-                await self.wait_for_sync()
+            await self.wait_for_sync()
 
     async def parse_execute(
         self,
-        bint parse,
-        bint execute,
         object query,
         edgecon.EdgeConnection edgecon,
         WriteBuffer bind_data,
-        bint send_sync,
         bint use_prep_stmt,
+        bytes state
     ):
         self.before_command()
         try:
             return await self._parse_execute(
-                parse,
-                execute,
                 query,
                 edgecon,
                 bind_data,
-                send_sync,
                 use_prep_stmt,
+                state,
             )
         finally:
             self.after_command()
 
-    async def _simple_query(self, bytes sql, bint ignore_data):
+    async def _simple_query(self, bytes sql, bint ignore_data, bytes state):
         cdef:
-            WriteBuffer packet
+            WriteBuffer out
             WriteBuffer buf
+
+        out = WriteBuffer.new()
+
+        if state is not None:
+            self._build_apply_state_req(state, out)
+            out.write_bytes(SYNC_MESSAGE)
 
         buf = WriteBuffer.new_message(b'Q')
         buf.write_bytestring(sql)
-        self.write(buf.end_message())
+        out.write_buffer(buf.end_message())
+
+        self.write(out)
 
         exc = None
         result = None
 
-        self.waiting_for_sync = True
+        if state is not None:
+            await self._parse_apply_state_resp(state)
+            self.waiting_for_sync = True
+            await self.wait_for_sync()
 
+        self.waiting_for_sync = True
         while True:
             if not self.buffer.take_message():
                 await self.wait_for_message()
@@ -765,10 +843,15 @@ cdef class PGProto:
             raise pgerror.BackendError(fields=exc)
         return result
 
-    async def simple_query(self, bytes sql, bint ignore_data):
+    async def simple_query(
+        self,
+        bytes sql,
+        bint ignore_data,
+        bytes state=None
+    ):
         self.before_command()
         try:
-            return await self._simple_query(sql, ignore_data)
+            return await self._simple_query(sql, ignore_data, state)
         finally:
             self.after_command()
 
@@ -868,7 +951,7 @@ cdef class PGProto:
         finally:
             self.after_command()
 
-    async def _restore(self, sql, bytes data):
+    async def _restore(self, sql, bytes data, tuple elided_cols):
         cdef:
             WriteBuffer buf
             WriteBuffer qbuf
@@ -876,7 +959,7 @@ cdef class PGProto:
 
             char* cbuf
             ssize_t clen
-
+            ssize_t ncols
 
         qbuf = WriteBuffer.new_message(b'Q')
         qbuf.write_bytestring(sql)
@@ -893,6 +976,8 @@ cdef class PGProto:
 
             if mtype == b'G':
                 # CopyInResponse
+                self.buffer.read_byte()
+                ncols = self.buffer.read_int16()
                 self.buffer.discard_message()
                 break
 
@@ -909,18 +994,21 @@ cdef class PGProto:
         if er:
             raise pgerror.BackendError(fields=er)
 
-        cpython.PyBytes_AsStringAndSize(data, &cbuf, &clen)
-        if cbuf[0] != b'd':
-            raise RuntimeError('unexpected dump data message structure')
-        ln = <uint32_t>hton.unpack_int32(cbuf + 1)
-
         buf = WriteBuffer.new()
-        buf.write_byte(b'd')
-        buf.write_int32(ln + len(COPY_SIGNATURE) + 8)
-        buf.write_bytes(COPY_SIGNATURE)
-        buf.write_int32(0)
-        buf.write_int32(0)
-        buf.write_cstr(cbuf + 5, clen - 5)
+        cpython.PyBytes_AsStringAndSize(data, &cbuf, &clen)
+        if elided_cols:
+            self._elide_copy_cols(buf, cbuf, clen, ncols, elided_cols)
+        else:
+            if cbuf[0] != b'd':
+                raise RuntimeError('unexpected dump data message structure')
+            ln = <uint32_t>hton.unpack_int32(cbuf + 1)
+            buf.write_byte(b'd')
+            buf.write_int32(ln + len(COPY_SIGNATURE) + 8)
+            buf.write_bytes(COPY_SIGNATURE)
+            buf.write_int32(0)
+            buf.write_int32(0)
+            buf.write_cstr(cbuf + 5, clen - 5)
+
         self.write(buf)
 
         qbuf = WriteBuffer.new_message(b'c')
@@ -947,10 +1035,90 @@ cdef class PGProto:
         if er:
             raise pgerror.BackendError(fields=er)
 
-    async def restore(self, sql, bytes data):
+    cdef _elide_copy_cols(
+        self,
+        WriteBuffer wbuf,
+        char* data,
+        ssize_t data_len,
+        ssize_t ncols,
+        tuple elided_cols,
+    ):
+        """Rewrite the binary COPY stream to exclude the specified columns."""
+        cdef:
+            FRBuffer rbuf
+            ssize_t i
+            ssize_t real_ncols
+            int8_t *elide
+            int8_t elided
+            int32_t datum_len
+            char copy_msg_byte
+            int16_t copy_msg_ncols
+            const char *datum
+            bint first = True
+            bint received_eof = False
+
+        real_ncols = ncols + len(elided_cols)
+        frb_init(&rbuf, data, data_len)
+
+        elide = <int8_t*>cpythonx.PyMem_Calloc(
+            <size_t>real_ncols, sizeof(int8_t))
+
+        try:
+            for col in elided_cols:
+                elide[col] = 1
+
+            mbuf = WriteBuffer.new()
+
+            while frb_get_len(&rbuf):
+                if received_eof:
+                    raise RuntimeError('received CopyData after EOF')
+                mbuf.start_message(b'd')
+
+                copy_msg_byte = frb_read(&rbuf, 1)[0]
+                if copy_msg_byte != b'd':
+                    raise RuntimeError(
+                        'unexpected dump data message structure')
+                frb_read(&rbuf, 4)
+
+                if first:
+                    mbuf.write_bytes(COPY_SIGNATURE)
+                    mbuf.write_int32(0)
+                    mbuf.write_int32(0)
+                    first = False
+
+                copy_msg_ncols = hton.unpack_int16(frb_read(&rbuf, 2))
+                if copy_msg_ncols == -1:
+                    # BINARY COPY EOF marker
+                    mbuf.write_int16(copy_msg_ncols)
+                    received_eof = True
+                    mbuf.end_message()
+                    wbuf.write_buffer(mbuf)
+                    mbuf.reset()
+                    continue
+                else:
+                    mbuf.write_int16(<int16_t>ncols)
+
+                # Tuple data
+                for i in range(real_ncols):
+                    datum_len = hton.unpack_int32(frb_read(&rbuf, 4))
+                    elided = elide[i]
+                    if not elided:
+                        mbuf.write_int32(datum_len)
+                    if datum_len != -1:
+                        datum = frb_read(&rbuf, datum_len)
+                        if not elided:
+                            mbuf.write_cstr(datum, datum_len)
+
+                mbuf.end_message()
+                wbuf.write_buffer(mbuf)
+                mbuf.reset()
+        finally:
+            cpython.PyMem_Free(elide)
+
+    async def restore(self, sql, bytes data, tuple elided_cols):
         self.before_command()
         try:
-            await self._restore(sql, data)
+            await self._restore(sql, data, elided_cols)
         finally:
             self.after_command()
 
@@ -1101,22 +1269,16 @@ cdef class PGProto:
                 event = event_data.get('event')
                 event_payload = event_data.get('args')
                 if event == 'schema-changes':
+                    dbname = event_payload['dbname']
                     dbver = bytes.fromhex(event_payload['dbver'])
-                    if self.edgecon_ref is not None:
-                        edgecon = self.edgecon_ref()
-                        if edgecon is not None:
-                            edgecon.on_remote_ddl(dbver)
+                    self.server._on_remote_ddl(dbname, dbver)
                 elif event == 'database-config-changes':
                     dbname = event_payload['dbname']
-                    if self.edgecon_ref is not None and dbname == self.dbname:
-                        edgecon = self.edgecon_ref()
-                        if edgecon is not None:
-                            edgecon.on_remote_config_change()
+                    self.server._on_remote_database_config_change(dbname)
                 elif event == 'system-config-changes':
-                    if self.edgecon_ref is not None:
-                        edgecon = self.edgecon_ref()
-                        if edgecon is not None:
-                            edgecon.on_remote_config_change()
+                    self.server._on_remote_system_config_change()
+                elif event == 'role-changes':
+                    self.server._on_role_change()
                 else:
                     raise AssertionError(f'unexpected system event: {event!r}')
 

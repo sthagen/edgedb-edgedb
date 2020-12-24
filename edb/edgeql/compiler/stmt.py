@@ -75,12 +75,13 @@ def compile_SelectQuery(
             sctx.partial_path_prefix = ctx.partial_path_prefix
             stmt.implicit_wrapper = True
 
-        if expr.limit is not None:
-            sctx.inhibit_implicit_limit = True
-        elif ((ctx.expr_exposed or sctx.stmt is ctx.toplevel_stmt)
-                and ctx.implicit_limit and not sctx.inhibit_implicit_limit):
+        if (
+            (ctx.expr_exposed or sctx.stmt is ctx.toplevel_stmt)
+            and ctx.implicit_limit
+            and expr.limit is None
+            and not ctx.inhibit_implicit_limit
+        ):
             expr.limit = qlast.IntegerConstant(value=str(ctx.implicit_limit))
-            sctx.inhibit_implicit_limit = True
 
         stmt.result = compile_result_clause(
             expr.result,
@@ -261,7 +262,8 @@ def compile_insert_unless_conflict(
         )
 
     ptr = ptr.get_nearest_non_derived_parent(schema)
-    if ptr.get_cardinality(schema) != qltypes.SchemaCardinality.One:
+    ptr_card = ptr.get_cardinality(schema)
+    if not ptr_card.is_single():
         raise errors.QueryError(
             'UNLESS CONFLICT property must be a SINGLE property',
             context=constraint_spec.context,
@@ -764,6 +766,7 @@ def compile_DescribeStmt(
 
             verbose = ql.options.get_flag('VERBOSE')
 
+            method: Any
             if ql.language is qltypes.DescribeLanguage.DDL:
                 method = s_ddl.ddl_text_from_schema
             elif ql.language is qltypes.DescribeLanguage.SDL:
@@ -1022,8 +1025,28 @@ def compile_result_clause(
         if result_alias:
             # `SELECT foo := expr` is equivalent to
             # `WITH foo := expr SELECT foo`
+            rexpr = astutils.ensure_ql_select(result_expr)
+            if (
+                sctx.implicit_limit
+                and rexpr.limit is None
+                and not sctx.inhibit_implicit_limit
+            ):
+                # Inline alias is special: it's both "exposed",
+                # but also subject for further processing, so
+                # make sure we don't mangle it with an implicit
+                # limit.
+                rexpr.limit = qlast.TypeCast(
+                    expr=qlast.Set(),
+                    type=qlast.TypeName(
+                        maintype=qlast.ObjectRef(
+                            module='__std__',
+                            name='int64',
+                        )
+                    )
+                )
+
             stmtctx.declare_view(
-                result_expr,
+                rexpr,
                 alias=s_name.UnqualName(result_alias),
                 ctx=sctx,
             )
@@ -1107,6 +1130,11 @@ def compile_query_subject(
         and view_rptr.ptrcls_name is not None
         and expr_rptr is not None
         and expr_rptr.direction is s_pointers.PointerDirection.Outbound
+        and expr_rptr.source.rptr is None
+        and (
+            view_rptr.source.get_bases(ctx.env.schema).first(ctx.env.schema).id
+            == expr_rptr.source.typeref.id
+        )
         and (
             view_rptr.ptrcls_is_linkprop
             == (expr_rptr.ptrref.source_ptr is not None)

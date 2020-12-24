@@ -266,8 +266,18 @@ def _get_set_rvar(
 
     elif isinstance(ir_set.expr, irast.FunctionCall):
         if str(ir_set.expr.func_shortname) == 'std::enumerate':
-            if isinstance(irutils.unwrap_set(ir_set.expr.args[0].expr).expr,
-                          irast.FunctionCall):
+            arg_set = ir_set.expr.args[0].expr
+            arg_expr = arg_set.expr
+            if (
+                isinstance(irutils.unwrap_set(arg_set).expr,
+                           irast.FunctionCall)
+                and not (
+                    isinstance(arg_expr, irast.SelectStmt) and (
+                        arg_expr.where or arg_expr.orderby
+                        or arg_expr.limit or arg_expr.offset
+                    )
+                )
+            ):
                 # Enumeration of a SET-returning function
                 rvars = process_set_as_func_enumerate(ir_set, stmt, ctx=ctx)
             else:
@@ -739,6 +749,107 @@ def process_set_as_link_property_ref(
     return SetRVars(main=SetRVar(link_rvar, ir_set.path_id), new=rvars)
 
 
+def process_set_as_path_type_intersection(
+        ir_set: irast.Set, stmt: pgast.SelectStmt,
+        ptrref: irast.TypeIntersectionPointerRef,
+        source_is_visible: bool,
+        *,
+        ctx: context.CompilerContextLevel) -> SetRVars:
+    ir_source = ir_set.rptr.source
+
+    if (not source_is_visible
+            and ir_source.rptr is not None
+            and not ir_source.path_id.is_type_intersection_path()
+            and (
+                ptrref.is_subtype
+                or pg_types.get_ptrref_storage_info(
+                    ir_source.rptr.ptrref).table_type != 'ObjectType'
+            )):
+        # Otherwise, if the source link path is not visible,
+        # and this is a subtype intersection, or the pointer is not inline,
+        # we have an opportunity to opmimize the target join by
+        # directly replacing the target type.
+        with ctx.new() as subctx:
+            subctx.intersection_narrowing = (
+                subctx.intersection_narrowing.copy())
+            subctx.intersection_narrowing[ir_source] = ir_set
+            source_rvar = get_set_rvar(ir_source, ctx=subctx)
+
+        pathctx.put_path_id_map(stmt, ir_set.path_id, ir_source.path_id)
+        relctx.include_rvar(stmt, source_rvar, ir_set.path_id, ctx=ctx)
+
+    else:
+        source_rvar = get_set_rvar(ir_source, ctx=ctx)
+        intersection = ir_set.typeref.intersection
+        if intersection:
+            if ir_source.typeref.intersection:
+                current_intersection = {
+                    t.id for t in ir_source.typeref.intersection
+                }
+            else:
+                current_intersection = {
+                    ir_source.typeref.id
+                }
+
+            intersectors = {t for t in intersection
+                            if t.id not in current_intersection}
+
+            assert len(intersectors) == 1
+            target_typeref = next(iter(intersectors))
+        else:
+            target_typeref = ptrref.out_target
+
+        poly_rvar = relctx.range_for_typeref(
+            target_typeref,
+            path_id=ir_set.path_id,
+            ctx=ctx,
+        )
+
+        prefix_path_id = ir_set.path_id.src_path()
+        assert prefix_path_id is not None, 'expected a path'
+        pathctx.put_rvar_path_output(
+            rvar=poly_rvar,
+            path_id=prefix_path_id,
+            aspect='identity',
+            var=pathctx.get_rvar_path_identity_var(
+                poly_rvar, ir_set.path_id, env=ctx.env,
+            ),
+            env=ctx.env,
+        )
+        pathctx.put_rvar_path_bond(poly_rvar, prefix_path_id)
+        relctx.include_rvar(stmt, poly_rvar, ir_set.path_id, ctx=ctx)
+        int_rvar = pgast.IntersectionRangeVar(
+            component_rvars=[
+                source_rvar,
+                poly_rvar,
+            ]
+        )
+
+        if isinstance(source_rvar.query, pgast.Query):
+            pathctx.put_path_id_map(
+                source_rvar.query, ir_set.path_id, ir_source.path_id)
+
+        for aspect in ('source', 'value'):
+            pathctx.put_path_rvar(
+                stmt,
+                ir_source.path_id,
+                source_rvar,
+                aspect=aspect,
+                env=ctx.env,
+            )
+
+            pathctx.put_path_rvar(
+                stmt,
+                ir_set.path_id,
+                int_rvar,
+                aspect=aspect,
+                env=ctx.env,
+            )
+
+    return new_stmt_set_rvar(
+        ir_set, stmt, aspects=['value', 'source'], ctx=ctx)
+
+
 def process_set_as_path(
         ir_set: irast.Set, stmt: pgast.SelectStmt, *,
         ctx: context.CompilerContextLevel) -> SetRVars:
@@ -746,103 +857,15 @@ def process_set_as_path(
     ptrref = rptr.ptrref
     ir_source = rptr.source
     source_is_visible = ctx.scope_tree.is_visible(ir_source.path_id)
-    is_type_intersection = ir_set.path_id.is_type_intersection_path()
 
     rvars = []
 
-    if is_type_intersection:
+    # Type intersection paths have their own entire code path.
+    if ir_set.path_id.is_type_intersection_path():
         ptrref = cast(irast.TypeIntersectionPointerRef, ptrref)
-        if (not source_is_visible
-                and ir_source.rptr is not None
-                and not ir_source.path_id.is_type_intersection_path()
-                and (
-                    ptrref.is_subtype
-                    or pg_types.get_ptrref_storage_info(
-                        ir_source.rptr.ptrref).table_type != 'ObjectType'
-                )):
-            # Otherwise, if the source link path is not visible,
-            # and this is a subtype intersection, or the pointer is not inline,
-            # we have an opportunity to opmimize the target join by
-            # directly replacing the target type.
-            with ctx.new() as subctx:
-                subctx.intersection_narrowing = (
-                    subctx.intersection_narrowing.copy())
-                subctx.intersection_narrowing[ir_source] = ir_set
-                source_rvar = get_set_rvar(ir_source, ctx=subctx)
-
-            pathctx.put_path_id_map(stmt, ir_set.path_id, ir_source.path_id)
-            relctx.include_rvar(stmt, source_rvar, ir_set.path_id, ctx=ctx)
-
-        else:
-            source_rvar = get_set_rvar(ir_source, ctx=ctx)
-            intersection = ir_set.typeref.intersection
-            if intersection:
-                if ir_source.typeref.intersection:
-                    current_intersection = {
-                        t.id for t in ir_source.typeref.intersection
-                    }
-                else:
-                    current_intersection = {
-                        ir_source.typeref.id
-                    }
-
-                intersectors = {t for t in intersection
-                                if t.id not in current_intersection}
-
-                assert len(intersectors) == 1
-                target_typeref = next(iter(intersectors))
-            else:
-                target_typeref = ptrref.out_target
-
-            poly_rvar = relctx.range_for_typeref(
-                target_typeref,
-                path_id=ir_set.path_id,
-                ctx=ctx,
-            )
-
-            prefix_path_id = ir_set.path_id.src_path()
-            assert prefix_path_id is not None, 'expected a path'
-            pathctx.put_rvar_path_output(
-                rvar=poly_rvar,
-                path_id=prefix_path_id,
-                aspect='identity',
-                var=pathctx.get_rvar_path_identity_var(
-                    poly_rvar, ir_set.path_id, env=ctx.env,
-                ),
-                env=ctx.env,
-            )
-            pathctx.put_rvar_path_bond(poly_rvar, prefix_path_id)
-            relctx.include_rvar(stmt, poly_rvar, ir_set.path_id, ctx=ctx)
-            int_rvar = pgast.IntersectionRangeVar(
-                component_rvars=[
-                    source_rvar,
-                    poly_rvar,
-                ]
-            )
-
-            if isinstance(source_rvar.query, pgast.Query):
-                pathctx.put_path_id_map(
-                    source_rvar.query, ir_set.path_id, ir_source.path_id)
-
-            for aspect in ('source', 'value'):
-                pathctx.put_path_rvar(
-                    stmt,
-                    ir_source.path_id,
-                    source_rvar,
-                    aspect=aspect,
-                    env=ctx.env,
-                )
-
-                pathctx.put_path_rvar(
-                    stmt,
-                    ir_set.path_id,
-                    int_rvar,
-                    aspect=aspect,
-                    env=ctx.env,
-                )
-
-        return new_stmt_set_rvar(
-            ir_set, stmt, aspects=['value', 'source'], ctx=ctx)
+        return process_set_as_path_type_intersection(
+            ir_set, stmt, ptrref, source_is_visible,
+            ctx=ctx)
 
     ptr_info = pg_types.get_ptrref_storage_info(
         ptrref, resolve_type=False, link_bias=False)
@@ -902,6 +925,12 @@ def process_set_as_path(
         with ctx.subrel() as srcctx:
             srcctx.expr_exposed = False
             src_rvar = get_set_rvar(ir_source, ctx=srcctx)
+            # semi_join needs a source rvar, so make sure we have one.
+            # (The returned one won't be a source rvar if it comes
+            # from a function, for example)
+            if not ir_source.path_id.is_type_intersection_path():
+                src_rvar = relctx.ensure_source_rvar(
+                    ir_source, ctx.rel, ctx=srcctx)
             set_rvar = relctx.semi_join(stmt, ir_set, src_rvar, ctx=srcctx)
             rvars.append(SetRVar(set_rvar, ir_set.path_id,
                                  ['value', 'source']))
@@ -1729,8 +1758,6 @@ def process_set_as_enumerate(
     assert isinstance(expr, irast.FunctionCall)
 
     with ctx.subrel() as newctx:
-        newctx.expr_exposed = False
-
         ir_arg = expr.args[0].expr
         arg_ref = dispatch.compile(ir_arg, ctx=newctx)
         arg_val = output.output_as_value(arg_ref, env=newctx.env)
@@ -1769,10 +1796,17 @@ def process_set_as_enumerate(
             pathctx.put_path_value_var(
                 newctx.rel, element.path_id, element.val, env=newctx.env)
 
+        var = pathctx.maybe_get_path_var(
+            newctx.rel, ir_arg.path_id,
+            aspect='serialized', env=newctx.env)
+        if var is not None:
+            pathctx.put_path_var(newctx.rel, set_expr.elements[1].path_id, var,
+                                 aspect='serialized', env=newctx.env)
+
         pathctx.put_path_var_if_not_exists(
             newctx.rel, ir_set.path_id, set_expr, aspect='value', env=ctx.env)
 
-    aspects = ('value',)
+    aspects = ('value', 'source')
 
     func_rvar = relctx.new_rel_rvar(ir_set, newctx.rel, ctx=ctx)
     relctx.include_rvar(stmt, func_rvar, ir_set.path_id,

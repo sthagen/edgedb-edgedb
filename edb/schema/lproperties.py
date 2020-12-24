@@ -191,19 +191,22 @@ class PropertySourceContext(sources.SourceCommandContext):
     pass
 
 
-class PropertySourceCommand(inheriting.InheritingObjectCommand[Property]):
+class PropertySourceCommand(
+    inheriting.InheritingObjectCommand[sources.Source_T],
+):
     pass
 
 
-class PropertyCommandContext(pointers.PointerCommandContext,
+class PropertyCommandContext(pointers.PointerCommandContext[Property],
                              constraints.ConsistencySubjectCommandContext):
     pass
 
 
-class PropertyCommand(pointers.PointerCommand,
-                      schema_metaclass=Property,
-                      context_class=PropertyCommandContext,
-                      referrer_context_class=PropertySourceContext):
+class PropertyCommand(
+    pointers.PointerCommand[Property],
+    context_class=PropertyCommandContext,
+    referrer_context_class=PropertySourceContext,
+):
 
     def _set_pointer_type(
         self,
@@ -233,7 +236,10 @@ class PropertyCommand(pointers.PointerCommand,
         if scls.is_special_pointer(schema):
             return
 
-        if scls.is_link_property(schema):
+        if (
+            scls.is_link_property(schema)
+            and not scls.is_pure_computable(schema)
+        ):
             # link properties cannot be required or multi
             if self.get_attribute_value('required'):
                 raise errors.InvalidPropertyDefinitionError(
@@ -302,6 +308,24 @@ class CreateProperty(
 
         return cmd
 
+    def get_ast_attr_for_field(
+        self,
+        field: str,
+        astnode: Type[qlast.DDLOperation],
+    ) -> Optional[str]:
+        if (
+            field == 'required'
+            and issubclass(astnode, qlast.CreateConcreteProperty)
+        ):
+            return 'is_required'
+        elif (
+            field == 'cardinality'
+            and issubclass(astnode, qlast.CreateConcreteProperty)
+        ):
+            return 'cardinality'
+        else:
+            return super().get_ast_attr_for_field(field, astnode)
+
     def _apply_field_ast(
         self,
         schema: s_schema.Schema,
@@ -312,19 +336,7 @@ class CreateProperty(
         # type ignore below, because the class is used as mixin
         link = context.get(PropertySourceContext)  # type: ignore
 
-        if op.property == 'required':
-            if isinstance(node, qlast.CreateConcreteProperty):
-                node.is_required = bool(op.new_value)
-            else:
-                node.commands.append(
-                    qlast.SetSpecialField(
-                        name='required',
-                        value=op.new_value,
-                    ),
-                )
-        elif op.property == 'cardinality':
-            node.cardinality = op.new_value
-        elif op.property == 'target' and link:
+        if op.property == 'target' and link:
             if isinstance(node, qlast.CreateConcreteProperty):
                 expr = self.get_attribute_value('expr')
                 if expr is not None:
@@ -359,24 +371,32 @@ class RebaseProperty(
     pass
 
 
-class SetPropertyType(pointers.SetPointerType,
-                      schema_metaclass=Property,
-                      referrer_context_class=PropertySourceContext):
-
+class SetPropertyType(
+    pointers.SetPointerType[Property],
+    referrer_context_class=PropertySourceContext,
+):
     astnode = qlast.SetPropertyType
+
+
+class AlterPropertyUpperCardinality(
+    pointers.AlterPointerUpperCardinality[Property],
+    referrer_context_class=PropertySourceContext,
+    field='cardinality',
+):
+    pass
 
 
 class AlterPropertyOwned(
     referencing.AlterOwned[Property],
-    schema_metaclass=Property,
     referrer_context_class=PropertySourceContext,
+    field='is_owned',
 ):
-    astnode = qlast.AlterPropertyOwned
+    pass
 
 
 class AlterProperty(
     PropertyCommand,
-    pointers.PointerAlterFragment,
+    pointers.PointerAlterFragment[Property],
     referencing.AlterReferencedInheritingObject[Property],
 ):
     astnode = [qlast.AlterConcreteProperty,
@@ -415,30 +435,31 @@ class AlterProperty(
                         type=utils.typeref_to_ast(schema, op.new_value),
                     ),
                 )
-        elif op.property == 'required':
-            node.commands.append(
-                qlast.SetSpecialField(
-                    name='required',
-                    value=op.new_value,
-                ),
-            )
-        elif op.property == 'cardinality':
-            node.commands.append(
-                qlast.SetSpecialField(
-                    name='cardinality',
-                    value=op.new_value,
-                ),
-            )
         elif op.property == 'computable':
             if not op.new_value:
                 node.commands.append(
-                    qlast.SetSpecialField(
+                    qlast.SetField(
                         name='expr',
                         value=None,
+                        special_syntax=True,
                     ),
                 )
         else:
             super()._apply_field_ast(schema, context, node, op)
+
+    def _get_ast(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        *,
+        parent_node: Optional[qlast.DDLOperation] = None,
+    ) -> Optional[qlast.DDLOperation]:
+        if self.maybe_get_object_aux_data('is_from_alias'):
+            # This is an alias type, appropriate DDL would be generated
+            # from the corresponding Alter/DeleteAlias node.
+            return None
+        else:
+            return super()._get_ast(schema, context, parent_node=parent_node)
 
 
 class DeleteProperty(
@@ -473,7 +494,7 @@ class DeleteProperty(
         *,
         parent_node: Optional[qlast.DDLOperation] = None,
     ) -> Optional[qlast.DDLOperation]:
-        if self.get_orig_attribute_value('is_from_alias'):
+        if self.maybe_get_object_aux_data('is_from_alias'):
             # This is an alias type, appropriate DDL would be generated
             # from the corresponding Alter/DeleteAlias node.
             return None

@@ -105,7 +105,7 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         for op in self.get_subcommands(type=sd.AlterObjectProperty):
             field = mcls.get_field(op.property)
             if field.inheritable and not field.ephemeral:
-                result[op.property] = op.source == 'inheritance'
+                result[op.property] = op.new_inherited
 
         return result
 
@@ -143,12 +143,8 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
                     schema=schema,
                 )
             except errors.SchemaDefinitionError as e:
-                field_op = self.get_attribute_set_cmd(field_name)
-                if (
-                    field_op is not None
-                    and field_op.source_context is not None
-                ):
-                    e.set_source_context(field_op.source_context)
+                if (srcctx := self.get_attribute_source_context(field_name)):
+                    e.set_source_context(srcctx)
                 raise
 
             if not ignore_local_field:
@@ -156,54 +152,31 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
             else:
                 ours = None
 
-            inherited = self.is_field_inherited(
-                schema, field_name, bases, result, ours)
-
+            inherited = result is not None and ours is None
             inherited_fields_update[field_name] = inherited
 
-            if (result is not None or ours is not None) and (
-                    result != ours or inherited):
-                schema = self.inherit_field(
-                    schema,
-                    context,
-                    field=field,
-                    value=result,
-                    inherited=inherited,
+            if (
+                (
+                    (result is not None or ours is not None)
+                    and (result != ours or inherited)
+                ) or (
+                    result is None and ours is None and ignore_local
                 )
+            ):
+                if (
+                    inherited
+                    and not context.transient_derivation
+                    and isinstance(result, s_expr.Expression)
+                ):
+                    result = self.compile_expr_field(
+                        schema, context, field=field, value=result)
+                schema = self.scls.set_field_value(schema, field_name, result)
+                self.set_attribute_value(
+                    field_name, result, inherited=inherited)
 
         schema = self._update_inherited_fields(
             schema, context, inherited_fields_update)
 
-        return schema
-
-    def is_field_inherited(
-        self,
-        schema: s_schema.Schema,
-        field_name: str,
-        bases: Tuple[so.Object, ...],
-        merged_value: Any,
-        explicit_value: Any
-    ) -> bool:
-        return merged_value is not None and explicit_value is None
-
-    def inherit_field(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        *,
-        field: so.Field[Any],
-        value: Any,
-        inherited: bool,
-    ) -> s_schema.Schema:
-        if (
-            inherited
-            and not context.transient_derivation
-            and isinstance(value, s_expr.Expression)
-        ):
-            value = self.compile_expr_field(
-                schema, context, field=field, value=value)
-        schema = self.scls.set_field_value(schema, field.name, value)
-        self.set_attribute_value(field.name, value, inherited=inherited)
         return schema
 
     def get_inherited_ref_layout(
@@ -253,7 +226,7 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
                     continue
 
                 mcls = type(v)
-                create_cmd = sd.ObjectCommandMeta.get_command_class_or_die(
+                create_cmd = sd.get_object_command_class_or_die(
                     sd.CreateObject, mcls)
                 assert issubclass(
                     create_cmd,
@@ -311,7 +284,7 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         for k, v in local_refs.items(schema):
             if not v.get_is_owned(schema):
                 mcls = type(v)
-                create_cmd = sd.ObjectCommandMeta.get_command_class_or_die(
+                create_cmd = sd.get_object_command_class_or_die(
                     sd.CreateObject, mcls)
                 assert issubclass(
                     create_cmd,
@@ -325,7 +298,7 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
                     schema, astnode, context)
 
                 if fqname not in present_refs:
-                    delete_cmd = sd.ObjectCommandMeta.get_command_class_or_die(
+                    delete_cmd = sd.get_object_command_class_or_die(
                         sd.DeleteObject, mcls)
                     dropped_refs[fqname] = delete_cmd
 
@@ -434,7 +407,7 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         removed, added = delta_bases(
             old_base_names, new_base_names)
 
-        rebase = sd.ObjectCommandMeta.get_command_class(
+        rebase = sd.get_object_command_class(
             RebaseInheritingObject, type(scls))
 
         alter_cmd = scls.init_delta_command(schema, sd.AlterObject)
@@ -514,25 +487,18 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
 
         return base_refs
 
-    def _apply_field_ast(
+    def get_ast_attr_for_field(
         self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        node: qlast.DDLOperation,
-        op: sd.AlterObjectProperty,
-    ) -> None:
+        field: str,
+        astnode: Type[qlast.DDLOperation],
+    ) -> Optional[str]:
         if (
-            op.property in {'is_abstract', 'is_final'}
-            and not isinstance(self, sd.DeleteObject)
+            field in {'is_abstract', 'is_final'}
+            and issubclass(astnode, qlast.CreateObject)
         ):
-            node.commands.append(
-                qlast.SetSpecialField(
-                    name=op.property,
-                    value=op.new_value
-                )
-            )
+            return field
         else:
-            super()._apply_field_ast(schema, context, node, op)
+            return super().get_ast_attr_for_field(field, astnode)
 
 
 BaseDelta_T = Tuple[
@@ -781,10 +747,6 @@ class CreateInheritingObject(
                             ],
                         )
                     )
-        elif op.property == 'is_abstract':
-            node.is_abstract = op.new_value
-        elif op.property == 'is_final':
-            node.is_final = op.new_value
         else:
             super()._apply_field_ast(schema, context, node, op)
 
@@ -883,7 +845,7 @@ class AlterInheritingObject(
             # combine what we've seen and turn it into a rebase.
 
             parent_class = cmd.get_schema_metaclass()
-            rebase_class = sd.ObjectCommandMeta.get_command_class_or_die(
+            rebase_class = sd.get_object_command_class_or_die(
                 RebaseInheritingObject, parent_class)
 
             cmd.replace(
@@ -908,7 +870,7 @@ class AlterInheritingObject(
                     [b.get_name(schema) for b in bases],
                 )
 
-                rebase = sd.ObjectCommandMeta.get_command_class_or_die(
+                rebase = sd.get_object_command_class_or_die(
                     RebaseInheritingObject, cmd.get_schema_metaclass())
 
                 rebase_cmd = rebase(
@@ -1022,7 +984,7 @@ class RebaseInheritingObject(
             schema = self._recompute_inheritance(schema, context)
 
             if context.enable_recursion:
-                alter_cmd = sd.ObjectCommandMeta.get_command_class_or_die(
+                alter_cmd = sd.get_object_command_class_or_die(
                     sd.AlterObject, type(scls))
                 assert issubclass(alter_cmd, AlterInheritingObject)
 

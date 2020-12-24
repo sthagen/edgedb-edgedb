@@ -23,8 +23,11 @@ from typing import *
 import collections
 import collections.abc
 import contextlib
+import functools
 import itertools
 import uuid
+
+import typing_inspect
 
 from edb import errors
 
@@ -351,6 +354,8 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
 
     #: AlterObjectProperty lookup table for get|set_attribute_value
     _attrs: Dict[str, AlterObjectProperty]
+    #: AlterSpecialObjectField lookup table
+    _special_attrs: Dict[str, AlterSpecialObjectField[so.Object]]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -358,12 +363,28 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         self.before_ops = []
         self.qlast: qlast.DDLOperation
         self._attrs = {}
+        self._special_attrs = {}
 
     def copy(self: Command_T) -> Command_T:
         result = super().copy()
         result.ops = [op.copy() for op in self.ops]
         result.before_ops = [op.copy() for op in self.before_ops]
         return result
+
+    def get_friendly_description(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        *,
+        object: Any = None,
+        object_desc: Optional[str] = None,
+    ) -> str:
+        """Return a friendly description of this command in imperative mood.
+
+        The result is used in error messages and other user-facing renderings
+        of the command.
+        """
+        raise NotImplementedError
 
     @classmethod
     def adapt(cls: Type[Command_T], obj: Command) -> Command_T:
@@ -435,20 +456,34 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
     def enumerate_attributes(self) -> Tuple[str, ...]:
         return tuple(self._attrs)
 
-    def has_attribute_value(self, attr_name: str) -> bool:
-        return attr_name in self._attrs
+    def _enumerate_attribute_cmds(self) -> Tuple[AlterObjectProperty, ...]:
+        return tuple(self._attrs.values())
 
-    def get_attribute_set_cmd(
+    def has_attribute_value(self, attr_name: str) -> bool:
+        return attr_name in self._attrs or attr_name in self._special_attrs
+
+    def _get_simple_attribute_set_cmd(
         self,
         attr_name: str,
     ) -> Optional[AlterObjectProperty]:
         return self._attrs.get(attr_name)
 
+    def _get_attribute_set_cmd(
+        self,
+        attr_name: str,
+    ) -> Optional[AlterObjectProperty]:
+        cmd = self._get_simple_attribute_set_cmd(attr_name)
+        if cmd is None:
+            special_cmd = self._special_attrs.get(attr_name)
+            if special_cmd is not None:
+                cmd = special_cmd._get_attribute_set_cmd(attr_name)
+        return cmd
+
     def get_attribute_value(
         self,
         attr_name: str,
     ) -> Any:
-        op = self.get_attribute_set_cmd(attr_name)
+        op = self._get_attribute_set_cmd(attr_name)
         if op is not None:
             return op.new_value
         else:
@@ -459,8 +494,8 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         attr_name: str,
     ) -> Any:
         """Return the new value of field, if not inherited."""
-        op = self.get_attribute_set_cmd(attr_name)
-        if op is not None and op.source != 'inheritance':
+        op = self._get_attribute_set_cmd(attr_name)
+        if op is not None and not op.new_inherited:
             return op.new_value
         else:
             return None
@@ -469,17 +504,27 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         self,
         attr_name: str,
     ) -> Any:
-        op = self.get_attribute_set_cmd(attr_name)
+        op = self._get_attribute_set_cmd(attr_name)
         if op is not None:
             return op.old_value
         else:
             return None
 
+    def is_attribute_inherited(
+        self,
+        attr_name: str,
+    ) -> bool:
+        op = self._get_attribute_set_cmd(attr_name)
+        if op is not None:
+            return op.new_inherited
+        else:
+            return False
+
     def get_attribute_source_context(
         self,
         attr_name: str,
     ) -> Optional[parsing.ParserContext]:
-        op = self.get_attribute_set_cmd(attr_name)
+        op = self._get_attribute_set_cmd(attr_name)
         if op is not None:
             return op.source_context
         else:
@@ -492,16 +537,29 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         *,
         orig_value: Any = None,
         inherited: bool = False,
+        orig_inherited: Optional[bool] = None,
+        computed: bool = False,
+        from_default: bool = False,
+        orig_computed: Optional[bool] = None,
         source_context: Optional[parsing.ParserContext] = None,
     ) -> None:
-        orig_op = op = self.get_attribute_set_cmd(attr_name)
+        orig_op = op = self._get_simple_attribute_set_cmd(attr_name)
         if op is None:
             op = AlterObjectProperty(property=attr_name, new_value=value)
         else:
             op.new_value = value
 
-        if inherited:
-            op.source = 'inheritance'
+        if orig_inherited is None:
+            orig_inherited = inherited
+        op.new_inherited = inherited
+        op.old_inherited = orig_inherited
+
+        if orig_computed is None:
+            orig_computed = computed
+        op.new_computed = computed
+        op.old_computed = orig_computed
+        op.from_default = from_default
+
         if source_context is not None:
             op.source_context = source_context
         if orig_value is not None:
@@ -511,7 +569,7 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
             self.add(op)
 
     def discard_attribute(self, attr_name: str) -> None:
-        op = self.get_attribute_set_cmd(attr_name)
+        op = self._get_attribute_set_cmd(attr_name)
         if op is not None:
             self.discard(op)
 
@@ -605,11 +663,12 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
 
     def get_nonattr_subcommand_count(self) -> int:
         count = 0
+        attr_cmds = (AlterObjectProperty, AlterSpecialObjectField)
         for op in self.ops:
-            if not isinstance(op, AlterObjectProperty):
+            if not isinstance(op, attr_cmds):
                 count += 1
         for op in self.before_ops:
-            if not isinstance(op, AlterObjectProperty):
+            if not isinstance(op, attr_cmds):
                 count += 1
         return count
 
@@ -633,6 +692,8 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         else:
             if isinstance(command, AlterObjectProperty):
                 self._attrs[command.property] = command
+            elif isinstance(command, AlterSpecialObjectField):
+                self._special_attrs[command._field] = command
             self.ops.insert(0, command)
 
     def add(self, command: Command) -> None:
@@ -641,6 +702,8 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         else:
             if isinstance(command, AlterObjectProperty):
                 self._attrs[command.property] = command
+            elif isinstance(command, AlterSpecialObjectField):
+                self._special_attrs[command._field] = command
             self.ops.append(command)
 
     def update(self, commands: Iterable[Command]) -> None:  # type: ignore
@@ -654,6 +717,7 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
     def replace_all(self, commands: Iterable[Command]) -> None:
         self.ops.clear()
         self._attrs.clear()
+        self._special_attrs.clear()
         self.update(commands)
 
     def discard(self, command: Command) -> None:
@@ -667,6 +731,8 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
             pass
         if isinstance(command, AlterObjectProperty):
             self._attrs.pop(command.property)
+        elif isinstance(command, AlterSpecialObjectField):
+            self._special_attrs.pop(command._field)
 
     def apply(
         self,
@@ -791,8 +857,10 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
                 diff = markup.elements.doc.ValueDiff(
                     before=repr(dd.old_value), after=repr(dd.new_value))
 
-                if dd.source == 'inheritance':
+                if dd.new_inherited:
                     diff.comment = 'inherited'
+                elif dd.new_computed:
+                    diff.comment = 'computed'
 
                 node.add_child(label=dd.property, node=diff)
             else:
@@ -925,11 +993,14 @@ class CommandContext:
         self.renames: Dict[sn.Name, sn.Name] = {}
         self.early_renames: Dict[sn.Name, sn.Name] = {}
         self.renamed_objs: Set[so.Object] = set()
-        self.altered_targets: Set[so.Object] = set()
+        self.change_log: Dict[Tuple[Type[so.Object], str], Set[so.Object]] = (
+            collections.defaultdict(set))
         self.schema_object_ids = schema_object_ids
         self.backend_runtime_params = backend_runtime_params
-        self.affected_finalization: \
-            Dict[Command, List[Tuple[DeltaRoot, Command, bool]]] = dict()
+        self.affected_finalization: Dict[
+            Command,
+            List[Tuple[DeltaRoot, Command, List[str]]],
+        ] = collections.defaultdict(list)
         self.compat_ver = compat_ver
 
     @property
@@ -1029,7 +1100,13 @@ class CommandContext:
         self, referrer_ctx: CommandContextToken[ObjectCommand[so.Object]],
     ) -> sn.QualName:
         referrer_name = referrer_ctx.op.classname
-        referrer_name = self.early_renames.get(referrer_name, referrer_name)
+        renamed = self.early_renames.get(referrer_name)
+        if renamed:
+            referrer_name = renamed
+        else:
+            renamed = self.renames.get(referrer_name)
+            if renamed:
+                referrer_name = renamed
         assert isinstance(referrer_name, sn.QualName)
         return referrer_name
 
@@ -1129,6 +1206,12 @@ class CommandContext:
     ) -> CommandContextWrapper[Command_T]:
         return CommandContextWrapper(self, token)
 
+    def compat_ver_is_before(
+        self,
+        ver: Tuple[int, int, verutils.VersionStage, int],
+    ) -> bool:
+        return self.compat_ver is not None and self.compat_ver < ver
+
 
 class DeltaRootContext(CommandContextToken["DeltaRoot"]):
     pass
@@ -1173,79 +1256,37 @@ class DeltaRoot(CommandGroup, context_class=DeltaRootContext):
         return schema
 
 
-class ObjectCommandMeta(CommandMeta):
-    _transparent_adapter_subclass: ClassVar[bool] = True
-    _schema_metaclasses: ClassVar[
-        Dict[Tuple[str, Type[so.Object]], Type[ObjectCommand[so.Object]]]
-    ] = {}
+_command_registry: Dict[
+    Tuple[str, Type[so.Object]],
+    Type[ObjectCommand[so.Object]]
+] = {}
 
-    def __new__(
-        mcls,
-        name: str,
-        bases: Tuple[type, ...],
-        dct: Dict[str, Any],
-        *,
-        schema_metaclass: Optional[Type[so.Object]] = None,
-        **kwargs: Any,
-    ) -> ObjectCommandMeta:
-        cls = cast(
-            Type["ObjectCommand[so.Object]"],
-            super().__new__(mcls, name, bases, dct, **kwargs),
-        )
-        if cls.has_adaptee():
-            # This is a command adapter rather than the actual
-            # command, so skip the registrations.
-            return cls
 
-        if (schema_metaclass is not None or
-                not hasattr(cls, '_schema_metaclass')):
-            cls._schema_metaclass = schema_metaclass
+def get_object_command_class(
+    cmdtype: Type[Command_T],
+    schema_metaclass: Type[so.Object],
+) -> Optional[Type[Command_T]]:
+    assert issubclass(cmdtype, ObjectCommand)
+    return _command_registry.get(  # type: ignore
+        (cmdtype._delta_action, schema_metaclass),
+    )
 
-        delta_action = getattr(cls, '_delta_action', None)
-        if cls._schema_metaclass is not None and delta_action is not None:
-            key = delta_action, cls._schema_metaclass
-            cmdcls = mcls._schema_metaclasses.get(key)
-            if cmdcls is not None:
-                raise TypeError(
-                    f'Action {cls._delta_action!r} for '
-                    f'{cls._schema_metaclass} is already claimed by {cmdcls}'
-                )
-            mcls._schema_metaclasses[key] = cls
 
-        return cls
-
-    @classmethod
-    def get_command_class(
-        mcls,
-        cmdtype: Type[Command_T],
-        schema_metaclass: Type[so.Object],
-    ) -> Optional[Type[Command_T]]:
-        assert issubclass(cmdtype, ObjectCommand)
-        return mcls._schema_metaclasses.get(  # type: ignore
-            (cmdtype._delta_action, schema_metaclass),
-        )
-
-    @classmethod
-    def get_command_class_or_die(
-        mcls,
-        cmdtype: Type[Command_T],
-        schema_metaclass: Type[so.Object],
-    ) -> Type[Command_T]:
-        cmdcls = mcls.get_command_class(cmdtype, schema_metaclass)
-        if cmdcls is None:
-            raise TypeError(f'missing {cmdtype.__name__} implementation '
-                            f'for {schema_metaclass.__name__}')
-        return cmdcls
+def get_object_command_class_or_die(
+    cmdtype: Type[Command_T],
+    schema_metaclass: Type[so.Object],
+) -> Type[Command_T]:
+    cmdcls = get_object_command_class(cmdtype, schema_metaclass)
+    if cmdcls is None:
+        raise TypeError(f'missing {cmdtype.__name__} implementation '
+                        f'for {schema_metaclass.__name__}')
+    return cmdcls
 
 
 ObjectCommand_T = TypeVar("ObjectCommand_T", bound='ObjectCommand[so.Object]')
 
 
-class ObjectCommand(
-    Command,
-    Generic[so.Object_T],
-    metaclass=ObjectCommandMeta,
-):
+class ObjectCommand(Command, Generic[so.Object_T]):
     """Base class for all Object-related commands."""
 
     #: Full name of the object this command operates on.
@@ -1260,12 +1301,69 @@ class ObjectCommand(
         dict,  # type: ignore
         default=None,
     )
+    #: Auxiliary object information that might be necessary to process
+    #: this command, derived from object fields.
+    aux_object_data = struct.Field(
+        dict,  # type: ignore
+        default=None,
+    )
 
     scls: so.Object_T
     _delta_action: ClassVar[str]
-    _schema_metaclass: ClassVar[Optional[Type[so.Object_T]]]
+    _schema_metaclass: ClassVar[Optional[Type[so.Object_T]]] = None
     astnode: ClassVar[Union[Type[qlast.DDLOperation],
                             List[Type[qlast.DDLOperation]]]]
+
+    def __init_subclass__(cls, *args: Any, **kwargs: Any) -> None:
+        # Check if the command subclass has been parametrized with
+        # a concrete schema object class, and if so, record the
+        # argument to be made available via get_schema_metaclass().
+        super().__init_subclass__(*args, **kwargs)  # type: ignore
+        generic_bases = typing_inspect.get_generic_bases(cls)
+        mcls: Optional[Type[so.Object]] = None
+        for gb in generic_bases:
+            base_origin = typing_inspect.get_origin(gb)
+            # Find the <ObjectCommand>[Type] base, where ObjectCommand
+            # is any ObjectCommand subclass.
+            if (
+                base_origin is not None
+                and issubclass(base_origin, ObjectCommand)
+            ):
+                args = typing_inspect.get_args(gb)
+                if len(args) != 1:
+                    raise AssertionError(
+                        'expected only one argument to ObjectCommand generic')
+                arg_0 = args[0]
+                if not typing_inspect.is_typevar(arg_0):
+                    assert issubclass(arg_0, so.Object)
+                    if not arg_0.is_abstract():
+                        mcls = arg_0
+                        break
+
+        if mcls is not None:
+            existing = getattr(cls, '_schema_metaclass', None)
+            if existing is not None and existing is not mcls:
+                raise TypeError(
+                    f'cannot redefine schema class of {cls.__name__} to '
+                    f'{mcls.__name__}: a superclass has already defined it as '
+                    f'{existing.__name__}'
+                )
+            cls._schema_metaclass = mcls
+
+        # If this is a command adapter rather than the actual
+        # command, skip the command class registration.
+        if not cls.has_adaptee():
+            delta_action = getattr(cls, '_delta_action', None)
+            schema_metaclass = getattr(cls, '_schema_metaclass', None)
+            if schema_metaclass is not None and delta_action is not None:
+                key = delta_action, schema_metaclass
+                cmdcls = _command_registry.get(key)
+                if cmdcls is not None:
+                    raise TypeError(
+                        f'Action {cls._delta_action!r} for '
+                        f'{schema_metaclass} is already claimed by {cmdcls}'
+                    )
+                _command_registry[key] = cls  # type: ignore
 
     @classmethod
     def _classname_from_ast(
@@ -1298,6 +1396,76 @@ class ObjectCommand(
         assert isinstance(op, ObjectCommand)
         return op
 
+    @classmethod
+    @functools.lru_cache()
+    def _get_special_handler(
+        cls,
+        field_name: str,
+    ) -> Optional[Type[AlterSpecialObjectField[so.Object]]]:
+        if issubclass(cls, AlterObject):
+            schema_cls = cls.get_schema_metaclass()
+            return get_special_field_alter_handler(field_name, schema_cls)
+        else:
+            return None
+
+    def set_attribute_value(
+        self,
+        attr_name: str,
+        value: Any,
+        *,
+        orig_value: Any = None,
+        inherited: bool = False,
+        orig_inherited: Optional[bool] = None,
+        computed: bool = False,
+        orig_computed: Optional[bool] = None,
+        from_default: bool = False,
+        source_context: Optional[parsing.ParserContext] = None,
+    ) -> None:
+        special = type(self)._get_special_handler(attr_name)
+        op = self._get_attribute_set_cmd(attr_name)
+        top_op: Optional[Command] = None
+
+        if orig_inherited is None:
+            orig_inherited = inherited
+
+        if orig_computed is None:
+            orig_computed = computed
+
+        if op is None:
+            op = AlterObjectProperty(
+                property=attr_name,
+                new_value=value,
+                old_value=orig_value,
+                new_inherited=inherited,
+                old_inherited=orig_inherited,
+                new_computed=computed,
+                old_computed=orig_computed,
+                from_default=from_default,
+                source_context=source_context,
+            )
+
+            if special is not None:
+                top_op = special(classname=self.classname)
+                top_op.add(op)
+            else:
+                top_op = op
+        else:
+            op.new_value = value
+            op.new_inherited = inherited
+            op.old_inherited = orig_inherited
+
+            op.new_computed = computed
+            op.old_computed = orig_computed
+            op.from_default = from_default
+
+            if source_context is not None:
+                op.source_context = source_context
+            if orig_value is not None:
+                op.old_value = orig_value
+
+        if top_op is not None:
+            self.add(top_op)
+
     def _propagate_if_expr_refs(
         self,
         schema: s_schema.Schema,
@@ -1308,6 +1476,7 @@ class ObjectCommand(
                       CommandContext, s_expr.Expression],
                      s_expr.Expression]
         ]=None,
+        metadata_only: bool=True,
     ) -> s_schema.Schema:
         scls = self.scls
         expr_refs = s_expr.get_expr_referrers(schema, scls)
@@ -1315,8 +1484,6 @@ class ObjectCommand(
         if expr_refs:
             ref_desc = []
             for ref, fns in expr_refs.items():
-                really_apply = False
-
                 from . import functions as s_func
                 from . import indexes as s_indexes
                 from . import pointers as s_pointers
@@ -1326,6 +1493,17 @@ class ObjectCommand(
 
                 cmd_drop: Command
                 cmd_create: Command
+
+                this_ref_desc = []
+                for fn in fns:
+                    if fn == 'expr':
+                        fdesc = 'expression'
+                    else:
+                        fdesc = f"{fn.replace('_', ' ')} expression"
+
+                    vn = ref.get_verbosename(schema, with_parent=True)
+
+                    this_ref_desc.append(f'{fdesc} of {vn}')
 
                 if isinstance(
                     ref,
@@ -1349,8 +1527,9 @@ class ObjectCommand(
                     # Mark it metadata_only so that if it actually gets
                     # applied, only the metadata is changed but not
                     # the real underlying schema.
-                    cmd_drop.metadata_only = True
-                    cmd_create.metadata_only = True
+                    if metadata_only:
+                        cmd_drop.metadata_only = True
+                        cmd_create.metadata_only = True
 
                     # Compute a dummy value
                     dummy = None
@@ -1368,7 +1547,7 @@ class ObjectCommand(
                         dummy = None
 
                     # We need to extract the command on whatever the
-                    # enclosing object of our referer is, since we
+                    # enclosing object of our referrer is, since we
                     # need to put that in the context so that
                     # compile_expr_field calls in the fixer can find
                     # the subject.
@@ -1377,7 +1556,7 @@ class ObjectCommand(
                     obj = obj_cmd.get_object(schema, context)
 
                     for fn in fns:
-                        # Do the switcheraroos
+                        # Do the switcheroos
                         value = ref.get_explicit_field_value(schema, fn, None)
                         if value is None:
                             continue
@@ -1388,26 +1567,17 @@ class ObjectCommand(
                             with obj_cmd.new_context(schema, context, obj):
                                 value = fixer(
                                     schema, cmd_create, fn, context, value)
-                                really_apply = True
 
                         cmd_drop.set_attribute_value(fn, dummy)
                         cmd_create.set_attribute_value(fn, value)
 
-                    context.affected_finalization.setdefault(self, []).append(
-                        (delta_create, cmd_create, really_apply)
+                    context.affected_finalization[self].append(
+                        (delta_create, cmd_create, this_ref_desc)
                     )
                     schema = delta_drop.apply(schema, context)
                     continue
 
-                for fn in fns:
-                    if fn == 'expr':
-                        fdesc = 'expression'
-                    else:
-                        fdesc = f"{fn.replace('_', ' ')} expression"
-
-                    vn = ref.get_verbosename(schema, with_parent=True)
-
-                    ref_desc.append(f'{fdesc} of {vn}')
+                ref_desc.extend(this_ref_desc)
 
             if ref_desc:
                 expr_s = (
@@ -1551,25 +1721,73 @@ class ObjectCommand(
         schema: s_schema.Schema,
         context: CommandContext,
     ) -> s_schema.Schema:
-        for delta, cmd, really_apply in context.affected_finalization.get(
-            self, []
-        ):
-            self._finalize_affected_refs_specialize(cmd, schema, context)
+        for delta, cmd, refdesc in context.affected_finalization.get(self, []):
+            try:
+                self._finalize_affected_refs_specialize(cmd, schema, context)
 
-            schema = delta.apply(schema, context)
+                schema = delta.apply(schema, context)
 
-            if not context.canonical and really_apply and delta:
-                # We need to force the attributes to be resolved so
-                # that expressions get compiled *now* under a schema
-                # where they are correct, and not later, when more
-                # renames may have broken them.
-                assert isinstance(cmd, ObjectCommand)
-                for key, value in cmd.get_resolved_attributes(
-                        schema, context).items():
-                    cmd.set_attribute_value(key, value)
-                self.add(delta)
+                if not context.canonical and delta:
+                    # We need to force the attributes to be resolved so
+                    # that expressions get compiled *now* under a schema
+                    # where they are correct, and not later, when more
+                    # renames may have broken them.
+                    assert isinstance(cmd, ObjectCommand)
+                    for key, value in cmd.get_resolved_attributes(
+                            schema, context).items():
+                        cmd.set_attribute_value(key, value)
+                    self.add(delta)
+            except errors.QueryError as e:
+                desc = self.get_friendly_description(schema, context)
+                raise errors.SchemaDefinitionError(
+                    f'cannot {desc} because this affects'
+                    f' {" and ".join(refdesc)}',
+                    details=e.args[0],
+                ) from e
 
         return schema
+
+    def _get_computed_status_of_fields(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> Dict[str, bool]:
+        result = {}
+        mcls = self.get_schema_metaclass()
+        for op in self._enumerate_attribute_cmds():
+            field = mcls.get_field(op.property)
+            if not field.ephemeral:
+                result[op.property] = op.new_computed
+
+        return result
+
+    def _update_computed_fields(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        update: Mapping[str, bool],
+    ) -> None:
+        cur_comp_fields = self.scls.get_computed_fields(schema)
+        comp_fields = set(cur_comp_fields)
+        for fn, computed in update.items():
+            if computed:
+                comp_fields.add(fn)
+            else:
+                comp_fields.discard(fn)
+
+        if cur_comp_fields != comp_fields:
+            if comp_fields:
+                self.set_attribute_value(
+                    'computed_fields',
+                    frozenset(comp_fields),
+                    orig_value=cur_comp_fields if cur_comp_fields else None,
+                )
+            else:
+                self.set_attribute_value(
+                    'computed_fields',
+                    None,
+                    orig_value=cur_comp_fields if cur_comp_fields else None,
+                )
 
     def _append_subcmd_ast(
         self,
@@ -1651,18 +1869,16 @@ class ObjectCommand(
 
                 if (
                     (
-                        # For all properties other than cardinality, if they
-                        # are inherited and have the default value, skip them.
-                        # Cardinality is special and should be explicitly
-                        # included, though.
-                        fop.property == 'cardinality'
-                        or
-                        (
-                            fop.source != 'inheritance'
-                            or context.descriptive_mode
-                        )
+                        # Only include fields that are not inherited
+                        # and that have their value actually changed.
+                        not fop.new_inherited
+                        or context.descriptive_mode
                     )
-                    and fop.old_value != new_value
+                    and (
+                        fop.old_value != new_value
+                        or fop.old_inherited != fop.new_inherited
+                        or fop.old_computed != fop.new_computed
+                    )
                 ):
                     self._apply_field_ast(schema, context, node, fop)
 
@@ -1686,7 +1902,7 @@ class ObjectCommand(
                             ),
                         )
 
-                ast_attr = self.get_ast_attr_for_field(field.name)
+                ast_attr = self.get_ast_attr_for_field(field.name, type(node))
                 if (
                     ast_attr is not None
                     and not getattr(node, ast_attr, None)
@@ -1744,7 +1960,11 @@ class ObjectCommand(
             if subnode is not None:
                 node.commands.append(subnode)
 
-    def get_ast_attr_for_field(self, field: str) -> Optional[str]:
+    def get_ast_attr_for_field(
+        self,
+        field: str,
+        astnode: Type[qlast.DDLOperation],
+    ) -> Optional[str]:
         return None
 
     def get_ddl_identity_fields(
@@ -1770,7 +1990,7 @@ class ObjectCommand(
         cmdtype: Type[ObjectCommand_T],
     ) -> Type[ObjectCommand_T]:
         mcls = cls.get_schema_metaclass()
-        return ObjectCommandMeta.get_command_class_or_die(cmdtype, mcls)
+        return get_object_command_class_or_die(cmdtype, mcls)
 
     def _validate_legal_command(
         self,
@@ -1791,13 +2011,34 @@ class ObjectCommand(
                     f'module {modname} is read-only',
                     context=self.source_context)
 
-    def get_verbosename(self) -> str:
+    def get_verbosename(self, parent: Optional[str] = None) -> str:
         mcls = self.get_schema_metaclass()
-        return mcls.get_verbosename_static(self.classname)
+        return mcls.get_verbosename_static(self.classname, parent=parent)
 
     def get_displayname(self) -> str:
         mcls = self.get_schema_metaclass()
         return mcls.get_displayname_static(self.classname)
+
+    def get_friendly_object_name_for_description(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        *,
+        object: Optional[so.Object_T] = None,
+        object_desc: Optional[str] = None,
+    ) -> str:
+        if object_desc is not None:
+            return object_desc
+        else:
+            if object is None:
+                object = self.scls
+
+            if object is _dummy_object:
+                object_desc = self.get_verbosename()
+            else:
+                object_desc = object.get_verbosename(schema, with_parent=True)
+
+            return object_desc
 
     @overload
     def get_object(
@@ -1926,6 +2167,40 @@ class ObjectCommand(
 
         return result
 
+    def get_specified_attribute_value(
+        self,
+        field: str,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> Optional[Any]:
+        """Fetch the specified (not computed) value of a field.
+
+        If the command is an alter, it will fall back to the value in
+        the schema.
+
+        Return None if there is no specified value or if the specified
+        value is being reset.
+        """
+        spec = self.get_attribute_value(field)
+
+        is_alter = (
+            isinstance(self, AlterObject)
+            or (
+                isinstance(self, AlterObjectFragment)
+                and isinstance(self.get_parent_op(context), AlterObject)
+            )
+        )
+        if (
+            is_alter
+            and spec is None
+            and not self.has_attribute_value(field)
+            and field not in self.scls.get_computed_fields(schema)
+        ):
+            spec = self.scls.get_explicit_field_value(
+                schema, field, default=None)
+
+        return spec
+
     def compile_expr_field(
         self,
         schema: s_schema.Schema,
@@ -1992,6 +2267,37 @@ class ObjectCommand(
             self.ddl_identity = {}
 
         self.ddl_identity[aspect] = value
+
+    def maybe_get_object_aux_data(self, field: str) -> Any:
+        if self.aux_object_data is None:
+            return None
+        else:
+            value = self.aux_object_data.get(field)
+            if value is None:
+                return None
+            else:
+                return value
+
+    def get_object_aux_data(self, field: str) -> Any:
+        if self.aux_object_data is None:
+            raise LookupError(f'{self!r} has no auxiliary object information')
+        value = self.aux_object_data.get(field)
+        if value is None:
+            raise LookupError(
+                f'{self!r} has no {field!r} in auxiliary object information')
+        return value
+
+    def has_object_aux_data(self, field: str) -> bool:
+        return (
+            self.aux_object_data is not None
+            and self.aux_object_data.get(field) is not None
+        )
+
+    def set_object_aux_data(self, field: str, value: Any) -> None:
+        if self.aux_object_data is None:
+            self.aux_object_data = {}
+
+        self.aux_object_data[field] = value
 
     def get_annotation(self, name: str) -> Any:
         if self.annotations is None:
@@ -2086,7 +2392,7 @@ class QualifiedObjectCommand(ObjectCommand[so.QualifiedObject_T]):
         )
 
 
-class GlobalObjectCommand(ObjectCommand[so.GlobalObject]):
+class GlobalObjectCommand(ObjectCommand[so.GlobalObject_T]):
     pass
 
 
@@ -2123,7 +2429,7 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
                 classname = cls._classname_from_ast(schema, astnode, context)
             mcls = cls.get_schema_metaclass()
             if schema.get(classname, default=None) is not None:
-                return ObjectCommandMeta.get_command_class_or_die(
+                return get_object_command_class_or_die(
                     AlterObject, mcls)
 
         return cls
@@ -2147,6 +2453,22 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
             cmd.set_attribute_value('is_abstract', True)
 
         return cmd
+
+    def get_friendly_description(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        *,
+        object: Optional[so.Object_T] = None,
+        object_desc: Optional[str] = None,
+    ) -> str:
+        object_desc = self.get_friendly_object_name_for_description(
+            schema,
+            context,
+            object=object,
+            object_desc=object_desc,
+        )
+        return f'create {object_desc}'
 
     def validate_create(
         self,
@@ -2174,12 +2496,8 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
                 qlclass = mcls.get_ql_class_or_die()
 
             objname = self.classname
-            if (
-                context.compat_ver is not None
-                and (
-                    context.compat_ver
-                    < (1, 0, verutils.VersionStage.ALPHA, 5)
-                )
+            if context.compat_ver_is_before(
+                (1, 0, verutils.VersionStage.ALPHA, 5)
             ):
                 # Pre alpha.5 used to have a different name mangling scheme.
                 objname = sn.compat_name_remangle(str(objname))
@@ -2193,6 +2511,12 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
             schema = self.populate_ddl_identity(schema, context)
             schema = self.canonicalize_attributes(schema, context)
             self.validate_create(schema, context)
+            computed_status = self._get_computed_status_of_fields(
+                schema, context)
+            computed_fields = {n for n, v in computed_status.items() if v}
+            if computed_fields:
+                self.set_attribute_value(
+                    'computed_fields', frozenset(computed_fields))
 
         props = self.get_resolved_attributes(schema, context)
         metaclass = self.get_schema_metaclass()
@@ -2318,6 +2642,9 @@ class AlterObjectFragment(ObjectCommand[so.Object_T]):
         if not context.canonical:
             schema = self.populate_ddl_identity(schema, context)
             schema = self.canonicalize_attributes(schema, context)
+            computed_status = self._get_computed_status_of_fields(
+                schema, context)
+            self._update_computed_fields(schema, context, computed_status)
 
         props = self.get_resolved_attributes(schema, context)
         return self.scls.update(schema, props)
@@ -2347,6 +2674,22 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
     astnode = qlast.Rename
 
     new_name = struct.Field(sn.Name)
+
+    def get_friendly_description(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        *,
+        object: Optional[so.Object_T] = None,
+        object_desc: Optional[str] = None,
+    ) -> str:
+        object_desc = self.get_friendly_object_name_for_description(
+            schema,
+            context,
+            object=object,
+            object_desc=object_desc,
+        )
+        return f'rename {object_desc}'
 
     def _fix_referencing_expr(
         self,
@@ -2563,7 +2906,7 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
         parent_op = parent_ctx.op
         assert isinstance(parent_op, ObjectCommand)
         parent_class = parent_op.get_schema_metaclass()
-        rename_class = ObjectCommandMeta.get_command_class_or_die(
+        rename_class = get_object_command_class_or_die(
             RenameObject, parent_class)
         return rename_class._rename_cmd_from_ast(schema, astnode, context)
 
@@ -2580,7 +2923,7 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
         parent_op = parent_ctx.op
         assert isinstance(parent_op, ObjectCommand)
         parent_class = parent_op.get_schema_metaclass()
-        rename_class = ObjectCommandMeta.get_command_class_or_die(
+        rename_class = get_object_command_class_or_die(
             RenameObject, parent_class)
 
         new_name = cls._classname_from_ast(schema, astnode, context)
@@ -2622,6 +2965,22 @@ class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
 
     #: If True, only apply changes to properties, not "real" schema changes
     metadata_only = struct.Field(bool, default=False)
+
+    def get_friendly_description(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        *,
+        object: Optional[so.Object_T] = None,
+        object_desc: Optional[str] = None,
+    ) -> str:
+        object_desc = self.get_friendly_object_name_for_description(
+            schema,
+            context,
+            object=object,
+            object_desc=object_desc,
+        )
+        return f'alter {object_desc}'
 
     @classmethod
     def _cmd_tree_from_ast(
@@ -2667,6 +3026,9 @@ class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         if not context.canonical:
             schema = self.populate_ddl_identity(schema, context)
             schema = self.canonicalize_attributes(schema, context)
+            computed_status = self._get_computed_status_of_fields(
+                schema, context)
+            self._update_computed_fields(schema, context, computed_status)
             self.validate_alter(schema, context)
 
         props = self.get_resolved_attributes(schema, context)
@@ -2734,6 +3096,22 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
     #: deleted, which we use to resolve if_unused.
     expiring_refs = struct.Field(AbstractSet[so.Object],
                                  default=frozenset())
+
+    def get_friendly_description(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        *,
+        object: Optional[so.Object_T] = None,
+        object_desc: Optional[str] = None,
+    ) -> str:
+        object_desc = self.get_friendly_object_name_for_description(
+            schema,
+            context,
+            object=object,
+            object_desc=object_desc,
+        )
+        return f'drop {object_desc}'
 
     def _delete_begin(
         self,
@@ -2869,8 +3247,59 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         return schema
 
 
-class AlterSpecialObjectProperty(Command):
-    astnode = qlast.SetSpecialField
+special_field_alter_handlers: Dict[
+    str,
+    Dict[Type[so.Object], Type[AlterSpecialObjectField[so.Object]]],
+] = {}
+
+
+class AlterSpecialObjectField(AlterObjectFragment[so.Object_T]):
+    """Base class for AlterObjectFragment implementations for special fields.
+
+    When the generic `AlterObjectProperty` handling of field value transitions
+    is insufficient, declare a subclass of this to implement custom handling.
+    """
+
+    _field: ClassVar[str]
+
+    def __init_subclass__(
+        cls,
+        *,
+        field: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init_subclass__(**kwargs)
+
+        if field is None:
+            if any(
+                issubclass(b, AlterSpecialObjectField)
+                for b in cls.__mro__[1:]
+            ):
+                return
+            else:
+                raise TypeError(
+                    "AlterSpecialObjectField.__init_subclass__() missing "
+                    "1 required keyword-only argument: 'field'"
+                )
+
+        handlers = special_field_alter_handlers.get(field)
+        if handlers is None:
+            handlers = special_field_alter_handlers[field] = {}
+
+        schema_metaclass = cls.get_schema_metaclass()
+        handlers[schema_metaclass] = cls  # type: ignore
+        cls._field = field
+
+    @classmethod
+    def _cmd_from_ast(
+        cls,
+        schema: s_schema.Schema,
+        astnode: qlast.DDLOperation,
+        context: CommandContext,
+    ) -> ObjectCommand[so.Object_T]:
+        this_op = context.current().op
+        assert isinstance(this_op, ObjectCommand)
+        return cls(classname=this_op.classname)
 
     @classmethod
     def _cmd_tree_from_ast(
@@ -2878,41 +3307,71 @@ class AlterSpecialObjectProperty(Command):
         schema: s_schema.Schema,
         astnode: qlast.DDLOperation,
         context: CommandContext,
-    ) -> AlterObjectProperty:
-        assert isinstance(astnode, qlast.BaseSetField)
+    ) -> Command:
+        assert isinstance(astnode, qlast.SetField)
+        cmd = super()._cmd_tree_from_ast(schema, astnode, context)
+        cmd.add(AlterObjectProperty.regular_cmd_from_ast(
+            schema, astnode, context))
+        return cmd
 
-        propname = astnode.name
-        parent_ctx = context.current()
-        parent_op = parent_ctx.op
-        assert isinstance(parent_op, ObjectCommand)
-        parent_cls = parent_op.get_schema_metaclass()
-        field = parent_cls.get_field(propname)
+    def _get_ast(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        *,
+        parent_node: Optional[qlast.DDLOperation] = None,
+    ) -> Optional[qlast.DDLOperation]:
+        attrs = self._enumerate_attribute_cmds()
+        assert len(attrs) == 1, "expected one attribute command"
+        return attrs[0]._get_ast(schema, context, parent_node=parent_node)
 
-        new_value: Any = astnode.value
-        old_value: Any = None
-
-        if field.type is s_expr.Expression:
-            if parent_cls.has_field(f'orig_{field.name}'):
-                orig_text = cls.get_orig_expr_text(
-                    schema, parent_op.qlast, field.name)
-            else:
-                orig_text = None
-
-            if astnode.value is not None:
-                new_value = s_expr.Expression.from_ast(
-                    astnode.value,
-                    schema,
-                    context.modaliases,
-                    context.localnames,
-                    orig_text=orig_text,
-                )
-
-        return AlterObjectProperty(
-            property=astnode.name,
-            new_value=new_value,
-            old_value=old_value,
-            source_context=astnode.context,
+    def get_friendly_description(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        *,
+        object: Optional[so.Object_T] = None,
+        object_desc: Optional[str] = None,
+    ) -> str:
+        object_desc = self.get_friendly_object_name_for_description(
+            schema,
+            context,
+            object=object,
+            object_desc=object_desc,
         )
+        return f'alter the {self._field} of {object_desc}'
+
+
+def get_special_field_alter_handler(
+    field: str,
+    schema_cls: Type[so.Object],
+) -> Optional[Type[AlterSpecialObjectField[so.Object]]]:
+    """Return a custom handler for the field value transition, if any.
+
+    Returns a subclass of AlterSpecialObjectField, when in the context
+    of an AlterObject operation, and a special handler has been declared.
+    """
+    field_handlers = special_field_alter_handlers.get(field)
+    if field_handlers is None:
+        return None
+    return field_handlers.get(schema_cls)
+
+
+def get_special_field_alter_handler_for_context(
+    field: str,
+    context: CommandContext,
+) -> Optional[Type[AlterSpecialObjectField[so.Object]]]:
+    """Return a custom handler for the field value transition, if any.
+
+    Returns a subclass of AlterSpecialObjectField, when in the context
+    of an AlterObject operation, and a special handler has been declared.
+    """
+    this_op = context.current().op
+    if not isinstance(this_op, AlterObject):
+        return None
+    else:
+        mcls = this_op.get_schema_metaclass()
+        return get_special_field_alter_handler(field, mcls)
 
 
 class AlterObjectProperty(Command):
@@ -2921,7 +3380,11 @@ class AlterObjectProperty(Command):
     property = struct.Field(str)
     old_value = struct.Field[Any](object, None)
     new_value = struct.Field[Any](object, None)
-    source = struct.Field(str, None)
+    old_inherited = struct.Field(bool, False)
+    new_inherited = struct.Field(bool, False)
+    new_computed = struct.Field(bool, False)
+    old_computed = struct.Field(bool, False)
+    from_default = struct.Field(bool, False)
 
     @classmethod
     def _cmd_tree_from_ast(
@@ -2929,11 +3392,23 @@ class AlterObjectProperty(Command):
         schema: s_schema.Schema,
         astnode: qlast.DDLOperation,
         context: CommandContext,
+    ) -> Command:
+        assert isinstance(astnode, qlast.SetField)
+        handler = get_special_field_alter_handler_for_context(
+            astnode.name, context)
+        if handler is not None:
+            return handler._cmd_tree_from_ast(schema, astnode, context)
+        else:
+            return cls.regular_cmd_from_ast(schema, astnode, context)
+
+    @classmethod
+    def regular_cmd_from_ast(
+        cls,
+        schema: s_schema.Schema,
+        astnode: qlast.SetField,
+        context: CommandContext,
     ) -> AlterObjectProperty:
-        assert isinstance(astnode, qlast.BaseSetField)
-
         propname = astnode.name
-
         parent_ctx = context.current()
         parent_op = parent_ctx.op
         assert isinstance(parent_op, ObjectCommand)
@@ -2944,9 +3419,12 @@ class AlterObjectProperty(Command):
                 f'{propname!r} is not a valid field',
                 context=astnode.context)
 
-        if not (field.allow_ddl_set
-                or context.stdmode
-                or context.testmode):
+        if not (
+            astnode.special_syntax
+            or field.allow_ddl_set
+            or context.stdmode
+            or context.testmode
+        ):
             raise errors.SchemaDefinitionError(
                 f'{propname!r} is not a valid field',
                 context=astnode.context)
@@ -2968,6 +3446,7 @@ class AlterObjectProperty(Command):
                 astnode.value,
                 schema,
                 context.modaliases,
+                context.localnames,
                 orig_text=orig_text,
             ) if astnode.value else None
         else:
@@ -2994,9 +3473,14 @@ class AlterObjectProperty(Command):
             else:
                 new_value = qlcompiler.evaluate_ast_to_python_val(
                     astnode.value, schema=schema) if astnode.value else None
+                if new_value is not None:
+                    new_value = field.coerce_value(schema, new_value)
 
-        return cls(property=propname, new_value=new_value,
-                   source_context=astnode.context)
+        return cls(
+            property=propname,
+            new_value=new_value,
+            source_context=astnode.context,
+        )
 
     def _get_ast(
         self,
@@ -3006,7 +3490,6 @@ class AlterObjectProperty(Command):
         parent_node: Optional[qlast.DDLOperation] = None,
     ) -> Optional[qlast.DDLOperation]:
         value = self.new_value
-        astcls = qlast.SetField
 
         new_value_empty = \
             (value is None or
@@ -3022,7 +3505,6 @@ class AlterObjectProperty(Command):
         assert parent_node is not None
         parent_cls = parent_op.get_schema_metaclass()
         field = parent_cls.get_field(self.property)
-        parent_node_attr = parent_op.get_ast_attr_for_field(field.name)
         if field is None:
             raise errors.SchemaDefinitionError(
                 f'{self.property!r} is not a valid field',
@@ -3031,9 +3513,18 @@ class AlterObjectProperty(Command):
         if self.property == 'id':
             return None
 
-        if (not field.allow_ddl_set
-                and self.property != 'expr'
-                and parent_node_attr is None):
+        parent_node_attr = parent_op.get_ast_attr_for_field(
+            field.name, type(parent_node))
+
+        if (
+            not field.allow_ddl_set
+            and not (
+                field.special_ddl_syntax
+                and isinstance(parent_node, qlast.AlterObject)
+            )
+            and self.property != 'expr'
+            and parent_node_attr is None
+        ):
             # Don't produce any AST if:
             #
             # * a field does not have the "allow_ddl_set" option, unless
@@ -3043,21 +3534,66 @@ class AlterObjectProperty(Command):
             #   treated in parser and codegen.
             return None
 
-        if self.source == 'inheritance':
-            # We don't want to show inherited properties unless
-            # we are in "descriptive_mode" and ...
+        if (
+            (
+                self.new_inherited
+                and not self.old_inherited
+                and not old_value_empty
+            ) or (
+                self.new_computed
+                and not self.old_computed
+                and not self.old_inherited
+                and not old_value_empty
+            )
+        ):
+            # The field became inherited or computed, in which case we should
+            # generate a RESET.
+            return qlast.SetField(
+                name=self.property,
+                value=None,
+                special_syntax=field.special_ddl_syntax,
+            )
 
-            if ((not context.descriptive_mode
-                    or self.property not in {'default', 'readonly'})
-                    and parent_node_attr is None):
-                # If property isn't 'default' or 'readonly' --
-                # skip the AST for it.
+        if self.new_inherited or self.new_computed:
+            # We don't want to show inherited or computed properties unless
+            # we are in "descriptive_mode" ...
+            if not context.descriptive_mode:
+                return None
+
+            if not (
+                field.describe_visibility
+                & so.DescribeVisibilityFlags.SHOW_IF_DERIVED
+            ):
+                # ... or if the field shouldn't be shown when inherited
+                # or computed.
+                return None
+
+            if (
+                not (
+                    field.describe_visibility
+                    & so.DescribeVisibilityFlags.SHOW_IF_DEFAULT
+                ) and field.default == value
+            ):
+                # ... or if the field should not be shown when the value
+                # mathdes the default.
                 return None
 
             parentop_sn = sn.shortname_from_fullname(parent_op.classname).name
             if self.property == 'default' and parentop_sn == 'id':
-                # If it's 'default' for the 'id' property --
-                # skip the AST for it.
+                # ... or if it's 'default' for the 'id' property
+                # (special case).
+                return None
+
+        if self.from_default:
+            if not context.descriptive_mode:
+                return None
+
+            if not (
+                field.describe_visibility
+                & so.DescribeVisibilityFlags.SHOW_IF_DEFAULT
+            ):
+                # ... or if the field should not be shown when the value
+                # mathdes the default.
                 return None
 
         if new_value_empty:
@@ -3074,6 +3610,9 @@ class AlterObjectProperty(Command):
                 parent_node=parent_node,
                 parent_node_attr=parent_node_attr,
             )
+        elif parent_node_attr is not None:
+            setattr(parent_node, parent_node_attr, value)
+            return None
         elif (v := utils.is_nontrivial_container(value)) and v is not None:
             value = qlast.Tuple(elements=[
                 utils.const_ast_from_python(el) for el in v
@@ -3091,7 +3630,11 @@ class AlterObjectProperty(Command):
         else:
             value = utils.const_ast_from_python(value)
 
-        return astcls(name=self.property, value=value)
+        return qlast.SetField(
+            name=self.property,
+            value=value,
+            special_syntax=field.special_ddl_syntax,
+        )
 
     def _get_expr_field_ast(
         self,
@@ -3105,17 +3648,10 @@ class AlterObjectProperty(Command):
     ) -> Optional[qlast.DDLOperation]:
         from edb import edgeql
 
-        astcls: Type[qlast.BaseSetField]
-
         assert isinstance(
             self.new_value,
             (s_expr.Expression, s_expr.ExpressionShell),
         )
-
-        if self.property == 'expr':
-            astcls = qlast.SetSpecialField
-        else:
-            astcls = qlast.SetField
 
         parent_cls = parent_op.get_schema_metaclass()
         has_shadow = parent_cls.has_field(f'orig_{field.name}')
@@ -3150,12 +3686,35 @@ class AlterObjectProperty(Command):
             setattr(parent_node, parent_node_attr, expr_ql)
             return None
         else:
-            return astcls(name=self.property, value=expr_ql)
+            return qlast.SetField(
+                name=self.property,
+                value=expr_ql,
+                special_syntax=(self.property == 'expr'),
+            )
 
     def __repr__(self) -> str:
         return '<%s.%s "%s":"%s"->"%s">' % (
             self.__class__.__module__, self.__class__.__name__,
             self.property, self.old_value, self.new_value)
+
+    def get_friendly_description(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        *,
+        object: Optional[so.Object_T] = None,
+        object_desc: Optional[str] = None,
+    ) -> str:
+        parent_ctx = context.current()
+        parent_op = parent_ctx.op
+        assert isinstance(parent_op, ObjectCommand)
+        object_desc = parent_op.get_friendly_object_name_for_description(
+            schema,
+            context,
+            object=object,
+            object_desc=object_desc,
+        )
+        return f'alter the {self.property} of {object_desc}'
 
 
 def compile_ddl(
@@ -3209,7 +3768,7 @@ def get_object_delta_command(
 
     cmdcls = cast(
         Type[ObjectCommand_T],
-        ObjectCommandMeta.get_command_class_or_die(cmdtype, objtype),
+        get_object_command_class_or_die(cmdtype, objtype),
     )
 
     return cmdcls(

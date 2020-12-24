@@ -36,6 +36,7 @@ from . import name as sn
 from . import objects as so
 from . import objtypes as s_objtypes
 from . import ordering as s_ordering
+from . import pseudo as s_pseudo
 from . import schema as s_schema
 
 
@@ -64,6 +65,7 @@ def delta_schemas(
     include_derived_types: bool=True,
     include_migrations: bool=False,
     linearize_delta: bool=True,
+    descriptive_mode: bool=False,
     generate_prompts: bool=False,
     guidance: Optional[so.DeltaGuidance]=None,
 ) -> sd.DeltaRoot:
@@ -121,6 +123,9 @@ def delta_schemas(
             Whether the resulting diff should be properly ordered
             using the dependencies between objects.
 
+        descriptive_mode:
+            DESCRIBE AS TEXT mode.
+
         generate_prompts:
             Whether to generate prompts that can be used in
             DESCRIBE MIGRATION.
@@ -139,6 +144,7 @@ def delta_schemas(
     schema_b_filters = list(schema_b_filters)
     context = so.ComparisonContext(
         generate_prompts=generate_prompts,
+        descriptive_mode=descriptive_mode,
         guidance=guidance,
     )
 
@@ -230,13 +236,19 @@ def delta_schemas(
 
                 result.add(create)
 
+    excluded_classes = (
+        so.GlobalObject,
+        s_mod.Module,
+        s_func.Parameter,
+        s_pseudo.PseudoType,
+    )
+
     schemaclasses = [
         schemacls
         for schemacls in so.ObjectMeta.get_schema_metaclasses()
         if (
-            not issubclass(schemacls, (so.GlobalObject, s_mod.Module,
-                                       s_func.Parameter))
-            and schemacls.get_ql_class() is not None
+            not issubclass(schemacls, excluded_classes)
+            and not schemacls.is_abstract()
             and (
                 include_migrations
                 or not issubclass(schemacls, s_migr.Migration)
@@ -717,6 +729,7 @@ def ddl_text_from_schema(
     included_ref_classes: Iterable[so.ObjectMeta]=tuple(),
     include_module_ddl: bool=True,
     include_std_ddl: bool=False,
+    include_migrations: bool=False,
 ) -> str:
     diff = delta_schemas(
         schema_a=None,
@@ -728,6 +741,7 @@ def ddl_text_from_schema(
         include_module_diff=include_module_ddl,
         include_std_diff=include_std_ddl,
         include_derived_types=False,
+        include_migrations=include_migrations,
     )
     return ddl_text_from_delta(None, schema, diff)
 
@@ -779,6 +793,7 @@ def descriptive_text_from_schema(
         include_std_diff=include_std_ddl,
         include_derived_types=False,
         linearize_delta=False,
+        descriptive_mode=True,
     )
     return descriptive_text_from_delta(
         None, schema, diff, limit_ref_classes=included_ref_classes)

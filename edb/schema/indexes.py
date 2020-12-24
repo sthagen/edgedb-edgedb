@@ -90,6 +90,9 @@ class Index(
         return shortname.name
 
 
+IndexableSubject_T = TypeVar('IndexableSubject_T', bound='IndexableSubject')
+
+
 class IndexableSubject(so.InheritingObject):
     indexes_refs = so.RefDict(
         attr='indexes',
@@ -112,7 +115,9 @@ class IndexSourceCommandContext:
     pass
 
 
-class IndexSourceCommand(inheriting.InheritingObjectCommand[Index]):
+class IndexSourceCommand(
+    inheriting.InheritingObjectCommand[IndexableSubject_T],
+):
     pass
 
 
@@ -123,7 +128,6 @@ class IndexCommandContext(sd.ObjectCommandContext[Index],
 
 class IndexCommand(
     referencing.ReferencedInheritingObjectCommand[Index],
-    schema_metaclass=Index,
     context_class=IndexCommandContext,
     referrer_context_class=IndexSourceCommandContext,
 ):
@@ -259,11 +263,15 @@ class IndexCommand(
         )
         return cmd
 
-    def get_ast_attr_for_field(self, field: str) -> Optional[str]:
+    def get_ast_attr_for_field(
+        self,
+        field: str,
+        astnode: Type[qlast.DDLOperation],
+    ) -> Optional[str]:
         if field == 'expr':
             return 'expr'
         else:
-            return None
+            return super().get_ast_attr_for_field(field, astnode)
 
     def compile_expr_field(
         self,
@@ -390,8 +398,12 @@ class RenameIndex(
         )
 
 
-class AlterIndexOwned(IndexCommand, referencing.AlterOwned[Index]):
-    astnode = qlast.AlterIndexOwned
+class AlterIndexOwned(
+    IndexCommand,
+    referencing.AlterOwned[Index],
+    field='is_owned',
+):
+    pass
 
 
 class AlterIndex(

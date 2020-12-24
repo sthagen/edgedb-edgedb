@@ -279,7 +279,6 @@ def try_fold_associative_binop(
                                 expr=my_const,
                             ),
                         ],
-                        func_module_id=opcall.func_module_id,
                         func_shortname=op,
                         func_polymorphic=opcall.func_polymorphic,
                         func_sql_function=opcall.func_sql_function,
@@ -305,7 +304,6 @@ def try_fold_associative_binop(
                             expr=other_binop_node,
                         ),
                     ],
-                    func_module_id=opcall.func_module_id,
                     func_shortname=op,
                     func_polymorphic=opcall.func_polymorphic,
                     func_sql_function=opcall.func_sql_function,
@@ -399,7 +397,8 @@ def compile_UnaryOp(
 @dispatch.compile.register(qlast.TypeCast)
 def compile_TypeCast(
         expr: qlast.TypeCast, *, ctx: context.ContextLevel) -> irast.Set:
-    target_typeref = typegen.ql_typeexpr_to_ir_typeref(expr.type, ctx=ctx)
+    target_stype = typegen.ql_typeexpr_to_type(expr.type, ctx=ctx)
+    target_typeref = typegen.type_to_typeref(target_stype, env=ctx.env)
     ir_expr: irast.Base
 
     if (isinstance(expr.expr, qlast.Array) and not expr.expr.elements and
@@ -510,17 +509,14 @@ def compile_TypeCast(
 
     else:
         with ctx.new() as subctx:
-            # We use "exposed" mode in case this is a type of a cast
-            # that wants view shapes, e.g. a std::json cast.  We do
-            # this wholesale to support tuple and array casts without
-            # having to analyze the target type (which is cumbersome
-            # in QL AST).
-            subctx.expr_exposed = True
+            if target_stype.contains_json(subctx.env.schema):
+                # JSON wants type shapes and acts as an output sink.
+                subctx.expr_exposed = True
+                subctx.inhibit_implicit_limit = True
             ir_expr = dispatch.compile(expr.expr, ctx=subctx)
 
-    new_stype = typegen.ql_typeexpr_to_type(expr.type, ctx=ctx)
     return casts.compile_cast(
-        ir_expr, new_stype, cardinality_mod=expr.cardinality_mod,
+        ir_expr, target_stype, cardinality_mod=expr.cardinality_mod,
         ctx=ctx, srcctx=expr.expr.context)
 
 

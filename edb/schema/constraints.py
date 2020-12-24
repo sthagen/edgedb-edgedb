@@ -125,6 +125,7 @@ class Constraint(referencing.ReferencedInheritingObject,
         bool,
         default=False,
         inheritable=False,
+        special_ddl_syntax=True,
         compcoef=0.9,
     )
 
@@ -365,7 +366,6 @@ class ConstraintCommandContext(sd.ObjectCommandContext[Constraint],
 class ConstraintCommand(
     referencing.ReferencedInheritingObjectCommand[Constraint],
     s_func.CallableCommand[Constraint],
-    schema_metaclass=Constraint,
     context_class=ConstraintCommandContext,
     referrer_context_class=ConsistencySubjectCommandContext,
 ):
@@ -435,12 +435,15 @@ class ConstraintCommand(
 
         return args
 
-    def get_verbosename(self) -> str:
+    def get_verbosename(self, parent: Optional[str] = None) -> str:
         mcls = self.get_schema_metaclass()
         vname = mcls.get_verbosename_static(self.classname)
         if self.get_attribute_value('is_abstract'):
             vname = f'abstract {vname}'
-        return vname
+        if parent is not None:
+            return f'{vname} of {parent}'
+        else:
+            return vname
 
     def compile_expr_field(
         self,
@@ -560,11 +563,20 @@ class ConstraintCommand(
             [b.get_name(schema) for b in new_bases],
         )
 
-    def get_ast_attr_for_field(self, field: str) -> Optional[str]:
+    def get_ast_attr_for_field(
+        self,
+        field: str,
+        astnode: Type[qlast.DDLOperation],
+    ) -> Optional[str]:
         if field in ('subjectexpr', 'args'):
             return field
+        elif (
+            field == 'delegated'
+            and astnode is qlast.CreateConcreteConstraint
+        ):
+            return field
         else:
-            return None
+            return super().get_ast_attr_for_field(field, astnode)
 
     def get_ddl_identity_fields(
         self,
@@ -1126,19 +1138,7 @@ class CreateConstraint(
         node: qlast.DDLOperation,
         op: sd.AlterObjectProperty,
     ) -> None:
-        if op.property == 'delegated':
-            if isinstance(node, qlast.CreateConcreteConstraint):
-                assert isinstance(op.new_value, bool)
-                node.delegated = op.new_value
-            else:
-                node.commands.append(
-                    qlast.SetSpecialField(
-                        name='delegated',
-                        value=op.new_value,
-                    )
-                )
-            return
-        elif (
+        if (
             op.property == 'args'
             and isinstance(node, qlast.CreateConcreteConstraint)
         ):
@@ -1218,10 +1218,10 @@ class RenameConstraint(
 
 class AlterConstraintOwned(
     referencing.AlterOwned[Constraint],
-    schema_metaclass=Constraint,
+    field='is_owned',
     referrer_context_class=ConsistencySubjectCommandContext,
 ):
-    astnode = qlast.AlterConstraintOwned
+    pass
 
 
 class AlterConstraint(
@@ -1256,23 +1256,6 @@ class AlterConstraint(
 
         cls._validate_subcommands(astnode)
         return cmd
-
-    def _apply_field_ast(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        node: qlast.DDLOperation,
-        op: sd.AlterObjectProperty,
-    ) -> None:
-        if op.property == 'delegated':
-            node.commands.append(
-                qlast.SetSpecialField(
-                    name='delegated',
-                    value=op.new_value,
-                )
-            )
-        else:
-            super()._apply_field_ast(schema, context, node, op)
 
     def validate_alter(
         self,

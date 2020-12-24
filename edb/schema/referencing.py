@@ -51,41 +51,8 @@ class ReferencedObject(so.DerivableObject):
         inheritable=False,
         compcoef=0.909,
         reflection_method=so.ReflectionMethod.AS_LINK,
+        special_ddl_syntax=True,
     )
-
-    def record_field_alter_delta(
-        self: ReferencedT,
-        schema: s_schema.Schema,
-        delta: sd.ObjectCommand[ReferencedT],
-        context: so.ComparisonContext,
-        *,
-        fname: str,
-        value: Any,
-        orig_value: Any,
-        orig_schema: s_schema.Schema,
-        orig_object: ReferencedT,
-        confidence: float,
-    ) -> None:
-        if fname == 'is_owned':
-            owned_op = orig_object.init_delta_command(orig_schema, AlterOwned)
-            owned_op.set_attribute_value(
-                'is_owned',
-                value,
-                orig_value=orig_value,
-            )
-            delta.add(owned_op)
-        else:
-            super().record_field_alter_delta(
-                schema,
-                delta,
-                context,
-                fname=fname,
-                value=value,
-                orig_value=orig_value,
-                orig_schema=orig_schema,
-                orig_object=orig_object,
-                confidence=confidence,
-            )
 
     def get_subject(self, schema: s_schema.Schema) -> Optional[so.Object]:
         # NB: classes that inherit ReferencedObject define a `get_subject`
@@ -320,8 +287,6 @@ class ReferencedInheritingObject(
         ):
             owned_op = self.init_delta_command(schema, AlterOwned)
             owned_op.set_attribute_value('is_owned', False, orig_value=True)
-            del_op.set_attribute_value('is_owned', None, orig_value=False)
-
             del_op.add(owned_op)
 
         return del_op
@@ -362,33 +327,23 @@ class ReferencedInheritingObject(
                 rename.set_annotation('implicit_propagation', True)
 
 
-class ReferencedObjectCommandMeta(sd.ObjectCommandMeta):
-    _transparent_adapter_subclass: ClassVar[bool] = True
-    _referrer_context_class: Optional[
-        Type[sd.ObjectCommandContext[so.Object]]
-    ] = None
+class ReferencedObjectCommandBase(sd.QualifiedObjectCommand[ReferencedT]):
 
-    def __new__(mcls,
-                name: str,
-                bases: Tuple[type, ...],
-                clsdct: Dict[str, Any],
-                *,
-                referrer_context_class: Optional[
-                    Type[sd.ObjectCommandContext[so.Object]]
-                ] = None,
-                **kwargs: Any
-                ) -> ReferencedObjectCommandMeta:
-        cls = super().__new__(mcls, name, bases, clsdct, **kwargs)
-        assert isinstance(cls, ReferencedObjectCommandMeta)
+    _referrer_context_class: ClassVar[Optional[
+        Type[sd.ObjectCommandContext[so.Object]]
+    ]] = None
+
+    def __init_subclass__(
+        cls,
+        *,
+        referrer_context_class: Optional[
+            Type[sd.ObjectCommandContext[so.Object]]
+        ] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init_subclass__(**kwargs)
         if referrer_context_class is not None:
             cls._referrer_context_class = referrer_context_class
-        return cls
-
-
-class ReferencedObjectCommandBase(
-    sd.QualifiedObjectCommand[ReferencedT],
-    metaclass=ReferencedObjectCommandMeta,
-):
 
     @classmethod
     def get_referrer_context_class(
@@ -574,7 +529,7 @@ class CreateReferencedObject(
         implicit_bases = scls.get_implicit_bases(schema)
         if implicit_bases and not context.declarative:
             mcls = self.get_schema_metaclass()
-            Alter = sd.ObjectCommandMeta.get_command_class_or_die(
+            Alter = sd.get_object_command_class_or_die(
                 sd.AlterObject, mcls)
             alter = Alter(classname=self.classname)
             return alter._get_ast_node(schema, context)
@@ -855,6 +810,77 @@ class ReferencedInheritingObjectCommand(
 
         return schema
 
+    def _propagate_ref_field_alter_in_inheritance(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        field_name: str,
+        require_inheritance_consistency: bool = True,
+    ) -> s_schema.Schema:
+        """Validate and propagate a field alteration to children.
+
+        This method also performs consistency checks against base objects
+        to ensure that the new value matches that of the parents.
+        """
+        scls = self.scls
+
+        currently_altered = context.change_log[type(scls), field_name]
+        currently_altered.add(scls)
+
+        if require_inheritance_consistency:
+            implicit_bases = scls.get_implicit_bases(schema)
+            non_altered_bases = []
+
+            value = scls.get_field_value(schema, field_name)
+            for base in set(implicit_bases) - currently_altered:
+                base_value = base.get_field_value(schema, field_name)
+
+                if isinstance(value, so.SubclassableObject):
+                    if not value.issubclass(schema, base_value):
+                        non_altered_bases.append(base)
+                else:
+                    if value != base_value:
+                        non_altered_bases.append(base)
+
+            # This object is inherited from one or more ancestors that
+            # are not altered in the same op, and this is an error.
+            if non_altered_bases:
+                bases_str = ', '.join(
+                    b.get_verbosename(schema, with_parent=True)
+                    for b in non_altered_bases
+                )
+
+                vn = scls.get_verbosename(schema, with_parent=True)
+                desc = self.get_friendly_description(
+                    schema,
+                    context,
+                    object_desc=f'inherited {vn}',
+                )
+
+                raise errors.SchemaDefinitionError(
+                    f'cannot {desc}',
+                    details=(
+                        f'{vn} is inherited from '
+                        f'{bases_str}'
+                    ),
+                    context=self.source_context,
+                )
+
+        value = self.get_attribute_value(field_name)
+
+        def _propagate(
+            alter_cmd: sd.ObjectCommand[so.Object],
+            refname: str,
+        ) -> None:
+            s_t = type(self)(classname=alter_cmd.classname)
+            s_t.set_attribute_value(field_name, value)
+            alter_cmd.add(s_t)
+
+        schema = self._propagate_ref_op(
+            schema, context, self.scls, cb=_propagate)
+
+        return schema
+
     def _drop_owned_refs(
         self,
         schema: s_schema.Schema,
@@ -869,10 +895,8 @@ class ReferencedInheritingObjectCommand(
         for ref in refs.objects(schema):
             inherited = ref.get_implicit_bases(schema)
             if inherited and ref.get_is_owned(schema):
-                drop_owned = ref.init_delta_command(schema, AlterOwned)
-                drop_owned.set_attribute_value('is_owned', False)
                 alter = ref.init_delta_command(schema, sd.AlterObject)
-                alter.add(drop_owned)
+                alter.set_attribute_value('is_owned', False, orig_value=True)
                 schema = alter.apply(schema, context)
                 self.add(alter)
             elif (
@@ -994,10 +1018,17 @@ class CreateReferencedInheritingObject(
                 if referrer.get_is_derived(schema):
                     self.set_attribute_value('is_derived', True)
 
-        schema = super()._create_begin(schema, context)
+        return super()._create_begin(schema, context)
 
-        if referrer_ctx is not None and not context.canonical:
-            self._validate(schema, context)
+    def _create_finalize(
+        self, schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        schema = super()._create_finalize(schema, context)
+        if not context.canonical:
+            referrer_ctx = self.get_referrer_context(context)
+            if referrer_ctx is not None:
+                self._validate(schema, context)
 
         return schema
 
@@ -1027,7 +1058,7 @@ class CreateReferencedInheritingObject(
         referrer: so.InheritingObject,
     ) -> s_schema.Schema:
 
-        get_cmd = sd.ObjectCommandMeta.get_command_class_or_die
+        get_cmd = sd.get_object_command_class_or_die
 
         mcls = type(self.scls)
         referrer_cls = type(referrer)
@@ -1117,25 +1148,39 @@ class AlterReferencedInheritingObject(
         cmd = super()._cmd_tree_from_ast(schema, astnode, context)
 
         refctx = cls.get_referrer_context(context)
+        # When a referenced object is altered it becomes "owned"
+        # by the referrer, _except_ when either an explicit
+        # SET OWNED/DROP OWNED subcommand is present, or
+        # _all_ subcommands are `RESET` subcommands.
         if (
             refctx is not None
-            and not qlast.has_ddl_subcommand(astnode, qlast.AlterOwned)
+            and qlast.get_ddl_field_command(astnode, 'is_owned') is None
+            and (
+                not cmd.get_subcommands()
+                or not all(
+                    (
+                        isinstance(scmd, sd.AlterObjectProperty)
+                        and scmd.new_value is None
+                    )
+                    for scmd in cmd.get_subcommands()
+                )
+            )
         ):
             cmd.set_attribute_value('is_owned', True)
 
         assert isinstance(cmd, AlterReferencedInheritingObject)
         return cmd
 
-    def _alter_begin(
+    def _alter_finalize(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
+        schema = super()._alter_finalize(schema, context)
         scls = self.scls
-        was_local = scls.get_is_owned(schema)
-        schema = super()._alter_begin(schema, context)
-        now_local = scls.get_is_owned(schema)
-        if not was_local and now_local:
+        was_owned = scls.get_is_owned(context.current().original_schema)
+        now_owned = scls.get_is_owned(schema)
+        if not was_owned and now_owned:
             self._validate(schema, context)
         return schema
 
@@ -1238,7 +1283,7 @@ class RenameReferencedInheritingObject(
                               context: sd.CommandContext,
                               scls: ReferencedInheritingObject
                               ) -> s_schema.Schema:
-        rename_cmdcls = sd.ObjectCommandMeta.get_command_class_or_die(
+        rename_cmdcls = sd.get_object_command_class_or_die(
             sd.RenameObject, type(scls))
 
         def _ref_rename(alter_cmd: sd.Command,
@@ -1405,6 +1450,7 @@ class DeleteReferencedInheritingObject(
 class AlterOwned(
     ReferencedInheritingObjectCommand[ReferencedInheritingObjectT],
     inheriting.AlterInheritingObjectFragment[ReferencedInheritingObjectT],
+    sd.AlterSpecialObjectField[ReferencedInheritingObjectT],
 ):
 
     _delta_action = 'alterowned'
@@ -1451,38 +1497,3 @@ class AlterOwned(
                 schema = self._drop_owned_refs(schema, context, refdict)
 
         return schema
-
-    @classmethod
-    def _cmd_from_ast(
-        cls,
-        schema: s_schema.Schema,
-        astnode: qlast.DDLOperation,
-        context: sd.CommandContext,
-    ) -> sd.ObjectCommand[ReferencedInheritingObjectT]:
-        this_op = context.current().op
-        assert isinstance(this_op, sd.ObjectCommand)
-        return cls(classname=this_op.classname)
-
-    @classmethod
-    def _cmd_tree_from_ast(
-        cls,
-        schema: s_schema.Schema,
-        astnode: qlast.DDLOperation,
-        context: sd.CommandContext,
-    ) -> sd.Command:
-        assert isinstance(astnode, qlast.AlterOwned)
-        cmd = super()._cmd_tree_from_ast(schema, astnode, context)
-        cmd.set_attribute_value('is_owned', astnode.owned)
-        return cmd
-
-    def _apply_field_ast(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        node: qlast.DDLOperation,
-        op: sd.AlterObjectProperty,
-    ) -> None:
-        if op.property == 'is_owned':
-            node.owned = op.new_value
-        else:
-            super()._apply_field_ast(schema, context, node, op)

@@ -50,6 +50,7 @@ CREATE ABSTRACT TYPE schema::Object EXTENDING std::BaseObject {
     CREATE REQUIRED PROPERTY builtin -> std::bool {
         SET default := false;
     };
+    CREATE PROPERTY computed_fields -> array<std::str>;
 };
 
 
@@ -292,9 +293,6 @@ ALTER TYPE schema::ObjectType {
 CREATE TYPE schema::Function
     EXTENDING schema::CallableObject, schema::VolatilitySubject
 {
-    CREATE PROPERTY session_only -> std::bool {
-        SET default := false;
-    };
 };
 
 

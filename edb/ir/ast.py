@@ -607,9 +607,6 @@ class Call(ImmutableExpr):
     # Bound callable's name.
     func_shortname: sn.QualName
 
-    # The id of the module in which the callable is defined.
-    func_module_id: uuid.UUID
-
     # If the bound callable is a "USING SQL" callable, this
     # attribute will be set to the name of the SQL function.
     func_sql_function: typing.Optional[str]
@@ -661,9 +658,6 @@ class FunctionCall(Call):
     # Set to the type of the variadic parameter of the bound function
     # (or None, if the function has no variadic parameters.)
     variadic_param_type: typing.Optional[TypeRef] = None
-
-    # True if function requires a session to be executed
-    session_only: bool = False
 
 
 class OperatorCall(Call):

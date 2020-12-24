@@ -58,41 +58,58 @@ class PointerDirection(enum.StrEnum):
 
 
 def merge_cardinality(
-    target: Pointer,
-    sources: List[Pointer],
+    ptr: Pointer,
+    bases: List[Pointer],
     field_name: str,
     *,
     ignore_local: bool,
     schema: s_schema.Schema,
 ) -> Any:
-    current = None
+    current: Optional[qltypes.SchemaCardinality] = None
     current_from = None
 
-    if ignore_local:
-        pointers = list(sources)
-    else:
-        pointers = [target] + list(sources)
+    if not ignore_local:
+        current = ptr.get_explicit_field_value(schema, field_name, None)
+        if current is not None:
+            current_from = ptr
 
-    for source in pointers:
-        nextval = source.get_explicit_field_value(schema, field_name, None)
-        if nextval is not None:
-            if current is None:
-                current = nextval
-                current_from = source
-            elif current is not nextval:
-                tgt_repr = target.get_verbosename(
-                    schema, with_parent=True)
-                cf_repr = current_from.get_verbosename(
-                    schema, with_parent=True)
-                other_repr = source.get_verbosename(
-                    schema, with_parent=True)
+    for base in bases:
+        # ignore abstract pointers
+        if base.generic(schema):
+            continue
 
-                raise errors.SchemaDefinitionError(
-                    f'cannot redefine the target cardinality of '
-                    f'{tgt_repr}: it is defined '
-                    f'as {current.as_ptr_qual()!r} in {cf_repr} and '
-                    f'as {nextval.as_ptr_qual()!r} in {other_repr}.'
-                )
+        nextval: Optional[qltypes.SchemaCardinality] = (
+            base.get_field_value(schema, field_name))
+        if nextval is None:
+            continue
+
+        if current is None:
+            current = nextval
+            current_from = base
+        elif not current.is_known() and nextval is not None:
+            current = nextval
+            current_from = base
+        elif current is not nextval:
+            tgt_repr = ptr.get_verbosename(schema, with_parent=True)
+            assert current_from is not None
+            cf_repr = current_from.get_verbosename(schema, with_parent=True)
+            other_repr = base.get_verbosename(schema, with_parent=True)
+
+            if current.is_known():
+                current_qual = f'defined as {current.as_ptr_qual()!r}'
+            else:
+                current_qual = 'unknown'
+
+            if nextval.is_known():
+                nextval_qual = f'defined as {nextval.as_ptr_qual()!r}'
+            else:
+                nextval_qual = 'unknown'
+
+            raise errors.SchemaDefinitionError(
+                f'cannot redefine the target cardinality of '
+                f'{tgt_repr}: it is {current_qual} in {cf_repr} and '
+                f'is {nextval_qual} in {other_repr}.'
+            )
 
     return current
 
@@ -246,14 +263,25 @@ class Pointer(referencing.ReferencedInheritingObject,
 
     required = so.SchemaField(
         bool,
-        default=False, compcoef=0.909,
-        merge_fn=merge_required)
+        default=False,
+        compcoef=0.909,
+        special_ddl_syntax=True,
+        describe_visibility=(
+            so.DescribeVisibilityPolicy.SHOW_IF_EXPLICIT_OR_DERIVED
+        ),
+        merge_fn=merge_required,
+    )
 
     readonly = so.SchemaField(
         bool,
         allow_ddl_set=True,
-        default=False, compcoef=0.909,
-        merge_fn=merge_readonly)
+        describe_visibility=(
+            so.DescribeVisibilityPolicy.SHOW_IF_EXPLICIT_OR_DERIVED_NOT_DEFAULT
+        ),
+        default=False,
+        compcoef=0.909,
+        merge_fn=merge_readonly,
+    )
 
     # For non-derived pointers this is strongly correlated with
     # "expr" below.  Derived pointers might have "computable" set,
@@ -269,6 +297,9 @@ class Pointer(referencing.ReferencedInheritingObject,
         bool,
         default=None,
         compcoef=0.99,
+        # This value needs to be recorded in the delta commands
+        # to signal that we don't want to render this command in DDL.
+        aux_cmd_data=True,
     )
 
     # Computable pointers have this set to an expression
@@ -280,12 +311,25 @@ class Pointer(referencing.ReferencedInheritingObject,
     default = so.SchemaField(
         s_expr.Expression,
         allow_ddl_set=True,
-        default=None, coerce=True, compcoef=0.909)
+        describe_visibility=(
+            so.DescribeVisibilityPolicy.SHOW_IF_EXPLICIT_OR_DERIVED
+        ),
+        default=None,
+        coerce=True,
+        compcoef=0.909,
+    )
 
     cardinality = so.SchemaField(
         qltypes.SchemaCardinality,
-        default=None, compcoef=0.833, coerce=True,
-        merge_fn=merge_cardinality)
+        default=qltypes.SchemaCardinality.One,
+        compcoef=0.833,
+        coerce=True,
+        special_ddl_syntax=True,
+        describe_visibility=(
+            so.DescribeVisibilityPolicy.SHOW_IF_EXPLICIT_OR_DERIVED
+        ),
+        merge_fn=merge_cardinality,
+    )
 
     union_of = so.SchemaField(
         so.ObjectSet['Pointer'],
@@ -540,6 +584,12 @@ class Pointer(referencing.ReferencedInheritingObject,
     def is_protected_pointer(self, schema: s_schema.Schema) -> bool:
         return self.get_shortname(schema).name in {'id', '__type__'}
 
+    def is_dumpable(self, schema: s_schema.Schema) -> bool:
+        return (
+            not self.is_endpoint_pointer(schema)
+            and not self.is_pure_computable(schema)
+        )
+
     def generic(self, schema: s_schema.Schema) -> bool:
         return self.get_source(schema) is None
 
@@ -569,8 +619,11 @@ class Pointer(referencing.ReferencedInheritingObject,
     ) -> bool:
         # Determine the cardinality of a given endpoint set.
         if direction == PointerDirection.Outbound:
-            return (self.get_cardinality(schema) is
-                    qltypes.SchemaCardinality.One)
+            cardinality = self.get_cardinality(schema)
+            if cardinality is None or not cardinality.is_known():
+                vn = self.get_verbosename(schema, with_parent=True)
+                raise AssertionError(f'cardinality of {vn} is unknown')
+            return cardinality.is_single()
         else:
             return self.is_exclusive(schema)
 
@@ -825,13 +878,13 @@ class ComputableRef:
         self.expr = expr
 
 
-class PointerCommandContext(sd.ObjectCommandContext[Pointer],
+class PointerCommandContext(sd.ObjectCommandContext[Pointer_T],
                             s_anno.AnnotationSubjectCommandContext):
     pass
 
 
 class PointerCommandOrFragment(
-    referencing.ReferencedObjectCommandBase[Pointer]
+    referencing.ReferencedObjectCommandBase[Pointer_T]
 ):
 
     def canonicalize_attributes(
@@ -841,35 +894,58 @@ class PointerCommandOrFragment(
     ) -> s_schema.Schema:
         schema = super().canonicalize_attributes(schema, context)
         target_ref = self.get_local_attribute_value('target')
+        inf_target_ref: Optional[s_types.TypeShell]
 
-        if target_ref is not None:
-            if isinstance(target_ref, ComputableRef):
-                schema, target, base = self._parse_computable(
-                    target_ref.expr, schema, context)
+        # When cardinality/required is altered, we need to force a
+        # reconsideration of expr if it exists in order to check
+        # it against the new specifier or compute them on a
+        # RESET. This is kind of unfortunate.
+        if (
+            isinstance(self, sd.AlterObject)
+            and (self.has_attribute_value('cardinality')
+                 or self.has_attribute_value('required'))
+            and not self.has_attribute_value('expr')
+            and (expr := self.scls.get_expr(schema)) is not None
+        ):
+            self.set_attribute_value(
+                'expr',
+                s_expr.Expression.not_compiled(expr)
+            )
 
-                if base is not None:
-                    self.set_attribute_value(
-                        'bases', so.ObjectList.create(schema, [base]),
-                    )
+        if isinstance(target_ref, ComputableRef):
+            schema, inf_target_ref, base = self._parse_computable(
+                target_ref.expr, schema, context)
+        elif (expr := self.get_local_attribute_value('expr')) is not None:
+            schema, inf_target_ref, base = self._parse_computable(
+                expr.qlast, schema, context)
+        else:
+            inf_target_ref = None
+            base = None
 
-                    self.set_attribute_value(
-                        'is_derived', True
-                    )
+        if base is not None:
+            self.set_attribute_value(
+                'bases', so.ObjectList.create(schema, [base]),
+            )
 
-                    if context.declarative:
-                        self.set_attribute_value(
-                            'declared_overloaded', True
-                        )
+            self.set_attribute_value(
+                'is_derived', True
+            )
 
-                srcctx = self.get_attribute_source_context('target')
+            if context.declarative:
                 self.set_attribute_value(
-                    'target',
-                    target,
-                    source_context=srcctx,
+                    'declared_overloaded', True
                 )
 
-            schema = s_types.materialize_type_in_attribute(
-                schema, context, self, 'target')
+        if inf_target_ref is not None:
+            srcctx = self.get_attribute_source_context('target')
+            self.set_attribute_value(
+                'target',
+                inf_target_ref,
+                source_context=srcctx,
+            )
+
+        schema = s_types.materialize_type_in_attribute(
+            schema, context, self, 'target')
 
         expr = self.get_local_attribute_value('expr')
         if expr is not None:
@@ -887,7 +963,6 @@ class PointerCommandOrFragment(
         from edb.ir import ast as irast
         from edb.ir import typeutils as irtyputils
         from edb.ir import utils as irutils
-        from edb.schema import objtypes as s_objtypes
 
         # "source" attribute is set automatically as a refdict back-attr
         parent_ctx = self.get_referrer_context(context)
@@ -895,20 +970,13 @@ class PointerCommandOrFragment(
         source_name = context.get_referrer_name(parent_ctx)
         assert isinstance(source_name, sn.QualName)
 
-        source = schema.get(source_name, type=s_objtypes.ObjectType)
-
-        ptr_name = self.get_displayname()
-        expression = s_expr.Expression.compiled(
-            s_expr.Expression.from_ast(expr, schema, context.modaliases),
-            schema=schema,
-            options=qlcompiler.CompilerOptions(
-                modaliases=context.modaliases,
-                anchors={qlast.Source().name: source},
-                path_prefix_anchor=qlast.Source().name,
-                singletons=frozenset([source]),
-                in_ddl_context_name=f'computable {ptr_name!r}',
-                apply_query_rewrites=not context.stdmode,
-            ),
+        source = schema.get(source_name)
+        parent_vname = source.get_verbosename(schema)
+        ptr_name = self.get_verbosename(parent=parent_vname)
+        expression = self.compile_expr_field(
+            schema, context,
+            field=Pointer.get_field('expr'),
+            value=s_expr.Expression.from_ast(expr, schema, context.modaliases),
         )
 
         assert isinstance(expression.irast, irast.Statement)
@@ -933,8 +1001,11 @@ class PointerCommandOrFragment(
         # aliased link that should inherit link properties.
         if isinstance(result_expr, irast.Set) and result_expr.rptr is not None:
             expr_rptr = result_expr.rptr
-            if expr_rptr.direction is PointerDirection.Outbound:
-                new_schema, base = irtyputils.ptrcls_from_ptrref(
+            if (
+                expr_rptr.direction is PointerDirection.Outbound
+                and expr_rptr.source.rptr is None
+            ):
+                new_schema, aliased_ptr = irtyputils.ptrcls_from_ptrref(
                     expr_rptr.ptrref, schema=schema
                 )
                 # Only pointers coming from the same source as the
@@ -942,61 +1013,120 @@ class PointerCommandOrFragment(
                 # link props). Random paths coming from other sources
                 # get treated same as any other arbitrary expression
                 # in a computable.
-                if base.get_source(new_schema) != source:
-                    base = None
-                else:
+                if aliased_ptr.get_source(new_schema) == source:
+                    base = aliased_ptr
                     schema = new_schema
 
         self.set_attribute_value('expr', expression)
         required, card = expression.irast.cardinality.to_schema_value()
 
-        is_alter = (
-            isinstance(self, sd.AlterObject)
-            or (
-                isinstance(self, sd.AlterObjectFragment)
-                and isinstance(self.get_parent_op(context), sd.AlterObject)
-            )
-        )
-
-        spec_required = self.get_attribute_value('required')
-        if spec_required is None and is_alter:
-            spec_required = self.scls.get_required(schema)
-        spec_card = self.get_attribute_value('cardinality')
-        if spec_card is None and is_alter:
-            spec_card = self.scls.get_cardinality(schema)
+        spec_required: Optional[bool] = (
+            self.get_specified_attribute_value('required', schema, context))
+        spec_card: Optional[qltypes.SchemaCardinality] = (
+            self.get_specified_attribute_value('cardinality', schema, context))
 
         if spec_required and not required:
             srcctx = self.get_attribute_source_context('target')
             raise errors.SchemaDefinitionError(
                 f'possibly an empty set returned by an '
                 f'expression for the computable '
-                f'{ptr_name!r} '
-                f"declared as 'required'",
+                f'{ptr_name} '
+                f"explicitly declared as 'required'",
                 context=srcctx
             )
 
         if (
-            spec_card in {None, qltypes.SchemaCardinality.One} and
-            card is not qltypes.SchemaCardinality.One
+            spec_card is qltypes.SchemaCardinality.One
+            and card is not qltypes.SchemaCardinality.One
         ):
             srcctx = self.get_attribute_source_context('target')
             raise errors.SchemaDefinitionError(
                 f'possibly more than one element returned by an '
                 f'expression for the computable '
-                f'{ptr_name!r} '
-                f"declared as 'single'",
+                f'{ptr_name} '
+                f"explicitly declared as 'single'",
                 context=srcctx
             )
 
         if spec_card is None:
-            self.set_attribute_value('cardinality', card)
+            self.set_attribute_value('cardinality', card, computed=True)
 
-        if not spec_required:
-            self.set_attribute_value('required', required)
+        if spec_required is None:
+            self.set_attribute_value('required', required, computed=True)
 
         self.set_attribute_value('computable', True)
 
         return schema, target_shell, base
+
+    def compile_expr_field(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        field: so.Field[Any],
+        value: s_expr.Expression,
+        track_schema_ref_exprs: bool=False,
+    ) -> s_expr.Expression:
+        if field.name in {'default', 'expr'}:
+            singletons: List[Union[s_types.Type, Pointer]] = []
+            path_prefix_anchor = None
+            anchors: Dict[str, Any] = {}
+            in_ddl_context_name: Optional[str] = None
+
+            if field.name == 'expr':
+                parent_ctx = self.get_referrer_context(context)
+                assert parent_ctx is not None
+                assert isinstance(parent_ctx.op, sd.ObjectCommand)
+                source = parent_ctx.op.get_object(schema, context)
+
+                if (
+                    isinstance(source, Pointer)
+                    and not source.get_source(schema)
+                ):
+                    # If the source is an abstract link, we need to
+                    # make up an object and graft the link onto it,
+                    # because the compiler really does not know what
+                    # to make of a link without a source or target.
+                    from edb.schema import objtypes as s_objtypes
+
+                    base_obj = schema.get(
+                        s_objtypes.ObjectType.get_default_base_name(),
+                        type=s_objtypes.ObjectType
+                    )
+                    schema, view = base_obj.derive_subtype(
+                        schema,
+                        name=sn.QualName("__derived__",
+                                         "FakeAbstractLinkBase"),
+                        mark_derived=True, transient=True)
+                    schema, source = source.derive_ref(
+                        schema, view, target=view,
+                        mark_derived=True, transient=True)
+
+                anchors[qlast.Source().name] = source
+                assert isinstance(source, (s_types.Type, Pointer))
+                singletons = [source]
+                path_prefix_anchor = qlast.Source().name
+
+                parent_vname = source.get_verbosename(schema)
+                ptr_name = self.get_verbosename(parent=parent_vname)
+                in_ddl_context_name = f'computable {ptr_name}'
+
+            return type(value).compiled(
+                value,
+                schema=schema,
+                options=qlcompiler.CompilerOptions(
+                    modaliases=context.modaliases,
+                    schema_object_context=self.get_schema_metaclass(),
+                    anchors=anchors,
+                    path_prefix_anchor=path_prefix_anchor,
+                    singletons=frozenset(singletons),
+                    apply_query_rewrites=not context.stdmode,
+                    track_schema_ref_exprs=track_schema_ref_exprs,
+                    in_ddl_context_name=in_ddl_context_name,
+                ),
+            )
+        else:
+            return super().compile_expr_field(
+                schema, context, field, value, track_schema_ref_exprs)
 
     def _deparse_name(
         self,
@@ -1015,7 +1145,7 @@ class PointerCommandOrFragment(
 
 
 class PointerAlterFragment(
-    referencing.ReferencedObjectCommandBase[Pointer]
+    referencing.ReferencedObjectCommandBase[Pointer_T]
 ):
     @classmethod
     def _cmd_tree_from_ast(
@@ -1033,7 +1163,7 @@ class PointerAlterFragment(
             if expr_cmd is not None:
                 expr = expr_cmd.value
                 if expr is None:
-                    # `DROP EXPRESSION` detected
+                    # `RESET EXPRESSION` detected
                     aop = sd.AlterObjectProperty(
                         property='expr',
                         new_value=None,
@@ -1050,37 +1180,42 @@ class PointerAlterFragment(
         context: sd.CommandContext,
     ) -> s_schema.Schema:
         schema = super().canonicalize_attributes(schema, context)
-        expr_cmd = self.get_attribute_set_cmd('expr')
 
-        # Handle `DROP EXPRESSION` here
-        if expr_cmd is not None and expr_cmd.source != 'inheritance':
-            if expr_cmd.new_value is None:
-                old_expr = expr_cmd.old_value
+        # Handle `RESET EXPRESSION` here
+        if (
+            self.has_attribute_value('expr')
+            and not self.is_attribute_inherited('expr')
+            and self.get_attribute_value('expr') is None
+        ):
+            old_expr = self.get_orig_attribute_value('expr')
+            pointer = schema.get(self.classname, type=Pointer)
+            if old_expr is None:
+                # Get the old value from the schema if the old_expr
+                # attribute isn't set.
+                old_expr = pointer.get_expr(schema)
 
-                if old_expr is None:
-                    # Get the old value from the schema if the old_expr
-                    # attribute isn't set.
-                    pointer = cast(
-                        Pointer, schema.get(self.classname))
-                    old_expr = pointer.get_expr(schema)
+            if old_expr is not None:
+                # If the expression was explicitly set to None,
+                # that means that `RESET EXPRESSION` was executed
+                # and this is no longer a computable.
+                self.set_attribute_value('computable', False)
+                computed_fields = pointer.get_computed_fields(schema)
+                if 'required' in computed_fields:
+                    self.set_attribute_value('required', None)
+                if 'cardinality' in computed_fields:
+                    self.set_attribute_value('cardinality', None)
 
-                if old_expr is not None:
-                    # If the expression was explicitly set to None,
-                    # that means that `DROP EXPRESSION` was executed
-                    # and this is no longer a computable.
-                    self.set_attribute_value('computable', False)
-
-                # Clear the placeholder value for 'expr'.
-                self.set_attribute_value('expr', None)
+            # Clear the placeholder value for 'expr'.
+            self.set_attribute_value('expr', None)
 
         return schema
 
 
 class PointerCommand(
-    referencing.ReferencedInheritingObjectCommand[Pointer],
-    constraints.ConsistencySubjectCommand[Pointer],
-    s_anno.AnnotationSubjectCommand,
-    PointerCommandOrFragment,
+    referencing.ReferencedInheritingObjectCommand[Pointer_T],
+    constraints.ConsistencySubjectCommand[Pointer_T],
+    s_anno.AnnotationSubjectCommand[Pointer_T],
+    PointerCommandOrFragment[Pointer_T],
 ):
 
     def _set_pointer_type(
@@ -1090,7 +1225,7 @@ class PointerCommand(
         context: sd.CommandContext,
         target_ref: Union[so.Object, so.ObjectShell, ComputableRef],
     ) -> None:
-        return None
+        raise NotImplementedError
 
     def _create_begin(
         self,
@@ -1235,11 +1370,26 @@ class PointerCommand(
             )
 
         if astnode.cardinality is not None:
-            self.set_attribute_value(
-                'cardinality',
-                astnode.cardinality,
-                source_context=astnode.context,
-            )
+            if isinstance(self, sd.CreateObject):
+                self.set_attribute_value(
+                    'cardinality',
+                    astnode.cardinality,
+                    source_context=astnode.context,
+                )
+            else:
+                handler = sd.get_special_field_alter_handler_for_context(
+                    'cardinality', context)
+                assert handler is not None
+                set_field = qlast.SetField(
+                    name='cardinality',
+                    value=qlast.StringConstant.from_python(
+                        str(astnode.cardinality),
+                    ),
+                    special_syntax=True,
+                    context=astnode.context,
+                )
+                apc = handler._cmd_tree_from_ast(schema, set_field, context)
+                self.add(apc)
 
         parent_ctx = self.get_referrer_context_or_die(context)
         source_name = context.get_referrer_name(parent_ctx)
@@ -1293,122 +1443,31 @@ class PointerCommand(
                 source_context=astnode.target.context,
             )
 
-            # If target is a computable ref defer cardinality
-            # enforcement until the expression is parsed.
-            if not isinstance(target_ref, ComputableRef):
-                if self.get_attribute_value('cardinality') is None:
-                    self.set_attribute_value(
-                        'cardinality', qltypes.SchemaCardinality.One)
-
-                if self.get_attribute_value('required') is None:
-                    self.set_attribute_value(
-                        'required', False)
-
         elif target_ref is not None:
             self._set_pointer_type(schema, astnode, context, target_ref)
 
-    def compile_expr_field(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        field: so.Field[Any],
-        value: s_expr.Expression,
-        track_schema_ref_exprs: bool=False,
-    ) -> s_expr.Expression:
-        from . import sources as s_sources
-
-        if field.name in {'default', 'expr'}:
-            singletons: List[s_types.Type] = []
-            path_prefix_anchor = None
-            anchors: Dict[str, Any] = {}
-
-            if field.name == 'expr':
-                # type ignore below, because the class is used as mixin
-                parent_ctx = context.get_ancestor(
-                    s_sources.SourceCommandContext,  # type: ignore
-                    self
-                )
-                assert parent_ctx is not None
-                assert isinstance(parent_ctx.op, sd.ObjectCommand)
-                source = parent_ctx.op.get_object(schema, context)
-                anchors[qlast.Source().name] = source
-                if not isinstance(source, Pointer):
-                    assert source is not None
-                    singletons = [source]
-                    path_prefix_anchor = qlast.Source().name
-
-            return type(value).compiled(
-                value,
-                schema=schema,
-                options=qlcompiler.CompilerOptions(
-                    modaliases=context.modaliases,
-                    schema_object_context=self.get_schema_metaclass(),
-                    anchors=anchors,
-                    path_prefix_anchor=path_prefix_anchor,
-                    singletons=frozenset(singletons),
-                    apply_query_rewrites=not context.stdmode,
-                    track_schema_ref_exprs=track_schema_ref_exprs,
-                ),
-            )
-        else:
-            return super().compile_expr_field(
-                schema, context, field, value, track_schema_ref_exprs)
-
-    def _apply_field_ast(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        node: qlast.DDLOperation,
-        op: sd.AlterObjectProperty,
-    ) -> None:
-        if context.descriptive_mode:
-            # When generating AST for DESCRIBE AS TEXT, we want to
-            # omit 'readonly' flag if it's inherited and it actually
-            # has the default value.
-            if op.property == 'readonly':
-                pointer_obj = self.get_object(schema, context)
-                field = type(pointer_obj).get_field('readonly')
-                assert isinstance(field, so.SchemaField)
-                dval = field.default
-
-                # For all properties other than cardinality, if they
-                # are inherited and have the default value, skip them.
-                # Cardinality is special and should be explicitly
-                # included, though.
-                if (op.property != 'cardinality'
-                        and op.source == 'inheritance'
-                        and op.new_value is dval):
-                    return
-
-        super()._apply_field_ast(schema, context, node, op)
-
-    def is_field_inherited(
-        self,
-        schema: s_schema.Schema,
-        field_name: str,
-        bases: Tuple[so.Object, ...],
-        merged_value: Any,
-        explicit_value: Any
-    ) -> bool:
-        if field_name == 'cardinality':
-            # As long 'cardinality' is not None in at least one
-            # base it is inherited (it cannot be redefined). The
-            # `field.mrege_fn` ensures that it is inherited
-            # properly.
-            for base in bases:
-                v = base.get_explicit_field_value(schema, field_name, None)
-                if v is not None:
-                    return True
-            return False
-        else:
-            return super().is_field_inherited(
-                schema, field_name, bases, merged_value, explicit_value)
-
 
 class SetPointerType(
-        referencing.ReferencedInheritingObjectCommand[Pointer],
-        inheriting.AlterInheritingObjectFragment[Pointer],
-        PointerCommandOrFragment):
+    referencing.ReferencedInheritingObjectCommand[Pointer_T],
+    inheriting.AlterInheritingObjectFragment[Pointer_T],
+    PointerCommandOrFragment[Pointer_T],
+):
+
+    def get_friendly_description(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        *,
+        object: Optional[Pointer_T] = None,
+        object_desc: Optional[str] = None,
+    ) -> str:
+        object_desc = self.get_friendly_object_name_for_description(
+            schema,
+            context,
+            object=object,
+            object_desc=object_desc,
+        )
+        return f'alter the type of {object_desc}'
 
     def _alter_begin(
         self,
@@ -1425,12 +1484,6 @@ class SetPointerType(
         if orig_target == new_target:
             return schema
 
-        context.altered_targets.add(scls)
-
-        # Type alters of pointers used in expressions is prohibited.
-        # Eventually we may be able to relax this by allowing to
-        # alter to the type that is compatible (i.e. does not change)
-        # with all expressions it is used in.
         vn = scls.get_verbosename(schema, with_parent=True)
         schema = self._propagate_if_expr_refs(
             schema, context, action=f'alter the type of {vn}')
@@ -1445,48 +1498,11 @@ class SetPointerType(
                 parent_ctx.op.add(orig_target.as_colltype_delete_delta(
                     schema, expiring_refs={scls}))
 
-            implicit_bases = scls.get_implicit_bases(schema)
-            non_altered_bases = []
-
-            tgt = scls.get_target(schema)
-            for base in set(implicit_bases) - context.altered_targets:
-                assert tgt is not None
-                base_tgt = base.get_target(schema)
-                assert isinstance(base_tgt, so.SubclassableObject)
-                if not tgt.issubclass(schema, base_tgt):
-                    non_altered_bases.append(base)
-
-            # This pointer is inherited from one or more ancestors that
-            # are not altered in the same op, and this is an error.
-            if non_altered_bases:
-                bases_str = ', '.join(
-                    b.get_verbosename(schema, with_parent=True)
-                    for b in non_altered_bases
-                )
-
-                vn = scls.get_verbosename(schema, with_parent=True)
-
-                raise errors.SchemaDefinitionError(
-                    f'cannot change the target type of inherited {vn}',
-                    details=(
-                        f'{vn} is inherited from '
-                        f'{bases_str}'
-                    ),
-                    context=self.source_context,
-                )
-
-            tgt = self.get_attribute_value('target')
-
-            def _set_type(
-                alter_cmd: sd.ObjectCommand[so.Object],
-                refname: str,
-            ) -> None:
-                s_t = type(self)(classname=alter_cmd.classname)
-                s_t.set_attribute_value('target', tgt)
-                alter_cmd.add(s_t)
-
-            schema = self._propagate_ref_op(
-                schema, context, self.scls, cb=_set_type)
+            schema = self._propagate_ref_field_alter_in_inheritance(
+                schema,
+                context,
+                field_name='target',
+            )
 
         return schema
 
@@ -1496,7 +1512,7 @@ class SetPointerType(
         schema: s_schema.Schema,
         astnode: qlast.DDLOperation,
         context: sd.CommandContext,
-    ) -> sd.ObjectCommand[Pointer]:
+    ) -> sd.ObjectCommand[Pointer_T]:
         this_op = context.current().op
         assert isinstance(this_op, sd.ObjectCommand)
         return cls(classname=this_op.classname)
@@ -1539,6 +1555,44 @@ class SetPointerType(
         cmd.set_attribute_value('target', target_ref)
 
         return cmd
+
+
+class AlterPointerUpperCardinality(
+    referencing.ReferencedInheritingObjectCommand[Pointer_T],
+    inheriting.AlterInheritingObjectFragment[Pointer_T],
+    sd.AlterSpecialObjectField[Pointer_T],
+    PointerCommandOrFragment[Pointer_T],
+):
+    """Handler for the "cardinality" field changes."""
+
+    def _alter_begin(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        orig_schema = schema
+        schema = super()._alter_begin(schema, context)
+        scls = self.scls
+
+        orig_card = scls.get_cardinality(orig_schema)
+        new_card = scls.get_cardinality(schema)
+
+        if orig_card == new_card:
+            # The actual value hasn't changed, nothing to do here.
+            return schema
+
+        vn = scls.get_verbosename(schema, with_parent=True)
+        schema = self._propagate_if_expr_refs(
+            schema, context, action=f'alter the cardinality of {vn}')
+
+        if not context.canonical:
+            schema = self._propagate_ref_field_alter_in_inheritance(
+                schema,
+                context,
+                field_name='cardinality',
+            )
+
+        return schema
 
 
 def get_or_create_union_pointer(

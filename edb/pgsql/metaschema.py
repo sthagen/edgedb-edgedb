@@ -567,7 +567,8 @@ class AssertJSONTypeFunction(dbops.Function):
                     'wrong_object_type',
                     coalesce(
                         msg,
-                        'expected json ' || array_to_string(typenames, ', ') ||
+                        'expected json ' ||
+                        array_to_string(typenames, ' or ') ||
                         '; got json ' || coalesce(jsonb_typeof(val), 'UNKNOWN')
                     ),
                     det,
@@ -2757,10 +2758,15 @@ def _generate_database_views(schema):
             (SELECT id FROM edgedb."_SchemaObjectType"
                  WHERE name = 'sys::Database')
                 AS {qi(ptr_col_name(schema, Database, '__type__'))},
-            (datname = {ql(defines.EDGEDB_TEMPLATE_DB)})
+            (datname IN (
+                {ql(defines.EDGEDB_TEMPLATE_DB)},
+                {ql(defines.EDGEDB_SYSTEM_DB)}
+            ))
                 AS {qi(ptr_col_name(schema, Database, 'internal'))},
             datname AS {qi(ptr_col_name(schema, Database, 'name'))},
             datname AS {qi(ptr_col_name(schema, Database, 'name__internal'))},
+            ARRAY[]::text[]
+                AS {qi(ptr_col_name(schema, Database, 'computed_fields'))},
             ((d.description)->>'builtin')::bool
                 AS {qi(ptr_col_name(schema, Database, 'builtin'))}
         FROM
@@ -2878,6 +2884,8 @@ def _generate_role_views(schema):
                 AS {qi(ptr_col_name(schema, Role, 'is_derived'))},
             ARRAY[]::text[]
                 AS {qi(ptr_col_name(schema, Role, 'inherited_fields'))},
+            ARRAY[]::text[]
+                AS {qi(ptr_col_name(schema, Role, 'computed_fields'))},
             ((d.description)->>'builtin')::bool
                 AS {qi(ptr_col_name(schema, Role, 'builtin'))},
             False
@@ -3234,7 +3242,8 @@ def _describe_config(
             continue
 
         ptype = p.get_target(schema)
-        mult = p.get_cardinality(schema) is qltypes.SchemaCardinality.Many
+        ptr_card = p.get_cardinality(schema)
+        mult = ptr_card.is_multi()
         if isinstance(ptype, s_objtypes.ObjectType):
             item = textwrap.indent(
                 _render_config_object(
@@ -3436,7 +3445,8 @@ def _describe_config_object(
                 continue
 
             ptype = p.get_target(schema)
-            mult = p.get_cardinality(schema) is qltypes.SchemaCardinality.Many
+            ptr_card = p.get_cardinality(schema)
+            mult = ptr_card.is_multi()
             psource = f'item.{ qlquote.quote_ident(pn) }'
 
             if isinstance(ptype, s_objtypes.ObjectType):
@@ -3530,7 +3540,8 @@ def _build_key_expr(key_components):
 def _build_data_source(schema, rptr, source_idx, *, alias=None):
 
     rptr_name = rptr.get_shortname(schema).name
-    rptr_multi = rptr.get_cardinality(schema) is qltypes.SchemaCardinality.Many
+    rptr_card = rptr.get_cardinality(schema)
+    rptr_multi = rptr_card.is_multi()
 
     if alias is None:
         alias = f'q{source_idx + 1}'
@@ -3595,9 +3606,8 @@ def _generate_config_type_view(
                 (SELECT jsonb_object_agg(name, value) AS val
                 FROM edgedb._read_sys_config(NULL, {max_source}) cfg) AS q0''')
         else:
-            rptr_multi = (
-                rptr.get_cardinality(schema) is qltypes.SchemaCardinality.Many)
-
+            rptr_card = rptr.get_cardinality(schema)
+            rptr_multi = rptr_card.is_multi()
             rptr_name = rptr.get_shortname(schema).name
 
             if rptr_multi:
@@ -3621,8 +3631,8 @@ def _generate_config_type_view(
         key_start = 0
 
         for i, (l, exc_props) in enumerate(path):
-            l_multi = (l.get_cardinality(schema) is
-                       qltypes.SchemaCardinality.Many)
+            l_card = l.get_cardinality(schema)
+            l_multi = l_card.is_multi()
             l_name = l.get_shortname(schema).name
 
             if i == 0:
@@ -3678,9 +3688,8 @@ def _generate_config_type_view(
             continue
 
         pp_type = pp.get_target(schema)
-        pp_multi = (
-            pp.get_cardinality(schema) is qltypes.SchemaCardinality.Many
-        )
+        pp_card = pp.get_cardinality(schema)
+        pp_multi = pp_card.is_multi()
         pp_psi = types.get_pointer_storage_info(pp, schema=schema)
         pp_col = pp_psi.column_name
 

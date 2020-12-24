@@ -25,7 +25,6 @@ import json
 from typing import *
 
 from edb.edgeql import compiler as qlcompiler
-from edb.edgeql import qltypes
 from edb.ir import staeval
 
 from . import types
@@ -89,7 +88,7 @@ class Spec(collections.abc.Mapping):
             if issubclass(s.type, types.CompositeConfigType):
                 self._register_type(s.type)
 
-    def _register_type(self, t: type):
+    def _register_type(self, t: type) -> None:
         self._types_by_name[t.__name__] = t
         for subclass in t.__subclasses__():
             self._types_by_name[subclass.__name__] = subclass
@@ -112,7 +111,7 @@ class Spec(collections.abc.Mapping):
     def __contains__(self, name: object) -> bool:
         return name in self._by_name
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._settings)
 
 
@@ -137,8 +136,8 @@ def load_spec_from_schema(schema):
             for a, v in p.get_annotations(schema).items(schema)
         }
 
-        set_of = p.get_cardinality(schema) is qltypes.SchemaCardinality.Many
-
+        ptr_card = p.get_cardinality(schema)
+        set_of = ptr_card.is_multi()
         deflt = p.get_default(schema)
         if deflt is not None:
             deflt = qlcompiler.evaluate_to_python_val(

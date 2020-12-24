@@ -26,6 +26,8 @@ from typing import *
 
 from edb import errors
 
+from edb.common import verutils
+
 from edb.edgeql import ast as qlast
 from edb.edgeql import compiler as qlcompiler
 from edb.edgeql import qltypes as ft
@@ -289,7 +291,7 @@ class ParameterDesc(ParameterLike):
         *,
         context: sd.CommandContext,
     ) -> sd.CreateObject[Parameter]:
-        CreateParameter = sd.ObjectCommandMeta.get_command_class_or_die(
+        CreateParameter = sd.get_object_command_class_or_die(
             sd.CreateObject, Parameter)
 
         param_name = self.get_fqname(schema, func_fqname)
@@ -310,7 +312,7 @@ class ParameterDesc(ParameterLike):
         *,
         context: sd.CommandContext,
     ) -> sd.ObjectCommand[Parameter]:
-        DeleteParameter = sd.ObjectCommandMeta.get_command_class_or_die(
+        DeleteParameter = sd.get_object_command_class_or_die(
             sd.DeleteObject, Parameter)
 
         param_name = sn.QualName(
@@ -482,7 +484,6 @@ class ParameterCommandContext(sd.ObjectCommandContext[Parameter]):
 # a referencing.ReferencedObject breaks the code
 class ParameterCommand(
     referencing.StronglyReferencedObjectCommand[Parameter],  # type: ignore
-    schema_metaclass=Parameter,
     context_class=ParameterCommandContext,
     referrer_context_class=CallableCommandContext
 ):
@@ -975,7 +976,7 @@ class AlterCallableObject(
     sd.AlterObject[CallableObjectT],
 ):
 
-    def get_ast(
+    def _get_ast(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
@@ -1148,9 +1149,6 @@ class Function(CallableObject, VolatilitySubject, s_abc.Function,
     initial_value = so.SchemaField(
         expr.Expression, default=None, compcoef=0.4, coerce=True)
 
-    session_only = so.SchemaField(
-        bool, default=False, compcoef=0.4, coerce=True, allow_ddl_set=True)
-
     has_dml = so.SchemaField(
         bool, default=False, allow_ddl_set=True)
 
@@ -1196,7 +1194,6 @@ class FunctionCommandContext(CallableCommandContext):
 
 class FunctionCommand(
     CallableCommand[Function],
-    schema_metaclass=Function,
     context_class=FunctionCommandContext,
 ):
 
@@ -1218,11 +1215,15 @@ class FunctionCommand(
 
         return cls.get_schema_metaclass().get_fqname(schema, name, params)
 
-    def get_ast_attr_for_field(self, field: str) -> Optional[str]:
+    def get_ast_attr_for_field(
+        self,
+        field: str,
+        astnode: Type[qlast.DDLOperation],
+    ) -> Optional[str]:
         if field == 'nativecode':
             return 'nativecode'
         else:
-            return None
+            return super().get_ast_attr_for_field(field, astnode)
 
     def compile_expr_field(
         self,
@@ -1273,6 +1274,34 @@ class FunctionCommand(
             )
         return val
 
+    def canonicalize_attributes(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        schema = super().canonicalize_attributes(schema, context)
+        # When volatility is altered, we need to force a
+        # reconsideration of nativecode if it exists in order to check
+        # it against the new volatility or compute the volatility on a
+        # RESET.  This is kind of unfortunate.
+        if (
+            isinstance(self, sd.AlterObject)
+            and self.has_attribute_value('volatility')
+            and not self.has_attribute_value('nativecode')
+            and (nativecode := self.scls.get_nativecode(schema)) is not None
+        ):
+            self.set_attribute_value(
+                'nativecode',
+                expr.Expression.not_compiled(nativecode)
+            )
+
+        # Resolving 'nativecode' has side effects on has_dml and
+        # volatility, so force it to happen as part of
+        # canonicalization of attributes.
+        super().get_resolved_attribute_value(
+            'nativecode', schema=schema, context=context)
+        return schema
+
     def compile_function(
         self,
         schema: s_schema.Schema,
@@ -1283,8 +1312,6 @@ class FunctionCommand(
         from edb.ir import ast as irast
 
         params = self._get_params(schema, context)
-        session_only = self._get_attribute_value(
-            schema, context, 'session_only')
 
         language = self._get_attribute_value(schema, context, 'language')
         assert language is qlast.Language.EdgeQL
@@ -1303,9 +1330,6 @@ class FunctionCommand(
             options=qlcompiler.CompilerOptions(
                 anchors=param_anchors,
                 func_params=params,
-                # the body of a session_only function can contain calls to
-                # other session_only functions
-                session_mode=session_only,
                 apply_query_rewrites=not context.stdmode,
                 track_schema_ref_exprs=track_schema_ref_exprs,
             ),
@@ -1319,6 +1343,31 @@ class FunctionCommand(
             # DML inside function body detected. Right now is a good
             # opportunity to raise exceptions or give warnings.
             self.set_attribute_value('has_dml', True)
+
+        spec_volatility: Optional[ft.Volatility] = (
+            self.get_specified_attribute_value('volatility', schema, context))
+
+        if spec_volatility is None:
+            self.set_attribute_value('volatility', ir.volatility,
+                                     computed=True)
+
+        # If a volatility is specified, it can be more volatile than the
+        # inferred volatility but not less.
+        if spec_volatility is not None and spec_volatility < ir.volatility:
+            # When restoring from old versions, just ignore the problem
+            # and use the inferred volatility
+            if context.compat_ver_is_before(
+                (1, 0, verutils.VersionStage.ALPHA, 8)
+            ):
+                self.set_attribute_value('volatility', ir.volatility)
+            else:
+                raise errors.InvalidFunctionDefinitionError(
+                    f'volatility mismatch in function declared as '
+                    f'{str(spec_volatility).lower()}',
+                    details=f'Actual volatility is '
+                            f'{str(ir.volatility).lower()}',
+                    context=body.qlast.context,
+                )
 
         return_type = self._get_attribute_value(schema, context, 'return_type')
         if (not ir.stype.issubclass(schema, return_type)
@@ -1406,7 +1455,6 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
         has_polymorphic = params.has_polymorphic(schema)
         polymorphic_return_type = return_type.is_polymorphic(schema)
         named_only = params.find_named_only(schema)
-        session_only = self.scls.get_session_only(schema)
 
         # Certain syntax is only allowed in "EdgeDB developer" mode,
         # i.e. when populating std library, etc.
@@ -1465,13 +1513,6 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
                     f'function: overloading another function with different '
                     f'return type {func_return_typemod.to_edgeql()} '
                     f'{func.get_return_type(schema).get_displayname(schema)}',
-                    context=self.source_context)
-
-            if session_only != func.get_session_only(schema):
-                raise errors.InvalidFunctionDefinitionError(
-                    f'cannot create `{signature}` function: '
-                    f'overloading another function with different '
-                    f'`session_only` flag',
                     context=self.source_context)
 
             if func_from_function:
@@ -1722,6 +1763,25 @@ class RenameFunction(RenameCallableObject[Function], FunctionCommand):
 class AlterFunction(AlterCallableObject[Function], FunctionCommand):
 
     astnode = qlast.AlterFunction
+
+    def _alter_begin(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        schema = super()._alter_begin(schema, context)
+        scls = self.scls
+
+        # If volatility changed, propagate that to referring exprs
+        if not self.has_attribute_value("volatility"):
+            return schema
+
+        vn = scls.get_verbosename(schema, with_parent=True)
+        schema = self._propagate_if_expr_refs(
+            schema, context, metadata_only=False,
+            action=f'alter the volatility of {vn}')
+
+        return schema
 
     @classmethod
     def _cmd_tree_from_ast(

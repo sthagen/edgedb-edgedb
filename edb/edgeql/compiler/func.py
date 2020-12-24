@@ -141,11 +141,6 @@ def compile_FunctionCall(
     assert isinstance(func, s_func.Function)
     func_name = func.get_shortname(env.schema)
 
-    if not ctx.env.options.session_mode and func.get_session_only(env.schema):
-        raise errors.QueryError(
-            f'{func_name}() cannot be called in a non-session context',
-            context=expr.context)
-
     matched_func_params = func.get_params(env.schema)
     variadic_param = matched_func_params.find_variadic(env.schema)
     variadic_param_type = None
@@ -217,14 +212,11 @@ def compile_FunctionCall(
 
     fcall = irast.FunctionCall(
         args=final_args,
-        func_module_id=env.schema.get_global(
-            s_mod.Module, func_name.module).id,
         func_shortname=func_name,
         backend_name=func.get_backend_name(env.schema),
         func_polymorphic=is_polymorphic,
         func_sql_function=func.get_from_function(env.schema),
         force_return_cast=func.get_force_return_cast(env.schema),
-        session_only=func.get_session_only(env.schema),
         volatility=func.get_volatility(env.schema),
         sql_func_has_out_params=func.get_sql_func_has_out_params(env.schema),
         error_on_null_result=func.get_error_on_null_result(env.schema),
@@ -542,8 +534,6 @@ def compile_operator(
 
     node = irast.OperatorCall(
         args=final_args,
-        func_module_id=env.schema.get_global(
-            s_mod.Module, oper_name.module).id,
         func_shortname=oper_name,
         func_polymorphic=is_polymorphic,
         origin_name=origin_name,
@@ -743,12 +733,26 @@ def finalize_args(
                     pathctx.assign_set_scope(arg, None, ctx=ctx)
         else:
             process_path_log(arg_ctx, arg_scope)
+            is_array_agg = (
+                isinstance(bound_call.func, s_func.Function)
+                and (
+                    bound_call.func.get_shortname(ctx.env.schema)
+                    == ('std', 'array_agg')
+                )
+            )
 
-            if (is_polymorphic
-                    and ctx.expr_exposed
-                    and ctx.implicit_limit
-                    and isinstance(arg.expr, irast.SelectStmt)
-                    and arg.expr.limit is None):
+            if (
+                # Ideally, we should implicitly slice all array values,
+                # but in practice, the vast majority of large arrays
+                # will come from array_agg, and so we only care about
+                # that.
+                is_array_agg
+                and ctx.expr_exposed
+                and ctx.implicit_limit
+                and isinstance(arg.expr, irast.SelectStmt)
+                and arg.expr.limit is None
+                and not ctx.inhibit_implicit_limit
+            ):
                 arg.expr.limit = setgen.ensure_set(
                     dispatch.compile(
                         qlast.IntegerConstant(value=str(ctx.implicit_limit)),

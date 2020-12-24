@@ -183,12 +183,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             ]
         )
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
-
-        This happens on the first migration.
-    ''')
     async def test_edgeql_migration_link_inheritance(self):
         schema_f = os.path.join(os.path.dirname(__file__), 'schemas',
                                 'links_1.esdl')
@@ -460,7 +454,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text': (
                         'CREATE TYPE test::Type1 {\n'
-                        '    CREATE OPTIONAL SINGLE PROPERTY field1'
+                        '    CREATE PROPERTY field1'
                         ' -> std::str;\n'
                         '};'
                     )
@@ -472,7 +466,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
 
         await self.con.execute('''
             CREATE TYPE test::Type1 {
-                CREATE OPTIONAL SINGLE PROPERTY field1 -> std::str;
+                CREATE PROPERTY field1 -> std::str;
             };
         ''')
 
@@ -480,7 +474,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
             'confirmed': [
                 'CREATE TYPE test::Type1 {\n'
-                '    CREATE OPTIONAL SINGLE PROPERTY field1 -> std::str;\n'
+                '    CREATE PROPERTY field1 -> std::str;\n'
                 '};'
             ],
             'complete': True,
@@ -878,14 +872,13 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
             'confirmed': [],
             'complete': False,
             'proposed': {
                 'statements': [{
                     'text': (
                         'CREATE TYPE test::Type01 {\n'
-                        '    CREATE OPTIONAL SINGLE PROPERTY field1'
+                        '    CREATE PROPERTY field1'
                         ' -> std::str;\n'
                         '};'
                     )
@@ -914,7 +907,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1qbv2f3km5xs5teyya5yog6areb33lnsqvs5prmyumtehnmpdfy3q',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -955,14 +947,13 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
             'confirmed': [],
             'complete': False,
             'proposed': {
                 'statements': [{
                     'text': (
                         'CREATE TYPE test::Type02 {\n'
-                        '    CREATE OPTIONAL SINGLE PROPERTY field02'
+                        '    CREATE PROPERTY field02'
                         ' -> std::str;\n'
                         '};'
                     )
@@ -990,7 +981,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1plg55ylmquxeeurgqtp7uuaupb463z4htxw3rregmzx42zs5lxea',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1031,14 +1021,13 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1dsogsjmchh4kivd633z6jjivjlve4hmqofr2obt3rq5koakemc5a',
             'confirmed': [],
             'complete': False,
             'proposed': {
                 'statements': [{
                     'text': (
                         'ALTER TYPE test::Type02 {\n'
-                        '    CREATE OPTIONAL SINGLE PROPERTY field02'
+                        '    CREATE PROPERTY field02'
                         ' -> std::str;\n'
                         '};'
                     )
@@ -1079,14 +1068,13 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
             'confirmed': ['CREATE TYPE test::Foo;'],
             'complete': False,
             'proposed': {
                 'statements': [{
                     'text': (
                         'CREATE TYPE test::Type01 {\n'
-                        '    CREATE OPTIONAL SINGLE LINK foo1'
+                        '    CREATE LINK foo1'
                         ' -> test::Foo;\n'
                         '};'
                     )
@@ -1121,7 +1109,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1wmfeopwqccjy35fuf73j6g6sgrqnmes53gjpizw5tyehwiij6yhq',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1168,14 +1155,13 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
             'confirmed': ['CREATE TYPE test::Foo;'],
             'complete': False,
             'proposed': {
                 'statements': [{
                     'text': (
                         'CREATE TYPE test::Type02 {\n'
-                        '    CREATE OPTIONAL SINGLE LINK foo02'
+                        '    CREATE LINK foo02'
                         ' -> test::Foo;\n'
                         '};'
                     )
@@ -1209,7 +1195,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1tul34c3bsnuzypwqo4cgpryguamjffvqme3c66id7nxasbsjyhda',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1258,14 +1243,13 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1zo2zt4im2gkkavxn6hzs432k5fvkdz42tswbphejihqe2yul47la',
             'confirmed': [],
             'complete': False,
             'proposed': {
                 'statements': [{
                     'text': (
                         'ALTER TYPE test::Type02 {\n'
-                        '    CREATE OPTIONAL SINGLE LINK foo02'
+                        '    CREATE LINK foo02'
                         ' -> test::Foo;\n'
                         '};'
                     )
@@ -1302,7 +1286,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1327,7 +1310,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1okv4ltfh3dphmqfmmx5bjusyzsnvc7sgjtb6vdo26mjf6rtmdqxq',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1355,7 +1337,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm17h46d7r6h5rbxxsr2dlpowpklqze4iqhadkr6tlwedwguex5dbba',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1384,7 +1365,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1414,7 +1394,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1svrt2rvolv2f3fgtpgj2qikec4o4v6a5le5u6jfpyrzfhybr2ipa',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1449,7 +1428,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1479,7 +1457,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1azidpr7ai7z2u4rcfx2awxdxy5ouenhvmb2otxew4penhxnruvuq',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1514,7 +1491,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm13agjryb2lawnugaty4gkqzjvxvrbod3olf3abupck7x2777yntta',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1546,7 +1522,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1576,7 +1551,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1e7h52ims4j4ijfbdfrvm453vgldwsok6f7oiosyhvcmjvrjgefqq',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1611,7 +1585,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1641,7 +1614,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm16yh2sfnw2of6eikwc3u4odjeie2cvz54qe3e4jk7o3tvc3q5xzjq',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1676,7 +1648,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         ''')
 
         await self.assert_describe_migration({
-            'parent': 'm1pbb5jssdc652jn74enr3cnvynydww476glgodzyufbru6hcqsmsq',
             'confirmed': [],
             'complete': False,
             'proposed': {
@@ -1724,13 +1695,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             },
         })
 
-    @test.xfail('''
-        edgedb.errors.SchemaError: cannot get 'name' value: item
-        'bc6c9f68-049d-11eb-a183-c1f86eaf323b' is not present in the
-        schema <Schema gen:3708 at 0x7efef93f1430>
-
-        The error occurs on committing the second migration.
-    ''')
     async def test_edgeql_migration_describe_annotation_02(self):
         # Migration that creates an annotation.
         await self.con.execute('''
@@ -1849,7 +1813,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             [{
                 'name': 'test::AnnoType2',
                 'annotations': [{
-                    'name': 'my_anno2',
+                    'name': 'test::my_anno2',
                     '@value': 'retest_my_anno2',
                 }]
             }],
@@ -2910,7 +2874,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         await self.assert_describe_migration({
             'confirmed': ["""
                 ALTER TYPE test::Base {
-                    CREATE OPTIONAL SINGLE PROPERTY foo -> std::str;
+                    CREATE PROPERTY foo -> std::str;
                 };
             """, """
                 ALTER TYPE test::Derived {
@@ -4498,12 +4462,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 };
             """)
 
-    @test.xfail('''
-        edgedb.errors.InternalServerError: relation
-        "edgedb_fe4eeff4-..." does not exist
-
-        The error occurs at the second "migrate".
-    ''')
     async def test_edgeql_migration_eq_42(self):
         # testing schema alias
         await self.migrate(r"""
@@ -6076,13 +6034,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        edgedb.errors.SchemaError: cannot get 'name' value: item
-        '4e2fe443-04a6-11eb-a38f-a315784c86dc' is not present in the
-        schema <Schema gen:3747 at 0x7fd78b613790>
-
-        This happens on the final migration.
-    ''')
     async def test_edgeql_migration_eq_annotation_02(self):
         await self.migrate(r"""
             type Base;
@@ -6184,13 +6135,6 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        edgedb.errors.SchemaError: cannot get 'name' value: item
-        '54615193-04a6-11eb-a05a-af5ecac7408d' is not present in the
-        schema <Schema gen:3751 at 0x7fd78bbe74c0>
-
-        This happens on the final migration.
-    ''')
     async def test_edgeql_migration_eq_annotation_03(self):
         await self.migrate(r"""
             type Base;
@@ -6295,14 +6239,8 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
-    @test.xfail('''
-        The "complete" flag is not set even though the DDL from
-        "proposed" list is used.
-
-        This happens on the second migration.
-    ''')
     async def test_edgeql_migration_eq_annotation_04(self):
-        # Test migration of annotation value ano nothing else.
+        # Test migration of annotation value and nothing else.
         await self.migrate(r"""
             abstract annotation description;
 
@@ -7554,7 +7492,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                     'text':
                         'CREATE TYPE test::NewObj2 {\n'
                         "    CREATE ANNOTATION std::title := 'Obj2';\n"
-                        '    CREATE OPTIONAL SINGLE PROPERTY name'
+                        '    CREATE PROPERTY name'
                         ' -> std::str;\n'
                         '};'
                 }],
@@ -7576,7 +7514,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                         '    DROP PROPERTY o;\n'
                         '    RENAME TO test::NewObj2;\n'
                         "    CREATE ANNOTATION std::title := 'Obj2';\n"
-                        '    CREATE OPTIONAL SINGLE PROPERTY name -> std::str;'
+                        '    CREATE PROPERTY name -> std::str;'
                         '\n'
                         '};'
                 }],
@@ -7631,9 +7569,8 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'statements': [{
                     'text':
                         'CREATE TYPE test::NewObj1 {\n'
-                        '    CREATE OPTIONAL SINGLE PROPERTY bar -> std::str;'
-                        '\n    CREATE OPTIONAL SINGLE PROPERTY foo '
-                        '-> std::str;'
+                        '    CREATE PROPERTY bar -> std::str;'
+                        '\n    CREATE PROPERTY foo -> std::str;'
                         '\n};'
                 }],
                 'confidence': 1.0,

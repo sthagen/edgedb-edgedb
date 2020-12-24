@@ -191,7 +191,9 @@ class ObjectType(
         other: s_types.Type,
         schema: s_schema.Schema,
     ) -> Tuple[s_schema.Schema, Optional[ObjectType]]:
-        assert isinstance(other, ObjectType)
+        if not isinstance(other, ObjectType):
+            return schema, None
+
         nearest_common_ancestor = utils.get_class_nearest_common_ancestor(
             schema, [self, other]
         )
@@ -391,11 +393,13 @@ class ObjectTypeCommandContext(sd.ObjectCommandContext[ObjectType],
     pass
 
 
-class ObjectTypeCommand(s_types.InheritingTypeCommand[ObjectType],
-                        constraints.ConsistencySubjectCommand[ObjectType],
-                        sources.SourceCommand, links.LinkSourceCommand,
-                        schema_metaclass=ObjectType,
-                        context_class=ObjectTypeCommandContext):
+class ObjectTypeCommand(
+    s_types.InheritingTypeCommand[ObjectType],
+    constraints.ConsistencySubjectCommand[ObjectType],
+    sources.SourceCommand[ObjectType],
+    links.LinkSourceCommand[ObjectType],
+    context_class=ObjectTypeCommandContext,
+):
     pass
 
 
