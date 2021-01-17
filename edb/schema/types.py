@@ -303,6 +303,18 @@ class Type(
     def is_view(self, schema: s_schema.Schema) -> bool:
         return self.get_expr_type(schema) is not None
 
+    def castable_to(
+        self,
+        other: Type,
+        schema: s_schema.Schema,
+    ) -> bool:
+        if self.implicitly_castable_to(other, schema):
+            return True
+        elif self.assignment_castable_to(other, schema):
+            return True
+        else:
+            return False
+
     def assignment_castable_to(
         self, other: Type, schema: s_schema.Schema
     ) -> bool:
@@ -326,19 +338,6 @@ class Type(
         schema: s_schema.Schema,
     ) -> typing.Tuple[s_schema.Schema, Optional[TypeT]]:
         return schema, None
-
-    def explicitly_castable_to(
-        self,
-        other: Type,
-        schema: s_schema.Schema,
-    ) -> bool:
-        if self.implicitly_castable_to(other, schema):
-            return True
-
-        if self.assignment_castable_to(other, schema):
-            return True
-
-        return False
 
     def get_union_of(
         self: TypeT,
@@ -873,6 +872,7 @@ class Collection(Type, s_abc.Collection):
         self,
         schema: s_schema.Schema,
         *,
+        if_exists: bool = False,
         expiring_refs: AbstractSet[so.Object],
         view_name: Optional[s_name.QualName] = None,
     ) -> sd.Command:
@@ -1025,6 +1025,17 @@ class Array(
         return self.get_element_type(schema).assignment_castable_to(
             other.get_element_type(schema), schema)
 
+    def castable_to(
+        self,
+        other: Type,
+        schema: s_schema.Schema,
+    ) -> bool:
+        if not isinstance(other, Array):
+            return False
+
+        return self.get_element_type(schema).castable_to(
+            other.get_element_type(schema), schema)
+
     def find_common_implicitly_castable_type(
         self: Array_T,
         other: Type,
@@ -1164,16 +1175,24 @@ class Array(
         self,
         schema: s_schema.Schema,
         *,
+        if_exists: bool = False,
         expiring_refs: AbstractSet[so.Object] = frozenset(),
         view_name: Optional[s_name.QualName] = None,
     ) -> Union[DeleteArray, DeleteArrayExprAlias]:
         cmd: Union[DeleteArray, DeleteArrayExprAlias]
         if view_name is None:
-            cmd = DeleteArray(classname=self.get_name(schema), if_unused=True,
-                              expiring_refs=expiring_refs)
+            cmd = DeleteArray(
+                classname=self.get_name(schema),
+                if_unused=True,
+                if_exists=if_exists,
+                expiring_refs=expiring_refs,
+            )
         else:
-            cmd = DeleteArrayExprAlias(classname=view_name,
-                                       expiring_refs=expiring_refs)
+            cmd = DeleteArrayExprAlias(
+                classname=view_name,
+                if_exists=if_exists,
+                expiring_refs=expiring_refs,
+            )
 
         el = self.get_element_type(schema)
         if isinstance(el, Collection):
@@ -1568,6 +1587,26 @@ class Tuple(
 
         return True
 
+    def castable_to(
+        self,
+        other: Type,
+        schema: s_schema.Schema,
+    ) -> bool:
+        if not isinstance(other, Tuple):
+            return False
+
+        self_subtypes = self.get_subtypes(schema)
+        other_subtypes = other.get_subtypes(schema)
+
+        if len(self_subtypes) != len(other_subtypes):
+            return False
+
+        for st, ot in zip(self_subtypes, other_subtypes):
+            if not st.castable_to(ot, schema):
+                return False
+
+        return True
+
     def find_common_implicitly_castable_type(
         self: Tuple_T,
         other: Type,
@@ -1695,6 +1734,7 @@ class Tuple(
         self,
         schema: s_schema.Schema,
         *,
+        if_exists: bool = False,
         expiring_refs: AbstractSet[so.Object] = frozenset(),
         view_name: Optional[s_name.QualName] = None,
     ) -> Union[DeleteTuple, DeleteTupleExprAlias]:
@@ -1703,11 +1743,13 @@ class Tuple(
             cmd = DeleteTuple(
                 classname=self.get_name(schema),
                 if_unused=True,
+                if_exists=if_exists,
                 expiring_refs=expiring_refs,
             )
         else:
             cmd = DeleteTupleExprAlias(
                 classname=view_name,
+                if_exists=if_exists,
                 expiring_refs=expiring_refs,
             )
 
@@ -1974,6 +2016,7 @@ class TypeCommand(sd.ObjectCommand[TypeT]):
         if expr is None:
             raise errors.InvalidAliasDefinitionError(
                 f'missing required view expression', context=astnode.context)
+        assert isinstance(expr, qlast.Expr)
         return expr
 
     def get_ast(

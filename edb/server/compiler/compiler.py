@@ -414,18 +414,18 @@ class Compiler(BaseCompiler):
             debug.header('Canonical Delta Plan')
             debug.dump(delta, schema=schema)
 
-        delta = pg_delta.CommandMeta.adapt(delta)
+        pgdelta = pg_delta.CommandMeta.adapt(delta)
         context = self._new_delta_context(ctx)
-        schema = delta.apply(schema, context)
+        schema = pgdelta.apply(schema, context)
         current_tx.update_schema(schema)
 
         if debug.flags.delta_pgsql_plan:
             debug.header('PgSQL Delta Plan')
-            debug.dump(delta, schema=schema)
+            debug.dump(pgdelta, schema=schema)
 
         db_cmd = any(
             isinstance(c, s_db.DatabaseCommand)
-            for c in delta.get_subcommands()
+            for c in pgdelta.get_subcommands()
         )
 
         if db_cmd:
@@ -433,15 +433,15 @@ class Compiler(BaseCompiler):
             new_types = frozenset()
         else:
             block = pg_dbops.PLTopBlock()
-            new_types = frozenset(str(tid) for tid in delta.new_types)
+            new_types = frozenset(str(tid) for tid in pgdelta.new_types)
 
         # Generate SQL DDL for the delta.
-        delta.generate(block)
+        pgdelta.generate(block)
 
         # Generate schema storage SQL (DML into schema storage tables).
         subblock = block.add_block()
         self._compile_schema_storage_in_delta(
-            ctx, delta, subblock, context=context)
+            ctx, pgdelta, subblock, context=context)
 
         return block, new_types
 
@@ -874,9 +874,12 @@ class Compiler(BaseCompiler):
             mstate = mstate._replace(current_ddl=all_ddl)
             if debug.flags.delta_plan:
                 debug.header('Populate Migration DDL AST')
-                for cmd in mstate.current_ddl:
-                    import edb.common.debug
-                    edb.common.debug.dump(cmd)
+                text = []
+                for cmd in new_ddl:
+                    debug.dump(cmd)
+                    text.append(qlcodegen.generate_source(cmd, pretty=True))
+                debug.header('Populate Migration DDL Text')
+                debug.dump_code(';\n'.join(text) + ';')
             current_tx.update_migration_state(mstate)
 
             delta_context = self._new_delta_context(ctx)
@@ -960,6 +963,7 @@ class Compiler(BaseCompiler):
                         'confidence': top_op.get_annotation('confidence'),
                         'prompt': top_op.get_annotation('user_prompt'),
                         'operation_id': op_id,
+                        'data_safe': top_op.is_data_safe(),
                     }
                 else:
                     proposed_desc = None

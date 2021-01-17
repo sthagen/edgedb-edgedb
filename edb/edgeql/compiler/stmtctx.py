@@ -62,11 +62,8 @@ def init_context(
             schema,
             name=s_name.UnqualName('__derived__'),
         )
-    env = context.Environment(
-        schema=schema,
-        path_scope=irast.new_scope_tree(),
-        options=options,
-    )
+
+    env = context.Environment(schema=schema, options=options)
     ctx = context.ContextLevel(None, context.ContextSwitchMode.NEW, env=env)
     _ = context.CompilerContext(initial=ctx)
 
@@ -80,8 +77,7 @@ def init_context(
                        if isinstance(singleton, s_types.Type)
                        else pathctx.get_pointer_path_id(singleton, ctx=ctx))
             ctx.env.path_scope.attach_path(path_id, context=None)
-
-        ctx.path_scope = ctx.env.path_scope.attach_fence()
+            ctx.env.singletons.append(path_id)
 
     ctx.modaliases.update(options.modaliases)
 
@@ -120,12 +116,22 @@ def fini_expression(
 
     cardinality = qltypes.Cardinality.AT_MOST_ONE
     if ctx.path_scope is not None:
+        # The inference context object will be shared between
+        # cardinality and multiplicity inferrers.
+        inf_ctx = inference.make_ctx(env=ctx.env)
         # Simple expressions have no scope.
         cardinality = inference.infer_cardinality(
             ir,
             scope_tree=ctx.path_scope,
-            ctx=inference.make_ctx(env=ctx.env),
+            ctx=inf_ctx,
         )
+        multiplicity: Optional[qltypes.Multiplicity] = None
+        if ctx.env.options.validate_multiplicity:
+            multiplicity = inference.infer_multiplicity(
+                ir,
+                scope_tree=ctx.path_scope,
+                ctx=inf_ctx,
+            )
 
     # Strip weak namespaces
     for ir_set in ctx.env.set_types:
@@ -223,9 +229,10 @@ def fini_expression(
         params=list(ctx.env.query_parameters.values()),
         views=ctx.view_nodes,
         source_map=ctx.source_map,
-        scope_tree=ctx.path_scope,
+        scope_tree=ctx.env.path_scope,
         cardinality=cardinality,
         volatility=volatility,
+        multiplicity=multiplicity,
         stype=expr_type,
         view_shapes={
             src: [ptr for ptr, _ in ptrs]

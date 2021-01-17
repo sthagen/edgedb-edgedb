@@ -128,6 +128,9 @@ class Cardinality(s_enum.StrEnum):
     def is_multi(self) -> bool:
         return not self.is_single()
 
+    def can_be_zero(self) -> bool:
+        return self not in {Cardinality.ONE, Cardinality.AT_LEAST_ONE}
+
     def to_schema_value(self) -> Tuple[bool, SchemaCardinality]:
         return _CARD_TO_TUPLE[self]
 
@@ -164,6 +167,12 @@ class Volatility(s_enum.StrEnum):
         # We want both `volatility := 'immutable'` in SDL and
         # `SET volatility := 'IMMUTABLE`` in DDL to work.
         return cls(name.title())
+
+
+class Multiplicity(s_enum.StrEnum):
+    ZERO = 'ZERO'  # This is valid for empty sets
+    ONE = 'ONE'
+    MANY = 'MANY'
 
 
 class DescribeLanguage(s_enum.StrEnum):

@@ -147,6 +147,32 @@ def is_assignment_castable(
     return False
 
 
+@functools.lru_cache()
+def is_castable(
+    schema: s_schema.Schema,
+    source: s_types.Type,
+    target: s_types.Type,
+) -> bool:
+
+    # Implicitly castable
+    if is_implicitly_castable(schema, source, target):
+        return True
+
+    elif is_assignment_castable(schema, source, target):
+        return True
+
+    else:
+        casts = schema.get_casts_to_type(target)
+        if not casts:
+            return False
+        else:
+            for c in casts:
+                if c.get_from_type(schema) == source:
+                    return True
+            else:
+                return False
+
+
 def get_cast_fullname(
     schema: s_schema.Schema,
     module: str,
@@ -167,6 +193,7 @@ class Cast(
     s_func.VolatilitySubject,
     s_abc.Cast,
     qlkind=qltypes.SchemaObjectClass.CAST,
+    data_safe=True,
 ):
 
     from_type = so.SchemaField(
@@ -204,6 +231,16 @@ class CastCommandContext(sd.ObjectCommandContext[Cast],
 
 class CastCommand(sd.QualifiedObjectCommand[Cast],
                   context_class=CastCommandContext):
+
+    def get_ast_attr_for_field(
+        self,
+        field: str,
+        astnode: Type[qlast.DDLOperation],
+    ) -> Optional[str]:
+        if field in {'allow_assignment', 'allow_implicit'}:
+            return field
+        else:
+            return super().get_ast_attr_for_field(field, astnode)
 
     @classmethod
     def _cmd_tree_from_ast(
@@ -337,6 +374,56 @@ class CreateCast(CastCommand, sd.CreateObject[Cast]):
                 )
 
         return cmd
+
+    def _apply_field_ast(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        node: qlast.DDLOperation,
+        op: sd.AlterObjectProperty,
+    ) -> None:
+        assert isinstance(node, qlast.CreateCast)
+        new_value: Any = op.new_value
+
+        if op.property == 'from_type':
+            # In a cast we can only have pure types, so this is going
+            # to be a TypeName.
+            node.from_type = cast(qlast.TypeName,
+                                  utils.typeref_to_ast(schema, new_value))
+
+        elif op.property == 'to_type':
+            # In a cast we can only have pure types, so this is going
+            # to be a TypeName.
+            node.to_type = cast(qlast.TypeName,
+                                utils.typeref_to_ast(schema, new_value))
+
+        elif op.property == 'code':
+            if node.code is None:
+                node.code = qlast.CastCode()
+            node.code.code = new_value
+
+        elif op.property == 'language':
+            if node.code is None:
+                node.code = qlast.CastCode()
+            node.code.language = new_value
+
+        elif op.property == 'from_function' and new_value:
+            if node.code is None:
+                node.code = qlast.CastCode()
+            node.code.from_function = new_value
+
+        elif op.property == 'from_expr' and new_value:
+            if node.code is None:
+                node.code = qlast.CastCode()
+            node.code.from_expr = new_value
+
+        elif op.property == 'from_cast' and new_value:
+            if node.code is None:
+                node.code = qlast.CastCode()
+            node.code.from_cast = new_value
+
+        else:
+            super()._apply_field_ast(schema, context, node, op)
 
 
 class RenameCast(CastCommand, sd.RenameObject[Cast]):

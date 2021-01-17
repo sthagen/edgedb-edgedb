@@ -340,6 +340,7 @@ _dummy_object = so.Object(
 
 
 Command_T = TypeVar("Command_T", bound="Command")
+Command_T_co = TypeVar("Command_T_co", bound="Command", covariant=True)
 
 
 class Command(struct.MixedStruct, metaclass=CommandMeta):
@@ -394,6 +395,9 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         for op in obj.get_subcommands(include_prerequisites=False):
             result.add(mcls.adapt(op))
         return result
+
+    def is_data_safe(self) -> bool:
+        return False
 
     def resolve_obj_collection(
         self,
@@ -541,7 +545,7 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
         from_default: bool = False,
         orig_computed: Optional[bool] = None,
         source_context: Optional[parsing.ParserContext] = None,
-    ) -> None:
+    ) -> Command:
         orig_op = op = self._get_simple_attribute_set_cmd(attr_name)
         if op is None:
             op = AlterObjectProperty(property=attr_name, new_value=value)
@@ -566,6 +570,8 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
 
         if orig_op is None:
             self.add(op)
+
+        return op
 
     def discard_attribute(self, attr_name: str) -> None:
         op = self._get_attribute_set_cmd(attr_name)
@@ -882,6 +888,18 @@ class Command(struct.MixedStruct, metaclass=CommandMeta):
             raise RuntimeError(f'context class not defined for {cls}')
         return ctxcls
 
+    def formatfields(
+        self,
+        formatter: str = 'str',
+    ) -> Iterator[Tuple[str, str]]:
+        """Return an iterator over fields formatted using `formatter`."""
+        for name, field in self.__class__._fields.items():
+            value = getattr(self, name)
+            default = field.default
+            formatter_obj = field.formatters.get(formatter)
+            if formatter_obj and value != default:
+                yield (name, formatter_obj(value))
+
 
 class Nop(Command):
     pass
@@ -940,16 +958,16 @@ class CommandContextToken(Generic[Command_T]):
         self.transient_derivation = None
 
 
-class CommandContextWrapper(Generic[Command_T]):
+class CommandContextWrapper(Generic[Command_T_co]):
     def __init__(
         self,
         context: CommandContext,
-        token: CommandContextToken[Command_T],
+        token: CommandContextToken[Command_T_co],
     ) -> None:
         self.context = context
         self.token = token
 
-    def __enter__(self) -> CommandContextToken[Command_T]:
+    def __enter__(self) -> CommandContextToken[Command_T_co]:
         self.context.push(self.token)  # type: ignore
         return self.token
 
@@ -1002,7 +1020,7 @@ class CommandContext:
         self.backend_runtime_params = backend_runtime_params
         self.affected_finalization: Dict[
             Command,
-            List[Tuple[DeltaRoot, Command, List[str]]],
+            List[Tuple[Command, Command, List[str]]],
         ] = collections.defaultdict(list)
         self.compat_ver = compat_ver
 
@@ -1216,6 +1234,28 @@ class CommandContext:
         return self.compat_ver is not None and self.compat_ver < ver
 
 
+class ContextStack:
+
+    def __init__(
+        self,
+        contexts: Iterable[CommandContextWrapper[Command]],
+    ) -> None:
+        self._contexts = list(contexts)
+
+    def push(self, ctx: CommandContextWrapper[Command]) -> None:
+        self._contexts.append(ctx)
+
+    def pop(self) -> None:
+        self._contexts.pop()
+
+    @contextlib.contextmanager
+    def __call__(self) -> Generator[None, None, None]:
+        with contextlib.ExitStack() as stack:
+            for ctx in self._contexts:
+                stack.enter_context(ctx)  # type: ignore
+            yield
+
+
 class DeltaRootContext(CommandContextToken["DeltaRoot"]):
     pass
 
@@ -1310,6 +1350,13 @@ class ObjectCommand(Command, Generic[so.Object_T]):
         dict,  # type: ignore
         default=None,
     )
+    #: When this command is produced by a breakup of a larger command
+    #: subtree, *orig_cmd_type* would contain the type of the original
+    #: command.
+    orig_cmd_type = struct.Field(
+        CommandMeta,
+        default=None,
+    )
 
     scls: so.Object_T
     _delta_action: ClassVar[str]
@@ -1388,6 +1435,15 @@ class ObjectCommand(Command, Generic[so.Object_T]):
         classname = cls._classname_from_ast(schema, astnode, context)
         return cls(classname=classname)
 
+    def is_data_safe(self) -> bool:
+        if self.get_schema_metaclass()._data_safe:
+            return True
+        else:
+            return all(
+                subcmd.is_data_safe()
+                for subcmd in self.get_subcommands()
+            )
+
     def get_parent_op(
         self,
         context: CommandContext,
@@ -1405,7 +1461,10 @@ class ObjectCommand(Command, Generic[so.Object_T]):
         cls,
         field_name: str,
     ) -> Optional[Type[AlterSpecialObjectField[so.Object]]]:
-        if issubclass(cls, AlterObject):
+        if (
+            issubclass(cls, AlterObjectOrFragment)
+            and not issubclass(cls, AlterSpecialObjectField)
+        ):
             schema_cls = cls.get_schema_metaclass()
             return get_special_field_alter_handler(field_name, schema_cls)
         else:
@@ -1423,7 +1482,7 @@ class ObjectCommand(Command, Generic[so.Object_T]):
         orig_computed: Optional[bool] = None,
         from_default: bool = False,
         source_context: Optional[parsing.ParserContext] = None,
-    ) -> None:
+    ) -> Command:
         special = type(self)._get_special_handler(attr_name)
         op = self._get_attribute_set_cmd(attr_name)
         top_op: Optional[Command] = None
@@ -1468,6 +1527,9 @@ class ObjectCommand(Command, Generic[so.Object_T]):
 
         if top_op is not None:
             self.add(top_op)
+            return top_op
+        else:
+            return op
 
     def _propagate_if_expr_refs(
         self,
@@ -1522,10 +1584,10 @@ class ObjectCommand(Command, Generic[so.Object_T]):
                     # Alter the affected entity to change the body to
                     # a dummy version (removing the dependency) and
                     # then reset the body to original expression.
-                    delta_drop, cmd_drop = ref.init_delta_branch(
-                        schema, cmdtype=AlterObject)
-                    delta_create, cmd_create = ref.init_delta_branch(
-                        schema, cmdtype=AlterObject)
+                    delta_drop, cmd_drop, _ = ref.init_delta_branch(
+                        schema, context, cmdtype=AlterObject)
+                    delta_create, cmd_create, _ = ref.init_delta_branch(
+                        schema, context, cmdtype=AlterObject)
                     cmd_create.scls = ref
                     # Mark it metadata_only so that if it actually gets
                     # applied, only the metadata is changed but not
@@ -2097,21 +2159,37 @@ class ObjectCommand(Command, Generic[so.Object_T]):
 
         value = context.get_cached((self, 'attribute', attr_name))
         if value is None:
-            metaclass = self.get_schema_metaclass()
-            field = metaclass.get_field(attr_name)
-            if field is None:
-                raise errors.SchemaDefinitionError(
-                    f'got AlterObjectProperty command for '
-                    f'invalid field: {metaclass.__name__}.{attr_name}')
-
-            value = self._resolve_attr_value(
-                raw_value, attr_name, field, schema)
-
-            if (isinstance(value, s_expr.Expression)
-                    and not value.is_compiled()):
-                value = self.compile_expr_field(schema, context, field, value)
-
+            value = self.resolve_attribute_value(
+                attr_name,
+                raw_value,
+                schema=schema,
+                context=context,
+            )
             context.cache_value((self, 'attribute', attr_name), value)
+
+        return value
+
+    def resolve_attribute_value(
+        self,
+        attr_name: str,
+        raw_value: Any,
+        *,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> Any:
+        metaclass = self.get_schema_metaclass()
+        field = metaclass.get_field(attr_name)
+        if field is None:
+            raise errors.SchemaDefinitionError(
+                f'got AlterObjectProperty command for '
+                f'invalid field: {metaclass.__name__}.{attr_name}')
+
+        value = self._resolve_attr_value(
+            raw_value, attr_name, field, schema)
+
+        if (isinstance(value, s_expr.Expression)
+                and not value.is_compiled()):
+            value = self.compile_expr_field(schema, context, field, value)
 
         return value
 
@@ -2387,6 +2465,10 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
     # If the command is conditioned with IF NOT EXISTS
     if_not_exists = struct.Field(bool, default=False)
 
+    def is_data_safe(self) -> bool:
+        # Creations are always data-safe.
+        return True
+
     @classmethod
     def command_for_ast_node(
         cls,
@@ -2554,7 +2636,8 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         context: CommandContext,
     ) -> s_schema.Schema:
         for op in self.get_subcommands(include_prerequisites=False):
-            schema = op.apply(schema, context=context)
+            if not isinstance(op, AlterObjectProperty):
+                schema = op.apply(schema, context=context)
         return schema
 
     def _create_finalize(
@@ -2590,7 +2673,24 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         return schema
 
 
-class AlterObjectFragment(ObjectCommand[so.Object_T]):
+class AlterObjectOrFragment(ObjectCommand[so.Object_T]):
+
+    def canonicalize_attributes(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> s_schema.Schema:
+        schema = super().canonicalize_attributes(schema, context)
+        # Hydrate the ALTER fields with original field values,
+        # if not present.
+        for cmd in self.get_subcommands(type=AlterObjectProperty):
+            if cmd.old_value is None:
+                cmd.old_value = self.scls.get_explicit_field_value(
+                    schema, cmd.property, default=None)
+        return schema
+
+
+class AlterObjectFragment(AlterObjectOrFragment[so.Object_T]):
 
     def apply(
         self,
@@ -2659,6 +2759,10 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
     astnode = qlast.Rename
 
     new_name = struct.Field(sn.Name)
+
+    def is_data_safe(self) -> bool:
+        # Renames are always data-safe.
+        return True
 
     def get_friendly_description(
         self,
@@ -2809,7 +2913,8 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
         context: CommandContext,
         scls: so.Object,
     ) -> Command:
-        alter = ref.init_delta_command(schema, AlterObject)
+        root, alter, ctx_stack = ref.init_delta_branch(
+            schema, context, AlterObject)
 
         rename = ref.init_delta_command(
             schema,
@@ -2821,12 +2926,12 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
             value=new_ref_name,
             orig_value=ref_name,
         )
-        with alter.new_context(schema, context, ref):
+        with ctx_stack():
             rename.update(rename._canonicalize(schema, context, ref))
         alter.canonical = True
         alter.add(rename)
 
-        return alter
+        return root
 
     def _canonicalize(
         self,
@@ -2942,7 +3047,7 @@ class RenameQualifiedObject(AlterObjectFragment[so.Object_T]):
         return astnode(new_name=ref)
 
 
-class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
+class AlterObject(AlterObjectOrFragment[so.Object_T], Generic[so.Object_T]):
     _delta_action = 'alter'
 
     #: If True, apply the command only if the object exists.
@@ -3073,6 +3178,9 @@ class AlterObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
 class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
     _delta_action = 'delete'
 
+    #: If True, apply the command only if the object exists.
+    if_exists = struct.Field(bool, default=False)
+
     #: If True, apply the command only if the object has no referrers
     #: in the schema.
     if_unused = struct.Field(bool, default=False)
@@ -3097,6 +3205,11 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
             object_desc=object_desc,
         )
         return f'drop {object_desc}'
+
+    def is_data_safe(self) -> bool:
+        # Deletions are only safe if the entire object class
+        # has been declared as data-safe.
+        return self.get_schema_metaclass()._data_safe
 
     def _delete_begin(
         self,
@@ -3210,7 +3323,14 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         schema: s_schema.Schema,
         context: CommandContext,
     ) -> s_schema.Schema:
-        scls = self.get_object(schema, context)
+        if self.if_exists:
+            scls = self.get_object(schema, context, default=None)
+            if scls is None:
+                context.current().op.discard(self)
+                return schema
+        else:
+            scls = self.get_object(schema, context)
+
         self.scls = scls
 
         with self.new_context(schema, context, scls):
@@ -3352,11 +3472,14 @@ def get_special_field_alter_handler_for_context(
     of an AlterObject operation, and a special handler has been declared.
     """
     this_op = context.current().op
-    if not isinstance(this_op, AlterObject):
-        return None
-    else:
+    if (
+        isinstance(this_op, AlterObjectOrFragment)
+        and not isinstance(this_op, AlterSpecialObjectField)
+    ):
         mcls = this_op.get_schema_metaclass()
         return get_special_field_alter_handler(field, mcls)
+    else:
+        return None
 
 
 class AlterObjectProperty(Command):
@@ -3408,7 +3531,12 @@ class AlterObjectProperty(Command):
         ):
             return Nop()
         else:
-            field = parent_cls.get_field(propname)
+            try:
+                field = parent_cls.get_field(propname)
+            except LookupError:
+                raise errors.SchemaDefinitionError(
+                    f'{propname!r} is not a valid field',
+                    context=astnode.context)
 
         if not (
             astnode.special_syntax
@@ -3474,10 +3602,26 @@ class AlterObjectProperty(Command):
                     schema=schema,
                 )
 
-            elif (isinstance(astnode.value, qlast.Set)
-                    and not astnode.value.elements):
+            elif (
+                isinstance(astnode.value, qlast.Set)
+                and not astnode.value.elements
+            ):
                 # empty set
                 new_value = None
+
+            elif isinstance(astnode.value, qlast.TypeExpr):
+                if not isinstance(parent_op, QualifiedObjectCommand):
+                    raise AssertionError(
+                        'cannot determine module for derived compound type: '
+                        'parent operation is not a QualifiedObjectCommand'
+                    )
+
+                new_value = utils.ast_to_type_shell(
+                    astnode.value,
+                    module=parent_op.classname.module,
+                    modaliases=context.modaliases,
+                    schema=schema,
+                )
 
             else:
                 new_value = qlcompiler.evaluate_ast_to_python_val(
@@ -3490,6 +3634,14 @@ class AlterObjectProperty(Command):
             new_value=new_value,
             source_context=astnode.context,
         )
+
+    def is_data_safe(self) -> bool:
+        # Field alterations on existing schema objects
+        # generally represent semantic changes and are
+        # reversible.  Non-safe field alters are normally
+        # represented by a dedicated subcommand, such as
+        # SetLinkType.
+        return True
 
     def _get_ast(
         self,
@@ -3636,6 +3788,8 @@ class AlterObjectProperty(Command):
                     )
                 )
             )
+        elif isinstance(value, so.ObjectShell):
+            value = utils.shell_to_ast(schema, value)
         else:
             value = utils.const_ast_from_python(value)
 
@@ -3709,9 +3863,16 @@ def compile_ddl(
     if context is None:
         context = CommandContext()
 
-    primary_cmdcls = CommandMeta._astnode_map.get(type(astnode))
+    astnode_type = type(astnode)
+    primary_cmdcls = CommandMeta._astnode_map.get(astnode_type)
     if primary_cmdcls is None:
-        raise LookupError(f'no delta command class for AST node {astnode!r}')
+        for astnode_type_base in astnode_type.__mro__[1:]:
+            primary_cmdcls = CommandMeta._astnode_map.get(astnode_type_base)
+            if primary_cmdcls is not None:
+                break
+        else:
+            raise AssertionError(
+                f'no delta command class for AST node {astnode!r}')
 
     cmdcls = primary_cmdcls.command_for_ast_node(astnode, schema, context)
 

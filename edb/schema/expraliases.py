@@ -42,6 +42,7 @@ class Alias(
     so.QualifiedObject,
     s_anno.AnnotationSubject,
     qlkind=qltypes.SchemaObjectClass.ALIAS,
+    data_safe=True,
 ):
 
     expr = so.SchemaField(
@@ -230,6 +231,7 @@ class AliasCommand(
                 dt = vt.as_colltype_delete_delta(
                     old_schema,
                     expiring_refs={self.scls},
+                    if_exists=True,
                 )
                 derived_delta.prepend(dt)
 

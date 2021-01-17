@@ -19,8 +19,8 @@
 
 import json
 import os.path
-import uuid
 import textwrap
+import uuid
 
 import edgedb
 
@@ -2249,8 +2249,10 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         # Try altering the schema to a state inconsistent with current
         # data.
         with self.assertRaisesRegex(
-                edgedb.MissingRequiredError,
-                r"missing value for required property test::Base.name"):
+            edgedb.MissingRequiredError,
+            r"missing value for required property 'name' "
+            r"of object type 'test::Base'"
+        ):
             await self.migrate("""
                 type Base {
                     required property name -> str;
@@ -2503,12 +2505,11 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
 
         await self.migrate(r"""
             type Base {
-                # change property type (can't preserve value)
-                property foo -> str;
+                property foo -> float64;
             }
 
             type Derived extending Base {
-                overloaded required property foo -> str;
+                overloaded required property foo -> float64;
             }
         """)
 
@@ -2521,7 +2522,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             """,
             [{
                 '__type__': {'name': 'test::Base'},
-                'foo': '6',
+                'foo': 6.0,
             }],
         )
 
@@ -3349,6 +3350,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             }],
         )
 
+    @test.xfail('needs SET TYPE guidance')
     async def test_edgeql_migration_eq_26(self):
         await self.migrate(r"""
             type Child;
@@ -3804,6 +3806,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             ],
         )
 
+    @test.xfail('needs SET TYPE guidance')
     async def test_edgeql_migration_eq_33(self):
         await self.migrate(r"""
             type Child;
@@ -5011,7 +5014,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         # make sure that the old one is gone
         with self.assertRaisesRegex(
                 edgedb.QueryError,
-                r'could not find a function variant hello11'):
+                r'function "hello11\(arg0: std::int64\)" does not exist'):
             await self.con.execute(
                 r"""SELECT hello11(1);"""
             )
@@ -5099,7 +5102,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         # make sure that the other one is gone
         with self.assertRaisesRegex(
                 edgedb.QueryError,
-                r'could not find a function variant hello13'):
+                r'function "hello13\(arg0: std::str\)" does not exist'):
             await self.con.execute(
                 r"""SELECT hello13(' world');"""
             )
@@ -5137,7 +5140,8 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         # make sure that the old one is gone
         with self.assertRaisesRegex(
                 edgedb.QueryError,
-                r'could not find a function variant hello14'):
+                r'function "hello14\(arg0: std::str, arg1: std::str\)" '
+                r'does not exist'):
             await self.assert_query_result(
                 r"""SELECT hello14('hello', '14');""",
                 ['hello14'],
@@ -5176,7 +5180,8 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         # make sure that the old one is gone
         with self.assertRaisesRegex(
                 edgedb.QueryError,
-                r'could not find a function variant hello15'):
+                r'function "hello15\(arg0: std::str, arg1: std::str\)" '
+                r'does not exist'):
             await self.assert_query_result(
                 r"""SELECT hello15('hello', '15');""",
                 ['hello15'],
@@ -5329,7 +5334,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             type Base {
                 link foo -> Child {
                     # change the link property type
-                    property bar -> str
+                    property bar -> int32
                 }
             };
         """)
@@ -5340,7 +5345,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                     foo: { @bar }
                 };
             """,
-            [{'foo': {'@bar': '3'}}],
+            [{'foo': {'@bar': 3}}],
         )
 
     @test.xfail('''
@@ -6530,7 +6535,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         await self.migrate(r"""
             type Base {
                 # change the indexed property type
-                property name -> str;
+                property name -> int32;
                 index on (.name);
             }
         """)
@@ -6791,13 +6796,13 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
 
         await self.migrate(r"""
             type Base {
-                property foo -> array<float32>;
+                property foo -> array<float64>;
             }
         """)
 
         await self.assert_query_result(
             r"""SELECT Base.foo;""",
-            [[1, 2]],
+            [[1.0, 2.0]],
         )
 
     @test.xfail('''
@@ -7607,6 +7612,302 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 'confidence': 1.0,
             },
         })
+
+    async def test_edgeql_migration_data_safety_01(self):
+        await self.start_migration('''
+            type Obj1;
+        ''')
+        await self.fast_forward_describe_migration()
+
+        await self.start_migration('''
+            type Obj1;
+            type Obj2;
+        ''')
+
+        # Creations are safe
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text':
+                        'CREATE TYPE test::Obj2;'
+                }],
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        await self.start_migration('''
+            type Obj1;
+        ''')
+
+        # Deletions are NOT safe
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': 'DROP TYPE test::Obj2;'
+                }],
+                'data_safe': False,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        # Renames are safe
+        await self.start_migration('''
+            type Obj11;
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': 'ALTER TYPE test::Obj1 RENAME TO test::Obj11;'
+                }],
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        # Again, creations are safe.
+        await self.start_migration('''
+            type Obj11 {
+                property name -> str {
+                    constraint exclusive;
+                }
+            }
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': """
+                        ALTER TYPE test::Obj11 {
+                            CREATE PROPERTY name -> std::str {
+                                CREATE CONSTRAINT std::exclusive;
+                            };
+                        };
+                    """,
+                }],
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        await self.start_migration('''
+            type Obj11 {
+                property name -> str;
+            }
+        ''')
+
+        # Dropping constraints is safe.
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': """
+                        ALTER TYPE test::Obj11 {
+                            ALTER PROPERTY name {
+                                DROP CONSTRAINT std::exclusive;
+                            };
+                        };
+                    """,
+                }],
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        await self.start_migration('''
+            type Obj11 {
+                property name -> str {
+                    annotation title := 'name';
+                }
+            }
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': """
+                        ALTER TYPE test::Obj11 {
+                            ALTER PROPERTY name {
+                                CREATE ANNOTATION std::title := 'name';
+                            };
+                        };
+                    """,
+                }],
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        # Dropping annotations is fine also.
+        await self.start_migration('''
+            type Obj11 {
+                property name -> str;
+            }
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': """
+                        ALTER TYPE test::Obj11 {
+                            ALTER PROPERTY name {
+                                DROP ANNOTATION std::title;
+                            };
+                        };
+                    """,
+                }],
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        await self.start_migration('''
+            scalar type foo extending str;
+            type Obj11 {
+                property name -> str;
+            }
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': "CREATE SCALAR TYPE test::foo EXTENDING std::str;",
+                }],
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        # Dropping scalar types is fine also.
+        await self.start_migration('''
+            type Obj11 {
+                property name -> str;
+            }
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': "DROP SCALAR TYPE test::foo;",
+                }],
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        await self.start_migration('''
+            type Obj11 {
+                property name -> str;
+                index on (.name);
+            }
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': """
+                        ALTER TYPE test::Obj11 {
+                            CREATE INDEX ON (.name);
+                        };
+                    """,
+                }],
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        # Dropping indexes is fine also.
+        await self.start_migration('''
+            type Obj11 {
+                property name -> str;
+            }
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': """
+                        ALTER TYPE test::Obj11 {
+                            DROP INDEX ON (.name);
+                        };
+                    """,
+                }],
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        # Changing single to multi is fine.
+        await self.start_migration('''
+            type Obj11 {
+                multi property name -> str;
+            }
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': """
+                        ALTER TYPE test::Obj11 {
+                            ALTER PROPERTY name {
+                                SET MULTI;
+                            };
+                        };
+                    """,
+                }],
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        # But changing multi to single is NOT
+        await self.start_migration('''
+            type Obj11 {
+                single property name -> str;
+            }
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'statements': [{
+                    'text': """
+                        ALTER TYPE test::Obj11 {
+                            ALTER PROPERTY name {
+                                SET SINGLE;
+                            };
+                        };
+                    """,
+                }],
+                'data_safe': False,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
 
 
 class TestEdgeQLDataMigrationNonisolated(tb.DDLTestCase):

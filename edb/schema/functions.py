@@ -339,6 +339,7 @@ class Parameter(
     so.ObjectFragment,
     ParameterLike,
     qlkind=ft.SchemaObjectClass.PARAMETER,
+    data_safe=True,
 ):
 
     num = so.SchemaField(
@@ -702,6 +703,9 @@ class CallableLike:
     def get_return_typemod(self, schema: s_schema.Schema) -> ft.TypeModifier:
         raise NotImplementedError
 
+    def get_signature_as_str(self, schema: s_schema.Schema) -> str:
+        raise NotImplementedError
+
     def get_verbosename(self, schema: s_schema.Schema) -> str:
         raise NotImplementedError
 
@@ -1062,6 +1066,48 @@ class CreateCallableObject(
         props['params'] = params
         return props
 
+    def _skip_param(self, props: Dict[str, Any]) -> bool:
+        return False
+
+    def _get_params_ast(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        node: qlast.DDLOperation,
+    ) -> List[Tuple[int, qlast.FuncParam]]:
+        params: List[Tuple[int, qlast.FuncParam]] = []
+        for op in self.get_subcommands(type=ParameterCommand):
+            props = op.get_resolved_attributes(schema, context)
+            if self._skip_param(props):
+                continue
+
+            num: int = props['num']
+            default = props.get('default')
+            param = qlast.FuncParam(
+                name=Parameter.paramname_from_fullname(props['name']),
+                type=utils.typeref_to_ast(schema, props['type']),
+                typemod=props['typemod'],
+                kind=props['kind'],
+                default=default.qlast if default is not None else None,
+            )
+            params.append((num, param))
+
+        params.sort(key=lambda e: e[0])
+
+        return params
+
+        node.params = [p[1] for p in params]
+
+    def _apply_fields_ast(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        node: qlast.DDLOperation,
+    ) -> None:
+        super()._apply_fields_ast(schema, context, node)
+        params = self._get_params_ast(schema, context, node)
+        node.params = [p[1] for p in params]
+
 
 class DeleteCallableObject(
     CallableCommand[CallableObjectT],
@@ -1104,8 +1150,13 @@ class DeleteCallableObject(
         return cmd
 
 
-class Function(CallableObject, VolatilitySubject, s_abc.Function,
-               qlkind=ft.SchemaObjectClass.FUNCTION):
+class Function(
+    CallableObject,
+    VolatilitySubject,
+    s_abc.Function,
+    qlkind=ft.SchemaObjectClass.FUNCTION,
+    data_safe=True,
+):
 
     # A backend_name that is shared between all overloads of the same
     # function, to make them independent from the actual name.
@@ -1150,15 +1201,21 @@ class Function(CallableObject, VolatilitySubject, s_abc.Function,
         return bool(self.get_language(schema) is qlast.Language.EdgeQL and
                     self.get_params(schema).find_named_only(schema))
 
+    def get_signature_as_str(
+        self,
+        schema: s_schema.Schema,
+    ) -> str:
+        params = self.get_params(schema)
+        sn = self.get_shortname(schema)
+        return f"{sn}{params.as_str(schema)}"
+
     def get_verbosename(
         self,
         schema: s_schema.Schema,
         *,
         with_parent: bool=False,
     ) -> str:
-        params = self.get_params(schema)
-        sn = self.get_shortname(schema)
-        return f"function '{sn}{params.as_str(schema)}'"
+        return f"function '{self.get_signature_as_str(schema)}'"
 
     def get_dummy_body(self, schema: s_schema.Schema) -> expr.Expression:
         """Return a minimal function body that satisfies its return type."""
@@ -1490,8 +1547,7 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
                     f'cannot create `{signature}` function: '
                     f'overloading another function with different '
                     f'named only parameters: '
-                    f'"{func.get_shortname(schema)}'
-                    f'{func_params.as_str(schema)}"',
+                    f'"{func.get_signature_as_str(schema)}"',
                     context=self.source_context)
 
             if ((has_polymorphic or func_params.has_polymorphic(schema)) and (
@@ -1635,32 +1691,6 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
                 )
 
         return cmd
-
-    def _apply_fields_ast(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        node: qlast.DDLOperation,
-    ) -> None:
-        super()._apply_fields_ast(schema, context, node)
-
-        params = []
-        for op in self.get_subcommands(type=ParameterCommand):
-            props = op.get_resolved_attributes(schema, context)
-            num: int = props['num']
-            default = props.get('default')
-            param = qlast.FuncParam(
-                name=Parameter.paramname_from_fullname(props['name']),
-                type=utils.typeref_to_ast(schema, props['type']),
-                typemod=props['typemod'],
-                kind=props['kind'],
-                default=default.qlast if default is not None else None,
-            )
-            params.append((num, param))
-
-        params.sort(key=lambda e: e[0])
-
-        node.params = [p[1] for p in params]
 
     def _apply_field_ast(
         self,

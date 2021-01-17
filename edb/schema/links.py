@@ -101,8 +101,13 @@ def merge_actions(
         return ours
 
 
-class Link(sources.Source, pointers.Pointer, s_abc.Link,
-           qlkind=qltypes.SchemaObjectClass.LINK):
+class Link(
+    sources.Source,
+    pointers.Pointer,
+    s_abc.Link,
+    qlkind=qltypes.SchemaObjectClass.LINK,
+    data_safe=False,
+):
 
     on_target_delete = so.SchemaField(
         LinkTargetDeleteAction,
@@ -195,19 +200,6 @@ class LinkCommand(
     context_class=LinkCommandContext,
     referrer_context_class=LinkSourceCommandContext,
 ):
-
-    def _set_pointer_type(
-        self,
-        schema: s_schema.Schema,
-        astnode: qlast.CreateConcretePointer,
-        context: sd.CommandContext,
-        target_ref: Union[so.Object, so.ObjectShell, pointers.ComputableRef],
-    ) -> None:
-        assert astnode.target is not None
-        slt = SetLinkType(classname=self.classname, type=target_ref)
-        slt.set_attribute_value(
-            'target', target_ref, source_context=astnode.target.context)
-        self.add(slt)
 
     def _append_subcmd_ast(
         self,
@@ -354,9 +346,38 @@ class CreateLink(
                         node.target = utils.typeref_to_ast(schema, t)
             else:
                 assert isinstance(op.new_value, (so.Object, so.ObjectShell))
+                top_op = self.get_top_referrer_op(context)
+                conv_expr: Optional[qlast.Expr]
+                if (
+                    top_op is not None
+                    and (
+                        isinstance(top_op, sd.CreateObject)
+                        or (
+                            top_op.orig_cmd_type is not None
+                            and issubclass(
+                                top_op.orig_cmd_type, sd.CreateObject)
+                        )
+                    )
+                ):
+                    # This op is part of CREATE TYPE, so avoid tripping up
+                    # the DDL check on SET TYPE by generating an appropriate
+                    # conversion expression: USING (.foo[IS Type]).
+                    lname = sn.shortname_from_fullname(self.classname).name
+                    conv_expr = qlast.Path(
+                        partial=True,
+                        steps=[
+                            qlast.Ptr(ptr=qlast.ObjectRef(name=lname)),
+                            qlast.TypeIntersection(
+                                type=utils.typeref_to_ast(schema, op.new_value)
+                            )
+                        ],
+                    )
+                else:
+                    conv_expr = None
                 node.commands.append(
-                    qlast.SetLinkType(
-                        type=utils.typeref_to_ast(schema, op.new_value)
+                    qlast.SetPointerType(
+                        value=utils.typeref_to_ast(schema, op.new_value),
+                        expr=conv_expr,
                     )
                 )
         elif op.property == 'on_target_delete':
@@ -461,29 +482,14 @@ class RebaseLink(
     LinkCommand,
     referencing.RebaseReferencedInheritingObject[Link],
 ):
-    def apply(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext
-    ) -> s_schema.Schema:
-        schema = super().apply(schema, context)
-
-        if not context.canonical:
-            new_target = self.get_attribute_value('target')
-            if new_target:
-                slt = SetLinkType(classname=self.classname, type=new_target)
-                schema = slt.apply(schema, context)
-                self.add(slt)
-
-        return schema
+    pass
 
 
 class SetLinkType(
     pointers.SetPointerType[Link],
     referrer_context_class=LinkSourceCommandContext,
+    field='target',
 ):
-
-    astnode = qlast.SetLinkType
 
     def _alter_begin(
         self,
@@ -497,16 +503,12 @@ class SetLinkType(
 
         if not context.canonical:
             # We need to update the target link prop as well
-            s_name = sn.get_specialized_name(
-                sn.QualName('__', 'target'), str(self.classname))
-            tgt_prop_name = sn.QualName(
-                name=s_name, module=self.classname.module)
-            tgt_prop = lproperties.AlterProperty(
-                classname=tgt_prop_name,
-                metaclass=lproperties.Property
-            )
-            tgt_prop.set_attribute_value('target', new_target)
-            self.add(tgt_prop)
+            tgt_prop = scls.getptr(schema, 'target')
+            assert tgt_prop is not None
+            tgt_prop_alter = tgt_prop.init_delta_command(
+                schema, sd.AlterObject)
+            tgt_prop_alter.set_attribute_value('target', new_target)
+            self.add(tgt_prop_alter)
 
         return schema
 
@@ -586,13 +588,11 @@ class AlterLink(
                     )
                     target_ref = pointers.ComputableRef(expr)
 
-                    slt = SetLinkType(classname=cmd.classname, type=target_ref)
-                    slt.set_attribute_value(
+                    cmd.set_attribute_value(
                         'target',
                         target_ref,
                         source_context=expr.context,
                     )
-                    cmd.add(slt)
                     cmd.discard_attribute('expr')
 
         assert isinstance(cmd, referencing.AlterReferencedInheritingObject)
@@ -609,7 +609,7 @@ class AlterLink(
             if op.new_value:
                 assert isinstance(op.new_value, so.ObjectShell)
                 node.commands.append(
-                    qlast.SetLinkType(
+                    qlast.SetPointerType(
                         type=utils.typeref_to_ast(schema, op.new_value),
                     ),
                 )

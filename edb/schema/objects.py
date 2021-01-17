@@ -548,12 +548,17 @@ class ObjectMeta(type):
     #: indirectly.
     _objref_fields: FrozenSet[SchemaField[Any]]
     _reducible_fields: FrozenSet[SchemaField[Any]]
+    _aux_cmd_data_fields: FrozenSet[SchemaField[Any]]  # if f.aux_cmd_data
     _refdicts: collections.OrderedDict[str, RefDict]
     _refdicts_by_refclass: Dict[type, RefDict]
     _refdicts_by_field: Dict[str, RefDict]  # key is rd.attr
     _ql_class: Optional[qltypes.SchemaObjectClass]
     _reflection_method: ReflectionMethod
     _reflection_link: Optional[str]
+    #: Indicates that ALL changes to this object class are safe from the
+    #: standpoint of persistent data.  In other words, changes to the
+    #: object are fully reversible without possible data loss.
+    _data_safe: bool
 
     def __new__(
         mcls,
@@ -564,6 +569,7 @@ class ObjectMeta(type):
         qlkind: Optional[qltypes.SchemaObjectClass] = None,
         reflection: ReflectionMethod = ReflectionMethod.REGULAR,
         reflection_link: Optional[str] = None,
+        data_safe: bool = False,
     ) -> ObjectMeta:
         refdicts: collections.OrderedDict[str, RefDict]
 
@@ -613,6 +619,7 @@ class ObjectMeta(type):
                     for k, d in parent.get_own_refdicts().items()
                 })
 
+        cls._data_safe = data_safe
         cls._fields = fields
         cls._schema_fields = {
             fn: f for fn, f in fields.items()
@@ -622,6 +629,10 @@ class ObjectMeta(type):
             f for f in cls._schema_fields.values()
             if f.hashable
         }
+        cls._aux_cmd_data_fields = frozenset(
+            f for f in cls._schema_fields.values()
+            if f.aux_cmd_data
+        )
         cls._sorted_fields = collections.OrderedDict(
             sorted(fields.items(), key=lambda e: e[0]))
         cls._objref_fields = frozenset(
@@ -773,6 +784,9 @@ class ObjectMeta(type):
 
     def get_reducible_fields(cls) -> FrozenSet[SchemaField[Any]]:
         return cls._reducible_fields
+
+    def get_aux_cmd_data_fields(cls) -> FrozenSet[SchemaField[Any]]:
+        return cls._aux_cmd_data_fields
 
     def has_field(cls, name: str) -> bool:
         return name in cls._fields
@@ -1185,6 +1199,10 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
             val = self.get_explicit_field_value(schema, fn, default=None)
             if val is None:
                 continue
+            elif isinstance(val, collections.abc.MutableSequence):
+                # Turn the list into something hashable so it can be
+                # put in a set.
+                val = tuple(val)
             sig.append((fn, val))
 
         return frozenset(sig)
@@ -1442,8 +1460,9 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
     ) -> sd.ObjectCommand_T:
         from . import delta as sd
 
-        return sd.get_object_delta_command(
-            objtype=type(self),
+        cls = type(self)
+        cmd = sd.get_object_delta_command(
+            objtype=cls,
             cmdtype=cmdtype,
             schema=schema,
             name=classname or self.get_name(schema),
@@ -1451,27 +1470,60 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
             **kwargs,
         )
 
+        for field in cls.get_aux_cmd_data_fields():
+            cmd.set_object_aux_data(
+                field.name,
+                self.get_field_value(schema, field.name),
+            )
+
+        return cmd
+
     def init_parent_delta_branch(
         self: Object_T,
         schema: s_schema.Schema,
+        context: sd.CommandContext,
         *,
         referrer: Optional[Object] = None,
-    ) -> Tuple[sd.DeltaRoot, sd.Command]:
+    ) -> Tuple[sd.CommandGroup, sd.Command, sd.ContextStack]:
+        """Prepare a parent portion of a command tree for this object.
+
+        This returns a tuple containing:
+
+        - the root (as a ``CommandGroup``) of a nested ``AlterObject`` tree
+          with nodes for each enclosing referrer object;
+        - direct reference to the innermost command in the above tree
+          (may be root if there are no referring objects);
+        - a ``ContextStack`` instance representing the nested CommandContext
+          corresponding to the returned command tree.
+        """
         from . import delta as sd
-        root = sd.DeltaRoot()
-        return root, root
+        root = sd.CommandGroup()
+        return root, root, sd.ContextStack(())
 
     def init_delta_branch(
         self: Object_T,
         schema: s_schema.Schema,
+        context: sd.CommandContext,
         cmdtype: Type[sd.ObjectCommand_T],
         *,
         classname: Optional[sn.Name] = None,
         referrer: Optional[Object] = None,
         **kwargs: Any,
-    ) -> Tuple[sd.DeltaRoot, sd.ObjectCommand_T]:
-        root_cmd, parent_cmd = self.init_parent_delta_branch(
+    ) -> Tuple[sd.CommandGroup, sd.ObjectCommand_T, sd.ContextStack]:
+        """Make a command subtree for this object.
+
+        This returns a tuple containing:
+
+        - the root (as a ``CommandGroup``) of a nested ``AlterObject`` tree
+          with nodes for each enclosing referrer object and an instance of
+          *cmdtype* as the innermost command;
+        - direct reference to the innermost command in the above tree;
+        - a ``ContextStack`` instance representing the nested CommandContext
+          corresponding to the returned command tree.
+        """
+        root_cmd, parent_cmd, ctx_stack = self.init_parent_delta_branch(
             schema=schema,
+            context=context,
             referrer=referrer,
         )
 
@@ -1481,9 +1533,11 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
             classname=classname,
             **kwargs,
         )
-        parent_cmd.add(self_cmd)
+        self_cmd.scls = self
 
-        return root_cmd, self_cmd
+        parent_cmd.add(self_cmd)
+        ctx_stack.push(self_cmd.new_context(schema, context, self))
+        return root_cmd, self_cmd, ctx_stack
 
     def as_create_delta(
         self: Object_T,

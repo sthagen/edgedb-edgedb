@@ -2795,6 +2795,21 @@ aa';
         SELECT count(1, $a := 1);
         """
 
+    def test_edgeql_syntax_function_09(self):
+        """
+        SELECT bar(User.name,);
+        SELECT baz(User.name, User.age,);
+        SELECT str_lower(string := User.name,);
+        SELECT baz(age := User.age, of := User.name, `select` := 1,);
+
+% OK %
+
+        SELECT bar(User.name);
+        SELECT baz(User.name, User.age);
+        SELECT str_lower(string := User.name);
+        SELECT baz(age := User.age, of := User.name, `select` := 1);
+        """
+
     def test_edgeql_syntax_tuple_01(self):
         """
         SELECT ('foo', 42).0;
@@ -3676,6 +3691,68 @@ aa';
             std::int64 USING SQL FUNCTION 'aaa';
         """
 
+    def test_edgeql_syntax_ddl_function_49(self):
+        """
+        CREATE FUNCTION std::strlen(string: std::str,) -> std::int64
+            USING SQL FUNCTION 'strlen';
+
+% OK %
+
+        CREATE FUNCTION std::strlen(string: std::str) -> std::int64
+            USING SQL FUNCTION 'strlen';
+        """
+
+    def test_edgeql_syntax_ddl_function_50(self):
+        """
+        CREATE FUNCTION std::strlen(string: std::str = '1',)
+            -> std::int64
+            USING SQL FUNCTION 'strlen';
+
+% OK %
+
+        CREATE FUNCTION std::strlen(string: std::str = '1')
+            -> std::int64
+            USING SQL FUNCTION 'strlen';
+        """
+
+    def test_edgeql_syntax_ddl_function_51(self):
+        """
+        CREATE FUNCTION std::strlen(
+            a: std::str = '1',
+            VARIADIC b: std::str,
+        ) -> std::int64
+            USING SQL FUNCTION 'strlen';
+
+% OK %
+
+        CREATE FUNCTION std::strlen(
+            a: std::str = '1',
+            VARIADIC b: std::str
+        ) -> std::int64
+            USING SQL FUNCTION 'strlen';
+        """
+
+    def test_edgeql_syntax_ddl_function_52(self):
+        """
+        CREATE FUNCTION foo(
+            a: OPTIONAL std::str,
+            NAMED ONLY b: OPTIONAL std::str,
+            NAMED ONLY c: OPTIONAL std::str = '1',
+            NAMED ONLY d: OPTIONAL std::str,
+        ) ->
+            std::int64 USING SQL FUNCTION 'aaa';
+
+% OK %
+
+        CREATE FUNCTION foo(
+            a: OPTIONAL std::str,
+            NAMED ONLY b: OPTIONAL std::str,
+            NAMED ONLY c: OPTIONAL std::str = '1',
+            NAMED ONLY d: OPTIONAL std::str
+        ) ->
+            std::int64 USING SQL FUNCTION 'aaa';
+        """
+
     def test_edgeql_syntax_ddl_operator_01(self):
         """
         CREATE INFIX OPERATOR
@@ -3715,6 +3792,66 @@ aa';
             SET commutator := 'std::<';
             SET negator := 'std::<=';
             USING SQL OPERATOR '>(float8,float8)';
+        };
+        """
+
+    def test_edgeql_syntax_ddl_operator_05(self):
+        """
+        CREATE ABSTRACT INFIX OPERATOR
+        std::`>=` (l: anytype, r: anytype) -> std::bool;
+        """
+
+    def test_edgeql_syntax_ddl_cast_01(self):
+        """
+        CREATE CAST FROM std::str TO std::bool {
+            SET volatility := 'IMMUTABLE';
+            USING SQL FUNCTION 'edgedb.str_to_bool';
+        };
+        """
+
+    def test_edgeql_syntax_ddl_cast_02(self):
+        """
+        CREATE CAST FROM std::bool TO std::str {
+            SET volatility := 'IMMUTABLE';
+            USING SQL CAST;
+        };
+        """
+
+    def test_edgeql_syntax_ddl_cast_03(self):
+        """
+        CREATE CAST FROM std::json TO std::bigint {
+            SET volatility := 'STABLE';
+            USING SQL $$
+            SELECT edgedb.str_to_bigint(
+                edgedb.jsonb_extract_scalar(val, 'number')
+            );
+            $$;
+        };
+        """
+
+    def test_edgeql_syntax_ddl_cast_04(self):
+        """
+        CREATE CAST FROM std::int32 TO std::int64 {
+            SET volatility := 'IMMUTABLE';
+            USING SQL CAST;
+            ALLOW IMPLICIT;
+        };
+        """
+
+    def test_edgeql_syntax_ddl_cast_05(self):
+        """
+        CREATE CAST FROM std::int64 TO std::int16 {
+            SET volatility := 'IMMUTABLE';
+            USING SQL CAST;
+            ALLOW ASSIGNMENT;
+        };
+        """
+
+    def test_edgeql_syntax_ddl_cast_06(self):
+        """
+        CREATE CAST FROM std::BaseObject TO std::json {
+            SET volatility := 'IMMUTABLE';
+            USING SQL EXPRESSION;
         };
         """
 

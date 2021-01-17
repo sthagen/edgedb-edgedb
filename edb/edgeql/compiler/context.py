@@ -171,6 +171,11 @@ class Environment:
         qltypes.Volatility]
     """A dictionary of expressions and their inferred volatility."""
 
+    inferred_multiplicity: Dict[
+        irast.Base,
+        qltypes.Multiplicity]
+    """A dictionary of expressions and their inferred multiplicity."""
+
     view_shapes: Dict[
         Union[s_types.Type, s_pointers.PointerLike],
         List[Tuple[s_pointers.Pointer, qlast.ShapeOp]]
@@ -212,15 +217,21 @@ class Environment:
     functions) that appear in a function body.
     """
 
+    #: A list of bindings that should be assumed to be singletons.
+    singletons: List[irast.PathId]
+
     def __init__(
         self,
         *,
         schema: s_schema.Schema,
-        path_scope: irast.ScopeTreeNode,
-        options: Optional[GlobalCompilerOptions]=None,
+        path_scope: Optional[irast.ScopeTreeNode] = None,
+        options: Optional[GlobalCompilerOptions] = None,
     ) -> None:
         if options is None:
             options = GlobalCompilerOptions()
+
+        if path_scope is None:
+            path_scope = irast.new_scope_tree()
 
         self.options = options
         self.schema = schema
@@ -232,6 +243,7 @@ class Environment:
         self.type_origins = {}
         self.inferred_types = {}
         self.inferred_volatility = {}
+        self.inferred_multiplicity = {}
         self.view_shapes = collections.defaultdict(list)
         self.view_shapes_metadata = collections.defaultdict(
             irast.ViewShapeMetadata)
@@ -243,6 +255,7 @@ class Environment:
         self.dml_exprs = []
         self.pointer_derivation_map = collections.defaultdict(list)
         self.pointer_specified_info = {}
+        self.singletons = []
 
     def add_schema_ref(
             self, sobj: s_obj.Object, expr: Optional[qlast.Base]) -> None:

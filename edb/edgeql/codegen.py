@@ -1090,6 +1090,12 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                     self.write(' (')
                     self.visit(node.value)
                     self.write(')')
+            elif node.name == 'target':
+                if node.value is None:
+                    self._write_keywords('RESET', 'TYPE')
+                else:
+                    self._write_keywords('SET', 'TYPE ')
+                    self.visit(node.value)
             else:
                 keywords = self._process_special_set(node)
                 self.write(*keywords, delimiter=' ')
@@ -1107,7 +1113,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
 
     def _eval_bool_expr(
         self,
-        expr: qlast.Expr,
+        expr: Union[qlast.Expr, qlast.TypeExpr],
     ) -> bool:
         if not isinstance(expr, qlast.BooleanConstant):
             raise AssertionError(f'expected BooleanConstant, got {expr!r}')
@@ -1115,7 +1121,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
 
     def _eval_enum_expr(
         self,
-        expr: qlast.Expr,
+        expr: Union[qlast.Expr, qlast.TypeExpr],
         enum_type: Type[Enum_T],
     ) -> Enum_T:
         if not isinstance(expr, qlast.StringConstant):
@@ -1409,7 +1415,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
 
             type_cmd = None
             for cmd in node.commands:
-                if isinstance(cmd, qlast.SetPropertyType):
+                if isinstance(cmd, qlast.SetPointerType):
                     ignored_cmds.add(cmd)
                     type_cmd = cmd
                     break
@@ -1417,7 +1423,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             def after_name() -> None:
                 if type_cmd is not None:
                     self.write(' -> ')
-                    self.visit(type_cmd.type)
+                    self.visit(type_cmd.value)
 
         keywords.append('PROPERTY')
         self._visit_AlterObject(
@@ -1505,7 +1511,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             type_cmd = None
             inherit_cmd = None
             for cmd in node.commands:
-                if isinstance(cmd, qlast.SetLinkType):
+                if isinstance(cmd, qlast.SetPointerType):
                     ignored_cmds.add(cmd)
                     type_cmd = cmd
                 elif isinstance(cmd, qlast.AlterAddInherit):
@@ -1517,7 +1523,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                     self._ddl_visit_bases(inherit_cmd)
                 if type_cmd is not None:
                     self.write(' -> ')
-                    self.visit(type_cmd.type)
+                    self.visit(type_cmd.value)
         else:
             after_name = None
 
@@ -1529,13 +1535,13 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
     def visit_DropConcreteLink(self, node: qlast.DropConcreteLink) -> None:
         self._visit_DropObject(node, 'LINK', unqualified=True)
 
-    def visit_SetPropertyType(self, node: qlast.SetPropertyType) -> None:
+    def visit_SetPointerType(self, node: qlast.SetPointerType) -> None:
         self.write('SET TYPE ')
-        self.visit(node.type)
-
-    def visit_SetLinkType(self, node: qlast.SetLinkType) -> None:
-        self.write('SET TYPE ')
-        self.visit(node.type)
+        self.visit(node.value)
+        if node.cast_expr is not None:
+            self.write(' USING (')
+            self.visit(node.cast_expr)
+            self.write(')')
 
     def visit_OnTargetDelete(self, node: qlast.OnTargetDelete) -> None:
         self._write_keywords('ON TARGET DELETE ', node.cascade.to_edgeql())
@@ -1598,6 +1604,9 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             self.write(node.returning_typemod.to_edgeql(), ' ')
             self.visit(node.returning)
 
+            if node.is_abstract:
+                return
+
             if node.commands:
                 self.write(' {')
                 self._block_ws(1)
@@ -1616,30 +1625,34 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 op_str = op
                 if types:
                     op_str += f'({",".join(types)})'
-                self.write(f'{op_str!r}')
+                self.write(f'{op_str!r}', ';')
             elif node.code.from_expr:
                 from_clause = f'USING {node.code.language} EXPRESSION'
                 if self.sdlmode:
                     from_clause = from_clause.lower()
-                self.write(from_clause)
+                self.write(from_clause, ';')
             else:
                 from_clause = f'USING {node.code.language} '
                 if self.sdlmode:
                     from_clause = from_clause.lower()
                 self.write(from_clause)
                 if node.code.code:
-                    self.write(edgeql_quote.dollar_quote_literal(
-                        node.code.code))
+                    self.write(
+                        edgeql_quote.dollar_quote_literal(
+                            node.code.code),
+                        ';'
+                    )
 
             self._block_ws(-1)
             if node.commands:
-                self.write(';')
                 self.write('}')
 
+        op_type = []
+        if node.is_abstract:
+            op_type.append('ABSTRACT')
         if node.kind:
-            op_type = [node.kind.upper(), 'OPERATOR']
-        else:
-            op_type = ['OPERATOR']
+            op_type.append(node.kind.upper())
+        op_type.append('OPERATOR')
 
         self._visit_CreateObject(node, *op_type, after_name=after_name,
                                  render_commands=False)
@@ -1727,6 +1740,60 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         if node.default:
             self.write(' = ')
             self.visit(node.default)
+
+    def visit_CreateCast(self, node: qlast.CreateCast) -> None:
+        def after_name() -> None:
+            self.write(' ')
+            self.visit(node.from_type)
+            if self.sdlmode:
+                self.write(' to ')
+            else:
+                self.write(' TO ')
+            self.visit(node.to_type)
+
+            self.write(' {')
+            self._block_ws(1)
+
+            if node.commands:
+                commands = self._ddl_clean_up_commands(node.commands)
+                self.visit_list(commands, terminator=';')
+                self.new_lines = 1
+
+            from_clause = f'USING {node.code.language} '
+            code = ''
+
+            if node.code.from_function:
+                from_clause += 'FUNCTION'
+                code = f'{node.code.from_function!r}'
+            elif node.code.from_cast:
+                from_clause += 'CAST'
+            elif node.code.from_expr:
+                from_clause += 'EXPRESSION'
+            elif node.code.code:
+                code = edgeql_quote.dollar_quote_literal(node.code.code)
+
+            if self.sdlmode:
+                from_clause = from_clause.lower()
+            self.write(from_clause)
+            if code:
+                self.write(' ', code)
+            self.write(';')
+            self.new_lines = 1
+
+            if node.allow_assignment:
+                self.write('ALLOW ASSIGNMENT;')
+                self.new_lines = 1
+            if node.allow_implicit:
+                self.write('ALLOW IMPLICIT;')
+                self.new_lines = 1
+
+            self._block_ws(-1)
+            self.write('}')
+
+        self._visit_CreateObject(
+            node, 'CAST', 'FROM',
+            named=False, after_name=after_name, render_commands=False
+        )
 
     def visit_ConfigSet(self, node: qlast.ConfigSet) -> None:
         self.write('CONFIGURE ')
