@@ -229,13 +229,14 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         ancestors = set(self.scls.get_ancestors(schema).objects(schema))
         for base in bases.objects(schema) + (self.scls,):
             base_refs: so.ObjectIndexBase[
-                s_referencing.ReferencedInheritingObject
+                sn.Name,
+                s_referencing.ReferencedInheritingObject,
             ] = base.get_field_value(schema, attr)
 
             for k, v in base_refs.items(schema):
-                if v.get_is_final(schema):
+                if v.get_final(schema):
                     continue
-                if base == self.scls and not v.get_is_owned(schema):
+                if base == self.scls and not v.get_owned(schema):
                     continue
 
                 mcls = type(v)
@@ -295,7 +296,7 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         local_refs = self.scls.get_field_value(schema, refdict.attr)
         dropped_refs: Dict[sn.Name, Type[sd.ObjectCommand[so.Object]]] = {}
         for k, v in local_refs.items(schema):
-            if not v.get_is_owned(schema):
+            if not v.get_owned(schema):
                 mcls = type(v)
                 create_cmd = sd.get_object_command_class_or_die(
                     sd.CreateObject, mcls)
@@ -369,7 +370,7 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
             obj_op = self
 
         for refalter in obj_op.get_subcommands(metaclass=refdict.ref_cls):
-            if refalter.get_attribute_value('is_owned'):
+            if refalter.get_attribute_value('owned'):
                 assert isinstance(refalter, sd.QualifiedObjectCommand)
                 refnames.add(refalter.classname)
 
@@ -379,7 +380,12 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
 
         for create_cmd, astnode, bases in refs.values():
             cmd = create_cmd.as_inherited_ref_cmd(
-                schema, context, astnode, bases)
+                schema=schema,
+                context=context,
+                astnode=astnode,
+                bases=bases,
+                referrer=scls,
+            )
 
             obj = schema.get(cmd.classname, default=None)
             if obj is None:
@@ -508,7 +514,7 @@ class InheritingObjectCommand(sd.ObjectCommand[so.InheritingObjectT]):
         astnode: Type[qlast.DDLOperation],
     ) -> Optional[str]:
         if (
-            field in {'is_abstract', 'is_final'}
+            field in {'abstract', 'final'}
             and issubclass(astnode, qlast.CreateObject)
         ):
             return field
@@ -731,8 +737,8 @@ class CreateInheritingObject(
         if bases is not None:
             cmd.set_attribute_value('bases', bases)
 
-        if getattr(astnode, 'is_final', False):
-            cmd.set_attribute_value('is_final', True)
+        if getattr(astnode, 'final', False):
+            cmd.set_attribute_value('final', True)
 
         return cmd
 
@@ -757,7 +763,9 @@ class CreateInheritingObject(
                     node.commands.append(
                         qlast.AlterAddInherit(
                             bases=[
-                                utils.name_to_ast_ref(b)
+                                qlast.TypeName(
+                                    maintype=utils.name_to_ast_ref(b),
+                                )
                                 for b in explicit_bases
                             ],
                         )
@@ -810,9 +818,14 @@ class CreateInheritingObject(
         refs = self.get_inherited_ref_layout(schema, context, refdict)
         group = sd.CommandGroup()
 
-        for create_cmd, astnode, parents in refs.values():
+        for create_cmd, astnode, bases in refs.values():
             cmd = create_cmd.as_inherited_ref_cmd(
-                schema, context, astnode, parents)
+                schema=schema,
+                context=context,
+                astnode=astnode,
+                bases=bases,
+                referrer=scls,
+            )
 
             cmd.set_attribute_value(refdict.backref_attr, scls)
 
@@ -945,8 +958,8 @@ class AlterInheritingObject(
 
                 cmd.add(rebase_cmd)
 
-        if getattr(astnode, 'is_final', False):
-            cmd.set_attribute_value('is_final', True)
+        if getattr(astnode, 'final', False):
+            cmd.set_attribute_value('final', True)
 
         return cmd
 

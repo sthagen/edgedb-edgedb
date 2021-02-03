@@ -250,11 +250,11 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         # Change it back.
         await self.con.execute("""
             ALTER TYPE test::Object6 {
-                ALTER LINK a SET SINGLE;
+                ALTER LINK a SET SINGLE USING (SELECT .a LIMIT 1);
             };
 
             ALTER TYPE test::Object6 {
-                ALTER PROPERTY b SET SINGLE;
+                ALTER PROPERTY b SET SINGLE USING (SELECT .b LIMIT 1);
             };
         """)
 
@@ -901,16 +901,16 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                           FILTER .name = 'test::User')
                 SELECT
                     C {
-                        pointers: { @is_owned }
+                        pointers: { @owned }
                         FILTER .name IN {'name', 'desc'}
                     };
             """,
             [
                 {
                     'pointers': [{
-                        '@is_owned': False,
+                        '@owned': False,
                     }, {
-                        '@is_owned': False,
+                        '@owned': False,
                     }],
                 },
             ],
@@ -930,16 +930,16 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                           FILTER .name = 'test::User')
                 SELECT
                     C {
-                        pointers: { @is_owned }
+                        pointers: { @owned }
                         FILTER .name IN {'name', 'desc'}
                     };
             """,
             [
                 {
                     'pointers': [{
-                        '@is_owned': True,
+                        '@owned': True,
                     }, {
-                        '@is_owned': True,
+                        '@owned': True,
                     }],
                 },
             ],
@@ -967,7 +967,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 SELECT
                     C {
                         pointers: {
-                            @is_owned,
+                            @owned,
                             required,
                             constraints: {
                                 name,
@@ -979,13 +979,13 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             [
                 {
                     'pointers': [{
-                        '@is_owned': True,
+                        '@owned': True,
                         'required': True,
                         'constraints': [{
                             'name': 'std::exclusive',
                         }],
                     }, {
-                        '@is_owned': True,
+                        '@owned': True,
                         'required': True,
                         'constraints': [{
                             'name': 'std::exclusive',
@@ -1011,7 +1011,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 SELECT
                     C {
                         pointers: {
-                            @is_owned,
+                            @owned,
                             required,
                             constraints: {
                                 name,
@@ -1023,11 +1023,11 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             [
                 {
                     'pointers': [{
-                        '@is_owned': False,
+                        '@owned': False,
                         'required': False,
                         'constraints': [],
                     }, {
-                        '@is_owned': False,
+                        '@owned': False,
                         'required': False,
                         'constraints': [],
                     }],
@@ -1083,7 +1083,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 SELECT
                     C {
                         links: {
-                            @is_owned,
+                            @owned,
                             required,
                             properties: {
                                 name,
@@ -1095,7 +1095,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             [
                 {
                     'links': [{
-                        '@is_owned': False,
+                        '@owned': False,
                         'required': False,
                         'properties': [{"name": "source"}, {"name": "target"}],
                     }],
@@ -1111,11 +1111,11 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 SELECT
                     C {
                         links: {
-                            @is_owned,
+                            @owned,
                             required,
                             properties: {
                                 name,
-                                @is_owned,
+                                @owned,
                                 constraints: {
                                     name,
                                 }
@@ -1127,11 +1127,11 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             [
                 {
                     'links': [{
-                        '@is_owned': True,
+                        '@owned': True,
                         'required': True,
                         'properties': [{
                             'name': 'foo',
-                            '@is_owned': True,
+                            '@owned': True,
                             'constraints': [{
                                 'name': 'std::exclusive',
                             }]
@@ -1160,7 +1160,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 SELECT
                     C {
                         properties: {
-                            @is_owned,
+                            @owned,
                             required,
                             inherited_fields,
                         }
@@ -1170,7 +1170,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             [
                 {
                     'properties': [{
-                        '@is_owned': True,
+                        '@owned': True,
                         'required': True,
                         'inherited_fields': {
                             'cardinality',
@@ -1195,7 +1195,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 SELECT
                     C {
                         properties: {
-                            @is_owned,
+                            @owned,
                             required,
                             inherited_fields,
                         }
@@ -1205,7 +1205,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             [
                 {
                     'properties': [{
-                        '@is_owned': True,
+                        '@owned': True,
                         'required': True,
                         'inherited_fields': [],
                     }],
@@ -1913,9 +1913,10 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         ''')
 
         with self.assertRaisesRegex(
-                edgedb.SchemaError,
-                "cannot redefine link 'foo' of object type 'test::Derived' "
-                "as object type 'test::B'"):
+            edgedb.SchemaError,
+            "inherited link 'foo' of object type 'test::Derived' has a "
+            "type conflict"
+        ):
             await self.con.execute('''
                 CREATE TYPE Derived EXTENDING Base0, Base1;
             ''')
@@ -1937,9 +1938,10 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         ''')
 
         with self.assertRaisesRegex(
-                edgedb.SchemaError,
-                "cannot redefine link 'foo' of object type 'test::Derived' "
-                "as object type 'test::C'"):
+            edgedb.SchemaError,
+            "inherited link 'foo' of object type 'test::Derived' "
+            "has a type conflict"
+        ):
             await self.con.execute('''
                 CREATE TYPE Derived EXTENDING Base0, Base1;
             ''')
@@ -2046,8 +2048,8 @@ class TestEdgeQLDDL(tb.DDLTestCase):
     async def test_edgeql_ddl_link_target_alter_02(self):
         with self.assertRaisesRegex(
             edgedb.SchemaError,
-            "cannot redefine property 'foo' of object type 'test::Child' "
-            "as scalar type 'std::int16'",
+            "inherited property 'foo' of object type 'test::Child'"
+            " has a type conflict",
         ):
             await self.con.execute("""
                 CREATE TYPE test::Parent01 {
@@ -2604,6 +2606,282 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             await self.con.execute("""
                 WITH MODULE test
                 ALTER TYPE Foo ALTER LINK l SET TYPE Spam USING (SELECT Spam)
+            """)
+
+    async def test_edgeql_ddl_ptr_set_cardinality_validation(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+            CREATE TYPE Bar;
+            CREATE TYPE Egg;
+            CREATE TYPE Foo {
+                CREATE MULTI PROPERTY p -> str;
+                CREATE MULTI LINK l -> Bar {
+                    CREATE PROPERTY lp -> str;
+                };
+            };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaError,
+            r"cannot automatically convert property 'p' of object type"
+            r" 'test::Foo' to 'single' cardinality"
+        ):
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER PROPERTY p SET SINGLE;
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaError,
+            r"result of USING clause for the alteration of"
+            r" property 'p' of object type 'test::Foo' cannot be cast"
+            r" automatically from scalar type 'std::float64' to scalar"
+            r" type 'std::int64'"
+        ):
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER PROPERTY p
+                    SET TYPE int64 USING (<float64>.p)
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaError,
+            r"possibly more than one element returned by the USING clause for"
+            r" the alteration of property 'p' of object type 'test::Foo',"
+            r" while a singleton is expected"
+        ):
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER PROPERTY p SET SINGLE USING ({1, 2})
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaError,
+            r"cannot automatically convert link 'l' of object type"
+            r" 'test::Foo' to 'single' cardinality"
+        ):
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER LINK l SET SINGLE;
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaError,
+            r"result of USING clause for the alteration of"
+            r" link 'l' of object type 'test::Foo' cannot be cast"
+            r" automatically from object type 'test::Egg'"
+            r" to object type 'test::Bar'"
+        ):
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER LINK l
+                    SET SINGLE USING (SELECT Egg LIMIT 1);
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaError,
+            r"possibly more than one element returned by the USING clause for"
+            r" the alteration of link 'l' of object type 'test::Foo', while"
+            r" a singleton is expected"
+        ):
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER LINK l SET SINGLE USING (SELECT Bar)
+            """)
+
+    async def test_edgeql_ddl_ptr_set_required_01(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Bar {
+                CREATE PROPERTY name -> str {
+                    CREATE CONSTRAINT std::exclusive;
+                }
+            };
+
+            CREATE TYPE Foo {
+                CREATE PROPERTY p -> str;
+                CREATE PROPERTY p2 -> str;
+                CREATE MULTI PROPERTY m_p -> str;
+
+                CREATE LINK l -> Bar {
+                    CREATE PROPERTY lp -> str;
+                };
+                CREATE MULTI LINK m_l -> Bar {
+                    CREATE PROPERTY lp -> str;
+                };
+            };
+
+            INSERT Bar {name := 'bar1'};
+            INSERT Bar {name := 'bar2'};
+
+            WITH
+                bar := (SELECT Bar FILTER .name = 'bar1' LIMIT 1),
+                bars := (SELECT Bar),
+            INSERT Foo {
+                p := '1',
+                p2 := '1',
+                m_p := {'1', '2'},
+
+                l := bar { @lp := '1' },
+                m_l := (
+                    FOR bar IN {enumerate(bars)}
+                    UNION (SELECT bar.1 { @lp := <str>(bar.0 + 1) })
+                ),
+            };
+
+            INSERT Foo {
+                p2 := '3',
+            };
+        """)
+
+        async with self._run_and_rollback():
+            await self.con.execute("""
+                ALTER TYPE Foo ALTER PROPERTY p {
+                    SET REQUIRED USING ('3')
+                }
+            """)
+
+            await self.assert_query_result(
+                'SELECT Foo { p } ORDER BY .p',
+                [
+                    {'p': '1'},
+                    {'p': '3'},
+                ],
+            )
+
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER PROPERTY m_p {
+                    SET REQUIRED USING ('3')
+                }
+            """)
+
+            await self.assert_query_result(
+                'SELECT Foo { m_p } ORDER BY .p',
+                [
+                    {'m_p': {'1', '2'}},
+                    {'m_p': {'3'}},
+                ],
+            )
+
+        # A reference to another property of the same host type.
+        async with self._run_and_rollback():
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER PROPERTY p {
+                    SET REQUIRED USING (.p2)
+                }
+            """)
+
+            await self.assert_query_result(
+                'SELECT Foo { p } ORDER BY .p',
+                [
+                    {'p': '1'},
+                    {'p': '3'},
+                ],
+            )
+
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER PROPERTY m_p {
+                    SET REQUIRED USING (.p2)
+                }
+            """)
+
+            await self.assert_query_result(
+                'SELECT Foo { m_p } ORDER BY .p',
+                [
+                    {'m_p': {'1', '2'}},
+                    {'m_p': {'3'}},
+                ],
+            )
+
+        # ... should fail if empty set is produced by the USING clause
+        async with self.assertRaisesRegexTx(
+            edgedb.MissingRequiredError,
+            r"missing value for required property 'p'"
+            r" of object type 'test::Foo'"
+        ):
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER PROPERTY p {
+                    SET REQUIRED USING (<str>{})
+                }
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.MissingRequiredError,
+            r"missing value for required property 'm_p'"
+            r" of object type 'test::Foo'"
+        ):
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER PROPERTY m_p {
+                    SET REQUIRED USING (
+                        <str>{} IF True ELSE .p2
+                    )
+                }
+            """)
+
+        # And now see about the links.
+        async with self._run_and_rollback():
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER LINK l {
+                    SET REQUIRED USING (SELECT Bar FILTER .name = 'bar2')
+                }
+            """)
+
+            await self.assert_query_result(
+                'SELECT Foo { l: {name} } ORDER BY .p EMPTY LAST',
+                [
+                    {'l': {'name': 'bar1'}},
+                    {'l': {'name': 'bar2'}},
+                ],
+            )
+
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER LINK m_l {
+                    SET REQUIRED USING (SELECT Bar FILTER .name = 'bar2')
+                }
+            """)
+
+            await self.assert_query_result(
+                '''
+                SELECT Foo { m_l: {name} ORDER BY .name }
+                ORDER BY .p EMPTY LAST
+                ''',
+                [
+                    {'m_l': [{'name': 'bar1'}, {'name': 'bar2'}]},
+                    {'m_l': [{'name': 'bar2'}]},
+                ],
+            )
+
+        # Check that minimum cardinality constraint is enforced on links too...
+        async with self.assertRaisesRegexTx(
+            edgedb.MissingRequiredError,
+            r"missing value for required link 'l'"
+            r" of object type 'test::Foo'"
+        ):
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER LINK l {
+                    SET REQUIRED USING (SELECT Bar FILTER false LIMIT 1)
+                }
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.MissingRequiredError,
+            r"missing value for required link 'm_l'"
+            r" of object type 'test::Foo'"
+        ):
+            await self.con.execute("""
+                WITH MODULE test
+                ALTER TYPE Foo ALTER LINK m_l {
+                    SET REQUIRED USING (SELECT Bar FILTER false LIMIT 1)
+                }
             """)
 
     async def test_edgeql_ddl_link_property_01(self):
@@ -4323,7 +4601,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                     WITH MODULE schema
                     SELECT Operator {
                         name,
-                        is_abstract,
+                        abstract,
                     }
                     FILTER
                         .name = 'test::>'
@@ -4331,7 +4609,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 [
                     {
                         'name': 'test::>',
-                        'is_abstract': True,
+                        'abstract': True,
                     },
                 ]
             )
@@ -5818,13 +6096,13 @@ type test::Foo {
             r"""
                 SELECT sys::Role {
                     name,
-                    is_superuser,
+                    superuser,
                     password,
                 } FILTER .name = 'foo_01'
             """,
             [{
                 'name': 'foo_01',
-                'is_superuser': False,
+                'superuser': False,
                 'password': None,
             }]
         )
@@ -5840,12 +6118,12 @@ type test::Foo {
             r"""
                 SELECT sys::Role {
                     name,
-                    is_superuser,
+                    superuser,
                 } FILTER .name = 'foo2'
             """,
             [{
                 'name': 'foo2',
-                'is_superuser': True,
+                'superuser': True,
             }]
         )
 
@@ -5884,7 +6162,7 @@ type test::Foo {
             r"""
                 SELECT sys::Role {
                     name,
-                    is_superuser,
+                    superuser,
                     password,
                     member_of: {
                         name
@@ -5893,7 +6171,7 @@ type test::Foo {
             """,
             [{
                 'name': 'foo4',
-                'is_superuser': False,
+                'superuser': False,
                 'password': None,
                 'member_of': [{
                     'name': 'foo3'
@@ -6300,12 +6578,6 @@ type test::Foo {
             DROP ABSTRACT LINK test::abs_link;
         """)
 
-    @test.xfail('''
-        Fails with the below on "CREATE ALIAS Alias2":
-
-        edb.errors.InvalidReferenceError: schema item
-        'test::__test|Alias1@@w~1__user2' does not exist
-    ''')
     async def test_edgeql_ddl_alias_01(self):
         # Issue #1184
         await self.con.execute(r"""
@@ -6324,16 +6596,40 @@ type test::Foo {
             };
 
             CREATE ALIAS Alias2 := Alias1;
+
+            INSERT Award { user := (INSERT User { name := 'Corvo' }) };
         """)
 
-        # TODO: Add an actual INSERT/SELECT test.
+        await self.assert_query_result(
+            r'''
+                SELECT Alias1 {
+                    user2: {
+                        name2
+                    }
+                }
+            ''',
+            [{
+                'user2': {
+                    'name2': 'Corvo!',
+                },
+            }],
+        )
 
-    @test.xfail('''
-        Fails with the below on "CREATE ALIAS Alias2":
+        await self.assert_query_result(
+            r'''
+                SELECT Alias2 {
+                    user2: {
+                        name2
+                    }
+                }
+            ''',
+            [{
+                'user2': {
+                    'name2': 'Corvo!',
+                },
+            }],
+        )
 
-        edgedb.errors.SchemaError: ObjectType 'test::test|User@@view~1'
-        is already present in the schema <Schema gen:4121 at 0x109f222d0>
-    ''')
     async def test_edgeql_ddl_alias_02(self):
         # Issue #1184
         await self.con.execute(r"""
@@ -6352,9 +6648,40 @@ type test::Foo {
             };
 
             CREATE ALIAS Alias2 := Alias1;
+
+            INSERT User { name := 'Corvo' };
+            INSERT Award { name := 'Rune' };
         """)
 
-        # TODO: Add an actual INSERT/SELECT test.
+        await self.assert_query_result(
+            r'''
+                SELECT Alias1 {
+                    a_user: {
+                        name
+                    }
+                }
+            ''',
+            [{
+                'a_user': {
+                    'name': 'Corvo',
+                },
+            }],
+        )
+
+        await self.assert_query_result(
+            r'''
+                SELECT Alias2 {
+                    a_user: {
+                        name
+                    }
+                }
+            ''',
+            [{
+                'a_user': {
+                    'name': 'Corvo',
+                },
+            }],
+        )
 
     async def test_edgeql_ddl_alias_03(self):
         await self.con.execute(r"""
@@ -6462,15 +6789,6 @@ type test::Foo {
             }]
         )
 
-    @test.xfail('''
-        See test_edgeql_ddl_alias_08 first.
-
-        Fails to create "BT06Alias3":
-
-        edgedb.errors.SchemaError: ObjectType
-        'test::test|BT06Alias1@@w~1' is already present in the
-        schema <Schema gen:3431 at 0x7fe1a7b69880>
-    ''')
     async def test_edgeql_ddl_alias_06(self):
         # Issue #1184
         await self.con.execute(r"""
@@ -6478,6 +6796,14 @@ type test::Foo {
 
             CREATE TYPE BaseType06 {
                 CREATE PROPERTY name -> str;
+            };
+
+            INSERT BaseType06 {
+                name := 'bt06',
+            };
+
+            INSERT BaseType06 {
+                name := 'bt06_1',
             };
 
             CREATE ALIAS BT06Alias1 := BaseType06 {
@@ -6493,7 +6819,46 @@ type test::Foo {
             };
         """)
 
-        # TODO: Add an actual INSERT/SELECT test.
+        await self.assert_query_result(
+            r'''
+                SELECT BT06Alias1 {name, a} FILTER .name = 'bt06';
+            ''',
+            [{
+                'name': 'bt06',
+                'a': 'bt06_a',
+            }],
+        )
+
+        await self.assert_query_result(
+            r'''
+                SELECT BT06Alias2 {name, a, b} FILTER .name = 'bt06';
+            ''',
+            [{
+                'name': 'bt06',
+                'a': 'bt06_a',
+                'b': 'bt06_a_b',
+            }],
+        )
+
+        await self.assert_query_result(
+            r'''
+                SELECT BT06Alias3 {
+                    name,
+                    b: {name, a} ORDER BY .name
+                }
+                FILTER .name = 'bt06';
+            ''',
+            [{
+                'name': 'bt06',
+                'b': [{
+                    'name': 'bt06',
+                    'a': 'bt06_a',
+                }, {
+                    'name': 'bt06_1',
+                    'a': 'bt06_1_a',
+                }],
+            }],
+        )
 
     async def test_edgeql_ddl_alias_07(self):
         # Issue #1187
@@ -6507,53 +6872,57 @@ type test::Foo {
                 CREATE ALIAS IllegalAlias07 := Object {a := IllegalAlias07};
             """)
 
-    @test.xfail('''
-        Fails to create "BT06Alias3":
-
-        edgedb.errors.SchemaError: ObjectType
-        'test::test|BT06Alias1@@w~1' is already present in the
-        schema <Schema gen:3431 at 0x7fe1a7b69880>
-
-        This is actually causing the same issue as test_edgeql_ddl_alias_06,
-        but it means that the implicit aliases don't get cleaned up.
-
-        This means that this should be fixed first before it gets
-        masked by the fix to the other bug.
-    ''')
     async def test_edgeql_ddl_alias_08(self):
         # Issue #1184
         await self.con.execute(r"""
             SET MODULE test;
 
-            CREATE TYPE BaseType06 {
+            CREATE TYPE BaseType08 {
                 CREATE PROPERTY name -> str;
             };
 
-            CREATE ALIAS BT06Alias1 := BaseType06 {
+            INSERT BaseType08 {
+                name := 'bt08',
+            };
+
+            CREATE ALIAS BT08Alias1 := BaseType08 {
                 a := .name ++ '_a'
             };
 
-            CREATE ALIAS BT06Alias2 := BT06Alias1 {
+            CREATE ALIAS BT08Alias2 := BT08Alias1 {
                 b := .a ++ '_b'
             };
 
             # drop the freshly created alias
-            DROP ALIAS BT06Alias2;
+            DROP ALIAS BT08Alias2;
 
             # re-create the alias that was just dropped
-            CREATE ALIAS BT06Alias2 := BT06Alias1 {
-                b := .a ++ '_b'
+            CREATE ALIAS BT08Alias2 := BT08Alias1 {
+                b := .a ++ '_bb'
             };
         """)
 
-        # TODO: Add an actual INSERT/SELECT test.
+        await self.assert_query_result(
+            r'''
+                SELECT BT08Alias1 {name, a} FILTER .name = 'bt08';
+            ''',
+            [{
+                'name': 'bt08',
+                'a': 'bt08_a',
+            }],
+        )
 
-    @test.xfail('''
-       ISE: relation "<blah>" does not exist
+        await self.assert_query_result(
+            r'''
+                SELECT BT08Alias2 {name, a, b} FILTER .name = 'bt08';
+            ''',
+            [{
+                'name': 'bt08',
+                'a': 'bt08_a',
+                'b': 'bt08_a_bb',
+            }],
+        )
 
-       (Is the bug that we fail to create the table or that we don't
-        reject an alias being used there?)
-    ''')
     async def test_edgeql_ddl_alias_09(self):
         await self.con.execute(r"""
             CREATE ALIAS test::CreateAlias09 := (
@@ -6563,11 +6932,16 @@ type test::Foo {
             );
         """)
 
-        await self.con.execute(r"""
-            CREATE TYPE test::AliasType09 {
-                CREATE OPTIONAL SINGLE LINK a -> test::CreateAlias09;
-            }
-        """)
+        async with self.assertRaisesRegexTx(
+            edgedb.InvalidLinkTargetError,
+            "invalid link type: 'test::CreateAlias09' is an expression alias,"
+            " not a proper object type",
+        ):
+            await self.con.execute(r"""
+                CREATE TYPE test::AliasType09 {
+                    CREATE OPTIONAL SINGLE LINK a -> test::CreateAlias09;
+                }
+            """)
 
     async def test_edgeql_ddl_inheritance_alter_01(self):
         await self.con.execute(r"""
@@ -6942,6 +7316,19 @@ type test::Foo {
                         ON (len(__subject__));
         """)
 
+    async def test_edgeql_ddl_constraint_12(self):
+        with self.assertRaisesRegex(
+                edgedb.errors.SchemaError,
+                r'Constraint .+ is already present in the schema'):
+            await self.con.execute(r"""
+                CREATE TYPE Base {
+                    CREATE PROPERTY firstname -> str {
+                        CREATE CONSTRAINT max_len_value(10);
+                        CREATE CONSTRAINT max_len_value(10);
+                    }
+                }
+            """)
+
     async def test_edgeql_ddl_constraint_alter_01(self):
         await self.con.execute(r"""
             CREATE TYPE test::ConTest01 {
@@ -7185,6 +7572,26 @@ type test::Foo {
                 }]
             }]
         )
+
+    async def test_edgeql_ddl_constraint_alter_05(self):
+        await self.con.execute(r"""
+            CREATE TYPE Base {
+                CREATE PROPERTY firstname -> str {
+                    CREATE CONSTRAINT max_len_value(10);
+                }
+            }
+        """)
+
+        with self.assertRaisesRegex(
+                edgedb.errors.SchemaError,
+                r'Constraint .+ is already present in the schema'):
+            await self.con.execute(r"""
+                ALTER TYPE Base {
+                    ALTER PROPERTY firstname {
+                        CREATE CONSTRAINT max_len_value(10);
+                    }
+                }
+            """)
 
     async def test_edgeql_ddl_drop_inherited_link(self):
         await self.con.execute(r"""

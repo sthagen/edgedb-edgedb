@@ -124,7 +124,7 @@ class OperatorCommand(
         field: str,
         astnode: Type[qlast.DDLOperation],
     ) -> Optional[str]:
-        if field == 'is_abstract':
+        if field == 'abstract':
             return field
         elif field == 'operator_kind':
             return 'kind'
@@ -360,7 +360,7 @@ class CreateOperator(
         elif op.property == 'from_operator' and new_value:
             if node.code is None:
                 node.code = qlast.OperatorCode()
-            node.code.from_operator = new_value
+            node.code.from_operator = tuple(new_value)
 
         else:
             super()._apply_field_ast(schema, context, node, op)

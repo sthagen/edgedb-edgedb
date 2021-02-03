@@ -41,6 +41,8 @@ from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
 from edb.edgeql import parser as qlparser
 
+from edb.common.ast import visitor as ast_visitor
+
 from . import astutils
 from . import context
 from . import dispatch
@@ -133,15 +135,11 @@ def fini_expression(
                 ctx=inf_ctx,
             )
 
-    # Strip weak namespaces
-    for ir_set in ctx.env.set_types:
-        if ir_set.path_id.namespace:
-            ir_set.path_id = ir_set.path_id.strip_weak_namespaces()
+    # Fix up weak namespaces
+    _rewrite_weak_namespaces(ir, ctx)
 
     if ctx.path_scope is not None:
-        for node in ctx.path_scope.path_descendants:
-            if node.path_id.namespace:
-                node.path_id = node.path_id.strip_weak_namespaces()
+        ctx.path_scope.validate_unique_ids()
 
     if isinstance(ir, irast.Command):
         if isinstance(ir, irast.ConfigCommand):
@@ -167,7 +165,7 @@ def fini_expression(
                 _elide_derived_ancestors(vptr, ctx=ctx)
                 ctx.env.schema = vptr.set_field_value(
                     ctx.env.schema,
-                    'is_from_alias',
+                    'from_alias',
                     True,
                 )
 
@@ -184,18 +182,15 @@ def fini_expression(
                             'std::BaseObject', type=s_types.Type),
                     )
 
-                if not hasattr(vptr, 'get_pointers'):
+                if not isinstance(vptr, s_sources.Source):
                     continue
-                # type ignore below, because we check above if vptr has
-                # a get_pointers attribute
-                vptr_own_pointers = vptr.get_pointers(  # type: ignore
-                    ctx.env.schema
-                )
+
+                vptr_own_pointers = vptr.get_pointers(ctx.env.schema)
                 for vlprop in vptr_own_pointers.objects(ctx.env.schema):
                     _elide_derived_ancestors(vlprop, ctx=ctx)
                     ctx.env.schema = vlprop.set_field_value(
                         ctx.env.schema,
-                        'is_from_alias',
+                        'from_alias',
                         True,
                     )
 
@@ -250,6 +245,101 @@ def fini_expression(
         type_rewrites={s.typeref.id: s for s in ctx.type_rewrites.values()},
     )
     return result
+
+
+class FindPathScopes(ast_visitor.NodeVisitor):
+    """Visitor to find the enclosing path scope id of sub expressions.
+
+    Sets inherit an effective scope id from enclosing expressions,
+    and this visitor computes those.
+    """
+    def __init__(self, check: bool) -> None:
+        super().__init__()
+        self.path_scope_ids: List[Optional[int]] = [None]
+
+    def visit_Stmt(self, stmt: irast.Stmt) -> Optional[int]:
+        # Sometimes there is sharing, so we want the official scope
+        # for a node to be based on its appearance in the result,
+        # not in a subquery.
+        # I think it might not actually matter, though.
+        self.visit(stmt.bindings)
+        if stmt.iterator_stmt:
+            self.visit(stmt.iterator_stmt)
+        if isinstance(stmt, irast.MutatingStmt):
+            self.visit(stmt.subject)
+        self.visit(stmt.result)
+
+        self.generic_visit(stmt)
+        return None
+
+    def visit_Set(self, node: irast.Set) -> Optional[int]:
+        val = self.path_scope_ids[-1]
+        if node.path_scope_id:
+            self.path_scope_ids.append(node.path_scope_id)
+        if not node.is_binding:
+            val = self.path_scope_ids[-1]
+
+        # Visit sub-trees
+        self.generic_visit(node)
+
+        if node.path_scope_id:
+            self.path_scope_ids.pop()
+
+        return val
+
+
+def _try_namespace_fix(
+    scope: irast.ScopeTreeNode,
+    obj: Union[irast.ScopeTreeNode, irast.Set],
+) -> None:
+    if obj.path_id is None:
+        return
+    for prefix in obj.path_id.iter_prefixes():
+        replacement = scope.find_visible(prefix)
+        if (
+            replacement and replacement.path_id
+            and replacement.path_id != prefix
+        ):
+            new = obj.path_id.replace_prefix(prefix, replacement.path_id)
+            obj.path_id = new
+            break
+
+
+def _rewrite_weak_namespaces(
+    ir: irast.Base, ctx: context.ContextLevel
+) -> None:
+    """Rewrite weak namespaces in path ids to be usable by the backend.
+
+    Weak namespaces in path ids in the frontend are "relative", and
+    their interpretation depends on the current scope tree node and
+    the namespaces on the parent nodes. The IR->pgsql compiler does
+    not do this sort of interpretation, and needs path IDs that are
+    "absolute".
+
+    To accomplish this, we go through all the path ids and rewrite
+    them: using the scope tree, we try to find the binding of the path
+    ID (using a prefix if necessary) and drop all namespace parts that
+    don't appear in the binding.
+    """
+
+    if ctx.path_scope is None:
+        return None
+
+    tree = ctx.path_scope
+
+    for node in tree.strict_descendants:
+        _try_namespace_fix(node, node)
+
+    visitor = FindPathScopes(ctx.env.options.apply_query_rewrites)
+    visitor.visit(ir)
+
+    for ir_set in ctx.env.set_types:
+        path_scope_id: Optional[int] = visitor.memo.get(ir_set)
+        if path_scope_id is not None:
+            # Some entries in set_types are from compiling views
+            # in temporary scopes, so we need to just skip those.
+            if scope := tree.find_by_unique_id(path_scope_id):
+                _try_namespace_fix(scope, ir_set)
 
 
 def _elide_derived_ancestors(
@@ -387,6 +477,7 @@ def declare_view(
     expr: qlast.Expr,
     alias: s_name.Name,
     *,
+    factoring_fence: bool=False,
     fully_detached: bool=False,
     must_be_used: bool=False,
     path_id_namespace: Optional[FrozenSet[str]]=None,
@@ -395,7 +486,8 @@ def declare_view(
 
     pinned_pid_ns = path_id_namespace
 
-    with ctx.newscope(temporary=True, fenced=True) as subctx:
+    with ctx.newscope(fenced=True) as subctx:
+        subctx.path_scope.factoring_fence = factoring_fence
         if path_id_namespace is not None:
             subctx.path_id_namespace = path_id_namespace
 
@@ -423,13 +515,20 @@ def declare_view(
                 basename = s_name.QualName(
                     module='__derived__', name=alias.name)
 
-            view_name = s_name.QualName(
-                module=ctx.derived_target_module or '__derived__',
-                name=s_name.get_specialized_name(
-                    basename,
-                    ctx.aliases.get('w')
+            if (
+                isinstance(alias, s_name.QualName)
+                and subctx.env.options.schema_view_mode
+            ):
+                view_name = basename
+                subctx.recompiling_schema_alias = True
+            else:
+                view_name = s_name.QualName(
+                    module=ctx.derived_target_module or '__derived__',
+                    name=s_name.get_specialized_name(
+                        basename,
+                        ctx.aliases.get('w')
+                    )
                 )
-            )
 
         subctx.toplevel_result_view_name = view_name
 
@@ -481,7 +580,8 @@ def declare_view_from_schema(
 
         vc = subctx.aliased_views[viewcls_name]
         assert vc is not None
-        ctx.env.schema_view_cache[viewcls] = vc
+        if not ctx.in_temp_scope:
+            ctx.env.schema_view_cache[viewcls] = vc
         ctx.source_map.update(subctx.source_map)
         ctx.aliased_views[viewcls_name] = subctx.aliased_views[viewcls_name]
         ctx.view_nodes[vc.get_name(ctx.env.schema)] = vc

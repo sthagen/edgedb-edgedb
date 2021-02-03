@@ -604,6 +604,7 @@ def semi_join(
         ctx: context.CompilerContextLevel) -> pgast.PathRangeVar:
     """Join an IR Set using semi-join."""
     rptr = ir_set.rptr
+    assert rptr is not None
 
     # Target set range.
     set_rvar = new_root_rvar(ir_set, ctx=ctx)
@@ -646,7 +647,8 @@ def ensure_bond_for_expr(
         # ObjectTypes have inherent identity
         return
 
-    ensure_transient_identity_for_set(ir_set, stmt, type=type, ctx=ctx)
+    ensure_transient_identity_for_path(
+        ir_set.path_id, stmt, type=type, ctx=ctx)
 
 
 def apply_volatility_ref(
@@ -664,8 +666,8 @@ def apply_volatility_ref(
         )
 
 
-def ensure_transient_identity_for_set(
-        ir_set: irast.Set, stmt: pgast.BaseRelation, *,
+def ensure_transient_identity_for_path(
+        path_id: irast.PathId, stmt: pgast.BaseRelation, *,
         ctx: context.CompilerContextLevel, type: str='int') -> None:
 
     if type == 'uuid':
@@ -680,9 +682,9 @@ def ensure_transient_identity_for_set(
             over=pgast.WindowDef()
         )
 
-    pathctx.put_path_identity_var(stmt, ir_set.path_id,
+    pathctx.put_path_identity_var(stmt, path_id,
                                   id_expr, force=True, env=ctx.env)
-    pathctx.put_path_bond(stmt, ir_set.path_id)
+    pathctx.put_path_bond(stmt, path_id)
 
     if isinstance(stmt, pgast.SelectStmt):
         apply_volatility_ref(stmt, ctx=ctx)
@@ -837,6 +839,8 @@ def range_for_material_objtype(
             include_rvar(sctx.rel, cte_rvar, rewrite.path_id, ctx=sctx)
             rvar = rvar_for_rel(sctx.rel, typeref=typeref, ctx=sctx)
     else:
+        assert isinstance(typeref.name_hint, sn.QualName)
+
         table_schema_name, table_name = common.get_objtype_backend_name(
             typeref.id,
             typeref.name_hint.module,
@@ -924,7 +928,8 @@ def range_for_material_objtype(
                 set_ops = []
             set_ops.append((op, qry2))
 
-        rvar = range_from_queryset(set_ops, typeref.name_hint, ctx=ctx)
+        rvar = range_from_queryset(
+            set_ops, typeref.name_hint, path_id=path_id, ctx=ctx)
 
     return rvar
 
@@ -1019,29 +1024,69 @@ def range_for_typeref(
     return rvar
 
 
+def wrap_set_op_query(
+    qry: pgast.SelectStmt, *,
+    ctx: context.CompilerContextLevel
+) -> pgast.SelectStmt:
+    if astutils.is_set_op_query(qry):
+        rvar = rvar_for_rel(qry, ctx=ctx)
+        qry = pgast.SelectStmt(from_clause=[rvar])
+        pull_path_namespace(target=qry, source=rvar, ctx=ctx)
+    return qry
+
+
+def anti_join(
+    lhs: pgast.SelectStmt, rhs: pgast.SelectStmt,
+    path_id: Optional[irast.PathId], *,
+    ctx: context.CompilerContextLevel,
+) -> None:
+    """Filter elements out of the LHS that appear on the RHS"""
+
+    if path_id:
+        # grab the identity from the LHS and do an
+        # anti-join against the RHS.
+        src_ref = pathctx.get_path_identity_var(
+            lhs, path_id=path_id, env=ctx.env)
+        pathctx.get_path_identity_output(
+            rhs, path_id=path_id, env=ctx.env)
+        cond_expr: pgast.BaseExpr = astutils.new_binop(
+            src_ref, rhs, 'NOT IN')
+    else:
+        # No path we care about. Just check existance.
+        cond_expr = pgast.SubLink(
+            type=pgast.SubLinkType.NOT_EXISTS, expr=rhs)
+    lhs.where_clause = astutils.extend_binop(
+        lhs.where_clause, cond_expr)
+
+
 def range_from_queryset(
-        set_ops: Sequence[Tuple[str, pgast.SelectStmt]],
-        objname: sn.QualName, *,
-        ctx: context.CompilerContextLevel) -> pgast.PathRangeVar:
+    set_ops: Sequence[Tuple[str, pgast.SelectStmt]],
+    objname: sn.Name,
+    *,
+    path_id: Optional[irast.PathId]=None,
+    ctx: context.CompilerContextLevel,
+) -> pgast.PathRangeVar:
 
     rvar: pgast.PathRangeVar
 
     if len(set_ops) > 1:
         # More than one class table, generate a UNION/EXCEPT clause.
-        qry = pgast.SelectStmt(
-            all=True,
-            larg=set_ops[0][1]
-        )
+        qry = set_ops[0][1]
 
         for op, rarg in set_ops[1:]:
-            qry.op, qry.rarg = op, rarg
-            qry = pgast.SelectStmt(
-                all=True,
-                larg=qry
-            )
+            if op == 'filter':
+                qry = wrap_set_op_query(qry, ctx=ctx)
+                anti_join(qry, rarg, path_id, ctx=ctx)
+            else:
+                qry = pgast.SelectStmt(
+                    op=op,
+                    all=True,
+                    larg=qry,
+                    rarg=rarg,
+                )
 
         rvar = pgast.RangeSubselect(
-            subquery=qry.larg,
+            subquery=qry,
             alias=pgast.Alias(
                 aliasname=ctx.env.aliases.get(objname.name),
             )
@@ -1233,6 +1278,25 @@ def rvar_for_rel(
     return rvar
 
 
+def _add_type_rel_overlay(
+        typeid: uuid.UUID,
+        op: str,
+        rel: Union[pgast.BaseRelation, pgast.CommonTableExpr], *,
+        dml_stmts: Iterable[irast.MutatingStmt] = (),
+        path_id: irast.PathId,
+        ctx: context.CompilerContextLevel) -> None:
+    entry = (op, rel, path_id)
+    if dml_stmts:
+        for dml_stmt in dml_stmts:
+            overlays = ctx.type_rel_overlays[dml_stmt][typeid]
+            if entry not in overlays:
+                overlays.append(entry)
+    else:
+        overlays = ctx.type_rel_overlays[None][typeid]
+        if entry not in overlays:
+            overlays.append(entry)
+
+
 def add_type_rel_overlay(
         typeref: irast.TypeRef,
         op: str,
@@ -1242,14 +1306,14 @@ def add_type_rel_overlay(
         ctx: context.CompilerContextLevel) -> None:
     if typeref.material_type is not None:
         typeref = typeref.material_type
-    typeid = str(typeref.id)
-    if dml_stmts:
-        for dml_stmt in dml_stmts:
-            overlays = ctx.type_rel_overlays[typeid, dml_stmt]
-            overlays.append((op, rel, path_id))
-    else:
-        overlays = ctx.type_rel_overlays[typeid, None]
-        overlays.append((op, rel, path_id))
+
+    objs = [typeref]
+    if typeref.ancestors:
+        objs.extend(typeref.ancestors)
+    for obj in objs:
+        _add_type_rel_overlay(
+            obj.id, op, rel,
+            dml_stmts=dml_stmts, path_id=path_id, ctx=ctx)
 
 
 def get_type_rel_overlays(
@@ -1267,7 +1331,49 @@ def get_type_rel_overlays(
     if typeref.material_type is not None:
         typeref = typeref.material_type
 
-    return ctx.type_rel_overlays[str(typeref.id), dml_source]
+    return ctx.type_rel_overlays[dml_source][typeref.id]
+
+
+def reuse_type_rel_overlays(
+    *,
+    dml_stmts: Iterable[irast.MutatingStmt] = (),
+    dml_source: irast.MutatingStmt,
+    ctx: context.CompilerContextLevel,
+) -> None:
+    """Update type rel overlays when a DML statement is reused.
+
+    When a WITH bound DML is used, we need to add it (and all of its
+    nested overlays) as an overlay for all the enclosing DML
+    statements.
+    """
+    ref_overlays = ctx.type_rel_overlays[dml_source]
+    for tid, overlays in ref_overlays.items():
+        for op, rel, path_id in overlays:
+            _add_type_rel_overlay(
+                tid, op, rel, dml_stmts=dml_stmts, path_id=path_id, ctx=ctx
+            )
+    ptr_overlays = ctx.ptr_rel_overlays[dml_source]
+    for ptr_name, poverlays in ptr_overlays.items():
+        for op, rel in poverlays:
+            _add_ptr_rel_overlay(
+                ptr_name, op, rel, dml_stmts=dml_stmts, ctx=ctx
+            )
+
+
+def _add_ptr_rel_overlay(
+        ptrref_name: str,
+        op: str,
+        rel: Union[pgast.BaseRelation, pgast.CommonTableExpr], *,
+        dml_stmts: Iterable[irast.MutatingStmt] = (),
+        ctx: context.CompilerContextLevel) -> None:
+
+    if dml_stmts:
+        for dml_stmt in dml_stmts:
+            overlays = ctx.ptr_rel_overlays[dml_stmt][ptrref_name]
+            overlays.append((op, rel))
+    else:
+        overlays = ctx.ptr_rel_overlays[None][ptrref_name]
+        overlays.append((op, rel))
 
 
 def add_ptr_rel_overlay(
@@ -1276,14 +1382,8 @@ def add_ptr_rel_overlay(
         rel: Union[pgast.BaseRelation, pgast.CommonTableExpr], *,
         dml_stmts: Iterable[irast.MutatingStmt] = (),
         ctx: context.CompilerContextLevel) -> None:
-
-    if dml_stmts:
-        for dml_stmt in dml_stmts:
-            overlays = ctx.ptr_rel_overlays[ptrref.shortname.name, dml_stmt]
-            overlays.append((op, rel))
-    else:
-        overlays = ctx.ptr_rel_overlays[ptrref.shortname.name, None]
-        overlays.append((op, rel))
+    _add_ptr_rel_overlay(
+        ptrref.shortname.name, op, rel, dml_stmts=dml_stmts, ctx=ctx)
 
 
 def get_ptr_rel_overlays(
@@ -1296,4 +1396,4 @@ def get_ptr_rel_overlays(
         Union[pgast.BaseRelation, pgast.CommonTableExpr],
     ]
 ]:
-    return ctx.ptr_rel_overlays[ptrref.shortname.name, dml_source]
+    return ctx.ptr_rel_overlays[dml_source][ptrref.shortname.name]

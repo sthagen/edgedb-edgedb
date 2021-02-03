@@ -24,6 +24,7 @@ from typing import *
 import functools
 import json
 import numbers
+import textwrap
 
 from edb.edgeql import qltypes
 
@@ -401,7 +402,7 @@ def _build_object_mutation_shape(
     if isinstance(cmd, sd.CreateObject):
         if (
             issubclass(mcls, s_scalars.ScalarType)
-            and not cmd.get_attribute_value('is_abstract')
+            and not cmd.get_attribute_value('abstract')
         ):
             assignments.append(
                 f'backend_id := sys::_get_pg_type_for_scalar_type('
@@ -681,7 +682,7 @@ def write_meta_alter_object(
         shape, variables = _build_object_mutation_shape(
             cmd,
             classlayout=classlayout,
-            internal_schema_mode=False,
+            internal_schema_mode=internal_schema_mode,
             stdmode=stdmode,
             schema=schema,
             context=context,
@@ -743,7 +744,11 @@ def _update_lprops(
     if not lprops:
         return
 
-    if mcls.get_reflection_method() is so.ReflectionMethod.AS_LINK:
+    reflect_as_link = (
+        mcls.get_reflection_method() is so.ReflectionMethod.AS_LINK
+    )
+
+    if reflect_as_link:
         target_link = mcls.get_reflection_link()
         assert target_link is not None
         target_field = mcls.get_field(target_link)
@@ -780,38 +785,95 @@ def _update_lprops(
     if shape:
         parent_variables = {}
         parent_variables[f'__{target_link}'] = json.dumps(str(target_ref))
+        ref_name = context.get_referrer_name(refctx)
+        parent_variables['__parent_classname'] = json.dumps(str(ref_name))
 
         # XXX: we have to do a -= followed by a += because
         # support for filtered nested link property updates
         # is currently broken.
 
-        parent_update_query = f'''
+        assignments = []
+
+        assignments.append(textwrap.dedent(
+            f'''\
+            {refdict.attr} -= (
+                SELECT DETACHED (schema::{target_clsname})
+                FILTER .name__internal = <str>$__{target_link}
+            )'''
+        ))
+
+        if reflect_as_link:
+            parent_variables[f'__{target_link}_shadow'] = (
+                json.dumps(str(cmd.classname)))
+
+            assignments.append(textwrap.dedent(
+                f'''\
+                {refdict.attr}__internal -= (
+                    SELECT DETACHED (schema::{mcls.__name__})
+                    FILTER .name__internal = <str>$__{target_link}_shadow
+                )'''
+            ))
+
+        update_shape = textwrap.indent(
+            '\n' + ',\n'.join(assignments), '    ' * 4)
+
+        parent_update_query = textwrap.dedent(f'''\
             UPDATE schema::{refcls.__name__}
             FILTER .name__internal = <str>$__parent_classname
-            SET {{
-                {refdict.attr} -= (
-                    SELECT DETACHED (schema::{target_clsname})
-                    FILTER .name__internal = <str>$__{target_link}
-                )
+            SET {{{update_shape}
             }}
-        '''
-
-        ref_name = context.get_referrer_name(refctx)
-        parent_variables['__parent_classname'] = json.dumps(str(ref_name))
+        ''')
 
         blocks.append((parent_update_query, parent_variables))
 
-        parent_update_query = f'''
+        assignments = []
+
+        shape = textwrap.indent(f'\n{shape}', '    ' * 5)
+
+        assignments.append(textwrap.dedent(
+            f'''\
+            {refdict.attr} += (
+                SELECT schema::{target_clsname} {{{shape}
+                }} FILTER .name__internal = <str>$__{target_link}
+            )'''
+        ))
+
+        if reflect_as_link:
+            shadow_clslayout = classlayout[refcls]
+            shadow_link_layout = shadow_clslayout[f'{refdict.attr}__internal']
+            shadow_shape, shadow_variables = _build_object_mutation_shape(
+                cmd,
+                classlayout=classlayout,
+                internal_schema_mode=internal_schema_mode,
+                lprop_fields=shadow_link_layout.properties,
+                lprops_only=True,
+                stdmode=stdmode,
+                var_prefix='shadow_',
+                schema=schema,
+                context=context,
+            )
+
+            shadow_shape = textwrap.indent(f'\n{shadow_shape}', '    ' * 6)
+
+            assignments.append(textwrap.dedent(
+                f'''\
+                {refdict.attr}__internal += (
+                    SELECT schema::{mcls.__name__} {{{shadow_shape}
+                    }} FILTER .name__internal = <str>$__{target_link}_shadow
+                )'''
+            ))
+
+            parent_variables.update(shadow_variables)
+
+        update_shape = textwrap.indent(
+            '\n' + ',\n'.join(assignments), '    ' * 4)
+
+        parent_update_query = textwrap.dedent(f'''
             UPDATE schema::{refcls.__name__}
             FILTER .name__internal = <str>$__parent_classname
-            SET {{
-                {refdict.attr} += (
-                    SELECT schema::{target_clsname} {{
-                        {shape}
-                    }} FILTER .name__internal = <str>$__{target_link}
-                )
+            SET {{{update_shape}
             }}
-        '''
+        ''')
 
         parent_variables.update(append_variables)
         blocks.append((parent_update_query, parent_variables))
@@ -930,6 +992,20 @@ def write_meta_rename_object(
 @write_meta.register
 def write_meta_nop(
     cmd: sd.Nop,
+    *,
+    classlayout: Dict[Type[so.Object], sr_struct.SchemaTypeLayout],
+    schema: s_schema.Schema,
+    context: sd.CommandContext,
+    blocks: List[Tuple[str, Dict[str, Any]]],
+    internal_schema_mode: bool,
+    stdmode: bool,
+) -> None:
+    pass
+
+
+@write_meta.register
+def write_meta_query(
+    cmd: sd.Query,
     *,
     classlayout: Dict[Type[so.Object], sr_struct.SchemaTypeLayout],
     schema: s_schema.Schema,

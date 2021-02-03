@@ -789,6 +789,174 @@ class TestInsert(tb.QueryTestCase):
             }],
         )
 
+    async def test_edgeql_insert_returning_09(self):
+        # make sure a WITH bound insert makes it into the returned data
+        await self.assert_query_result(
+            r'''
+                WITH MODULE test,
+                     N := (INSERT Note {name := "!" }),
+                SELECT ((
+                    INSERT Person {
+                        name := "Phil Emarg",
+                        notes := N,
+                    }
+                )) { name, notes: {name} };
+
+            ''',
+            [{
+                'name': 'Phil Emarg',
+                'notes': [{'name': '!'}],
+            }],
+        )
+
+        # make sure it works when *doubly* nested!
+        await self.assert_query_result(
+            r'''
+                WITH MODULE test,
+                     S := (INSERT Subordinate { name := "sub" }),
+                     N := (INSERT Note {name := "!", subject := S }),
+                SELECT ((
+                    INSERT Person {
+                        name := "Madeline Hatch",
+                        notes := N,
+                    }
+                )) { name, notes: {name, subject[IS Subordinate]: {name}} };
+
+            ''',
+            [{
+                'name': 'Madeline Hatch',
+                'notes': [{'name': '!', 'subject': {'name': "sub"}}],
+            }],
+        )
+
+        # ... *doubly* nested, but the inner insert is a multi link
+        await self.assert_query_result(
+            r'''
+            WITH MODULE test,
+                 N := (INSERT Note {name := "!" }),
+                 P := (INSERT Person {
+                    name := "Emmanuel Villip",
+                    notes := N,
+                 }),
+            SELECT ((
+                INSERT PersonWrapper { person := P }
+            )) { person: { name, notes: {name} } };
+            ''',
+            [{
+                'person': {
+                    'name': 'Emmanuel Villip',
+                    'notes': [{'name': '!'}],
+                },
+            }],
+        )
+
+    async def test_edgeql_insert_returning_10(self):
+        # test that subtypes get returned by a nested insert
+        await self.assert_query_result(
+            r'''
+                WITH MODULE test,
+                SELECT
+                (INSERT Note {
+                     name := "test",
+                     subject := (INSERT Subordinate { name := "sub" })})
+                { name, subject };
+            ''',
+            [{
+                'name': 'test',
+                'subject': {'id': {}},
+            }],
+        )
+
+    async def test_edgeql_insert_returning_11(self):
+        await self.con.execute(r'''
+            WITH MODULE test
+            INSERT Note { name := "note", note := "a" };
+        ''')
+
+        # test that subtypes get returned by a nested update
+        await self.assert_query_result(
+            r'''
+                WITH MODULE test,
+                SELECT
+                (INSERT Person {
+                     name := "test",
+                     notes := (
+                         UPDATE Note FILTER .name = "note"
+                         SET { note := "b" }
+                     )
+                })
+                { name, notes: {note} };
+            ''',
+            [{
+                'name': 'test',
+                'notes': [{'note': "b"}],
+            }],
+        )
+
+    async def test_edgeql_insert_returning_12(self):
+        await self.con.execute(r'''
+            WITH MODULE test
+            INSERT DerivedNote { name := "note", note := "a" };
+        ''')
+
+        # test that subtypes get returned by a nested update
+        await self.assert_query_result(
+            r'''
+                WITH MODULE test,
+                SELECT
+                (INSERT Person {
+                     name := "test",
+                     notes := (
+                         UPDATE DerivedNote FILTER .name = "note"
+                         SET { note := "b" }
+                     )
+                })
+                { name, notes: {note} };
+            ''',
+            [{
+                'name': 'test',
+                'notes': [{'note': "b"}],
+            }],
+        )
+
+    async def test_edgeql_insert_returning_13(self):
+        await self.con.execute(r'''
+            WITH MODULE test
+            INSERT DerivedNote { name := "dnote", note := "a" };
+        ''')
+
+        await self.con.execute(r'''
+            WITH MODULE test
+            INSERT DerivedNote { name := "anote", note := "some note" };
+        ''')
+
+        # test that subtypes get returned by a nested update
+        await self.assert_query_result(
+            r'''
+            WITH MODULE test,
+            SELECT
+            (INSERT Person {
+                name := "test",
+                notes := {
+                    (SELECT Note FILTER .name = "anote"),
+                    (INSERT DerivedNote { name := "new note", note := "hi" }),
+                    (UPDATE Note FILTER .name = "dnote" SET { note := "b" }),
+                }
+            })
+            { name, notes: {name, note} ORDER BY .name };
+            ''',
+            [
+                {
+                    "name": "test",
+                    "notes": [
+                        {"name": "anote", "note": "some note"},
+                        {"name": "dnote", "note": "b"},
+                        {"name": "new note", "note": "hi"}
+                    ]
+                }
+            ]
+        )
+
     async def test_edgeql_insert_for_01(self):
         await self.con.execute(r'''
             WITH MODULE test
@@ -1194,6 +1362,23 @@ class TestInsert(tb.QueryTestCase):
                  "notes": [{"name": "Madeline Hatch?"},
                            {"name": "Madeline Hatch!"}]},
             ],
+        )
+
+    async def test_edgeql_insert_for_18(self):
+        await self.con.execute(r"""
+            WITH MODULE test
+            FOR noob in {"Phil Emarg", "Madeline Hatch"}
+            UNION (
+                INSERT Person {name := noob ++ "!",
+                               note := (INSERT Note {name := noob})});
+        """)
+
+        await self.assert_query_result(
+            "SELECT test::Person { name, note: {name} } ORDER BY .name DESC",
+            [{"name": "Phil Emarg!",
+              "note": {"name": "Phil Emarg"}},
+             {"name": "Madeline Hatch!",
+              "note": {"name": "Madeline Hatch"}}],
         )
 
     async def test_edgeql_insert_for_bad_01(self):
@@ -2346,6 +2531,32 @@ class TestInsert(tb.QueryTestCase):
             }]
         )
 
+    async def test_edgeql_insert_unless_conflict_10(self):
+        await self.con.execute(r'''
+            WITH MODULE test
+            INSERT Person {
+                name := "Foo",
+                case_name := "Foo",
+            };
+        ''')
+
+        await self.assert_query_result(
+            r'''
+            WITH MODULE test
+            SELECT (
+                INSERT Person {
+                    name := "Bar",
+                    case_name := "foo",
+                }
+                UNLESS CONFLICT ON (.case_name)
+                ELSE (SELECT Person)
+            ) {name, case_name};
+            ''',
+            [{
+                'name': 'Foo', 'case_name': 'Foo',
+            }]
+        )
+
     async def test_edgeql_insert_dependent_01(self):
         query = r'''
             WITH MODULE test
@@ -2701,6 +2912,357 @@ class TestInsert(tb.QueryTestCase):
         await self.assert_query_result(
             "SELECT test::Note.name",
             ["foo!", "bar"]
+        )
+
+    async def test_edgeql_insert_dependent_11(self):
+        # A with-bound insert used in a FOR should only execute once
+        await self.con.execute(
+            r'''
+                WITH MODULE test,
+                     N := (INSERT Note {name := "tag!" }),
+                FOR name in {"Phil", "Madz"} UNION (
+                    INSERT Person {
+                        name := name,
+                        notes := N,
+                    }
+                );
+            '''
+        )
+
+        # Should only be one note
+        await self.assert_query_result(
+            r'''SELECT test::Note { name }''',
+            [{"name": "tag!"}],
+        )
+
+    async def test_edgeql_insert_dependent_12(self):
+        # A with-bound insert used in a FOR should only execute once
+        # Same as above, but using a single link
+        await self.con.execute(
+            r'''
+                WITH MODULE test,
+                     N := (INSERT Note {name := "tag!" }),
+                FOR name in {"Phil", "Madz"} UNION (
+                    INSERT Person {
+                        name := name,
+                        note := N,
+                    }
+                );
+            '''
+        )
+
+        # Should only be one note
+        await self.assert_query_result(
+            r'''SELECT test::Note { name }''',
+            [{"name": "tag!"}],
+        )
+
+    async def test_edgeql_insert_dependent_13(self):
+        # A WITH bound INSERT used in an INSERT UNLESS CONFLICT
+        # should execute unconditionally
+        query = r'''
+        WITH MODULE test,
+             N := (INSERT Note {name := "tag!" }),
+        SELECT (
+            INSERT Person {
+                name := "Test",
+                notes := N,
+            } UNLESS CONFLICT
+        ) {name};
+        '''
+
+        await self.assert_query_result(
+            query,
+            [{"name": "Test"}]
+        )
+
+        await self.assert_query_result(
+            query,
+            [],
+        )
+
+        # Make sure that two inserts happened
+        await self.assert_query_result(
+            r'''SELECT count(test::Note)''',
+            [2],
+        )
+
+    async def test_edgeql_insert_dependent_14(self):
+        # Test the combination of a WITH bound INSERT, a WITH bound
+        # FOR loop, and a shape query that references both
+        await self.assert_query_result(
+            r'''
+                WITH MODULE test,
+                    N := (INSERT Note {name := "tag!" }),
+                    X := (FOR name in {"Phil", "Madz"} UNION (
+                        INSERT Person {
+                            name := name,
+                            notes := N,
+                        }
+                    )),
+                SELECT stdgraphql::Query {
+                    x := (SELECT X { name } ORDER BY .name),
+                    n := N { name },
+                };
+            ''',
+            [{
+                "n": {"name": "tag!"},
+                "x": [{"name": "Madz"}, {"name": "Phil"}]
+            }],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT count(test::Note)''',
+            [1],
+        )
+
+    async def test_edgeql_insert_dependent_15(self):
+        query = r'''
+            WITH MODULE test
+            SELECT (
+                INSERT Person {
+                    name := "Test",
+                    note := (INSERT Note {name := "tag!" })
+                } UNLESS CONFLICT
+            ) {name};
+        '''
+
+        await self.assert_query_result(
+            query,
+            [{"name": "Test"}]
+        )
+
+        await self.assert_query_result(
+            query,
+            [],
+        )
+
+        # Make sure only 1 insert into Note happened
+        await self.assert_query_result(
+            r'''SELECT count(test::Note)''',
+            [1],
+        )
+
+    async def test_edgeql_insert_dependent_16(self):
+        await self.assert_query_result(
+            r'''
+                WITH MODULE test
+                SELECT (
+                    INSERT Person {
+                        name := "Test",
+                        note := (INSERT Note {name := "tag!" })
+                    } UNLESS CONFLICT
+                ) {name};
+            ''',
+            [{"name": "Test"}]
+        )
+
+        await self.assert_query_result(
+            r'''
+                WITH MODULE test
+                SELECT (
+                    INSERT Person {
+                        name := "Test",
+                        note := (
+                            UPDATE (SELECT Note LIMIT 1)
+                            SET { name := "owned" })
+                    } UNLESS CONFLICT
+                ) {name};
+            ''',
+            []
+        )
+
+        # Make sure the update did not happen
+        await self.assert_query_result(
+            r'''SELECT test::Note { name }''',
+            [{"name": "tag!"}],
+        )
+
+    async def test_edgeql_insert_dependent_17(self):
+        query = r'''
+            WITH MODULE test
+            SELECT (
+                INSERT Person {
+                    name := "Test",
+                    note := (INSERT Note {name := "tag!" })
+                } UNLESS CONFLICT ON (.name) ELSE (SELECT Person)
+            ) {name};
+        '''
+
+        await self.assert_query_result(
+            query,
+            [{"name": "Test"}]
+        )
+
+        await self.assert_query_result(
+            query,
+            [{"name": "Test"}]
+        )
+
+        # Make sure only 1 insert into Note happened
+        await self.assert_query_result(
+            r'''SELECT count(test::Note)''',
+            [1],
+        )
+
+    async def test_edgeql_insert_dependent_18(self):
+        await self.con.execute('''
+            WITH MODULE test
+            INSERT Person { name := "foo" }
+        ''')
+
+        query = r'''
+            WITH MODULE test
+            SELECT (
+            FOR name in {"foo", "bar"} UNION (
+                SELECT (
+                    INSERT Person {
+                        name := name,
+                        note := (INSERT Note {name := "tag!" })
+                    } UNLESS CONFLICT ON (.name) ELSE (SELECT Person)
+                ) {name}
+            )) ORDER BY .name;
+        '''
+
+        await self.assert_query_result(
+            query,
+            [{"name": "bar"},
+             {"name": "foo"}]
+        )
+
+        # Make sure only 1 insert into Note happened
+        await self.assert_query_result(
+            r'''SELECT count(test::Note)''',
+            [1],
+        )
+
+    async def test_edgeql_insert_dependent_19(self):
+        # same as above but without ELSE
+        await self.con.execute('''
+            WITH MODULE test
+            INSERT Person { name := "foo" }
+        ''')
+
+        query = r'''
+            WITH MODULE test
+            SELECT (
+            FOR name in {"foo", "bar"} UNION (
+                SELECT (
+                    INSERT Person {
+                        name := name,
+                        note := (INSERT Note {name := "tag!" })
+                    } UNLESS CONFLICT ON (.name)
+                ) {name}
+            )) ORDER BY .name;
+        '''
+
+        await self.assert_query_result(
+            query,
+            [{"name": "bar"}]
+        )
+
+        # Make sure only 1 insert into Note happened
+        await self.assert_query_result(
+            r'''SELECT count(test::Note)''',
+            [1],
+        )
+
+    async def test_edgeql_insert_dependent_20(self):
+        # make sure a nested insert gets failed properly when it is
+        # nested in a dumb way instead of directly being put in a
+        # pointer
+        await self.con.execute('''
+            WITH MODULE test
+            INSERT Person { name := "foo" }
+        ''')
+
+        query = r'''
+            WITH MODULE test
+            SELECT (
+            FOR name in {"foo", "bar"} UNION (
+                SELECT (
+                    INSERT Person {
+                        name := name,
+                        tag2 := (INSERT Note {name := "tag!" }).name
+                    } UNLESS CONFLICT ON (.name)
+                ) {name, tag2}
+            )) ORDER BY .name;
+        '''
+
+        await self.assert_query_result(
+            query,
+            [{"name": "bar", "tag2": "tag!"}]
+        )
+
+        # Make sure only 1 insert into Note happened
+        await self.assert_query_result(
+            r'''SELECT count(test::Note)''',
+            [1],
+        )
+
+    async def test_edgeql_insert_dependent_21(self):
+        # test with an empty set as one of the values
+        query = r'''
+            WITH MODULE test
+            SELECT (
+                INSERT Person {
+                    name := "Test",
+                    note := (INSERT Note {name := "tag!" }),
+                    multi_prop := {},
+                } UNLESS CONFLICT
+            ) {name};
+        '''
+
+        await self.assert_query_result(
+            query,
+            [{"name": "Test"}]
+        )
+
+        await self.assert_query_result(
+            query,
+            [],
+        )
+
+        # Make sure only 1 insert into Note happened
+        await self.assert_query_result(
+            r'''SELECT count(test::Note)''',
+            [1],
+        )
+
+    async def test_edgeql_insert_dependent_22(self):
+        # test with a constraint that has a nontrivial subjectexpr
+        await self.assert_query_result(
+            r'''
+            WITH MODULE test
+            SELECT (
+                INSERT Person {
+                    name := "Test",
+                    note := (INSERT Note {name := "tag!" }),
+                    case_name := "Foo",
+                } UNLESS CONFLICT
+            ) {name};
+            ''',
+            [{"name": "Test"}]
+        )
+
+        await self.assert_query_result(
+            r'''
+            WITH MODULE test
+            SELECT (
+                INSERT Person {
+                    name := "Test2",
+                    note := (INSERT Note {name := "tag!" }),
+                    case_name := "foo",
+                } UNLESS CONFLICT
+            ) {name};
+            ''',
+            [],
+        )
+
+        # Make sure only 1 insert into Note happened
+        await self.assert_query_result(
+            r'''SELECT count(test::Note)''',
+            [1],
         )
 
     async def test_edgeql_insert_nested_volatile_01(self):

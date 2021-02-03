@@ -229,12 +229,12 @@ def compile_FunctionCall(
         nested_path_ids = []
         for n, st in rtype.iter_subtypes(ctx.env.schema):
             elem_path_id = pathctx.get_tuple_indirection_path_id(
-                path_id, n, st, ctx=ctx).strip_weak_namespaces()
+                path_id, n, st, ctx=ctx)
 
             if isinstance(st, s_types.Tuple):
                 nested_path_ids.append([
                     pathctx.get_tuple_indirection_path_id(
-                        elem_path_id, nn, sst, ctx=ctx).strip_weak_namespaces()
+                        elem_path_id, nn, sst, ctx=ctx)
                     for nn, sst in st.iter_subtypes(ctx.env.schema)
                 ])
 
@@ -438,7 +438,7 @@ def compile_operator(
 
     if not in_polymorphic_func:
         matched = [call for call in matched
-                   if not call.func.get_is_abstract(env.schema)]
+                   if not call.func.get_abstract(env.schema)]
 
     if len(matched) == 1:
         matched_call = matched[0]
@@ -771,7 +771,7 @@ def finalize_args(
                 isinstance(bound_call.func, s_func.Function)
                 and (
                     bound_call.func.get_shortname(ctx.env.schema)
-                    == ('std', 'array_agg')
+                    == sn.QualName('std', 'array_agg')
                 )
             )
 

@@ -214,11 +214,11 @@ async def load_std_schema(backend_conn) -> s_schema.Schema:
     return await load_cached_schema(backend_conn, 'stdschema')
 
 
-async def load_schema_intro_query(backend_conn) -> str:
+async def load_schema_intro_query(backend_conn, kind: str) -> str:
     return await backend_conn.fetchval(f'''\
         SELECT text FROM edgedbinstdata.instdata
-        WHERE key = 'introquery';
-    ''')
+        WHERE key = $1::text;
+    ''', kind)
 
 
 async def load_schema_class_layout(backend_conn) -> s_schema.Schema:
@@ -252,7 +252,8 @@ class BaseCompiler:
         self._refl_schema = None
         self._config_spec = None
         self._schema_class_layout = None
-        self._intro_query = None
+        self._local_intro_query = None
+        self._global_intro_query = None
         self._backend_runtime_params = backend_runtime_params
 
     def _hash_sql(self, sql: bytes, **kwargs: bytes):
@@ -289,15 +290,22 @@ class BaseCompiler:
         self,
         connection: asyncpg.Connection,
     ) -> s_schema.Schema:
-        data = await connection.fetch(self._intro_query)
+        local_data = await connection.fetch(self._local_intro_query)
+        global_data = await connection.fetch(self._global_intro_query)
         return s_schema.ChainedSchema(
             self._std_schema,
             s_refl.parse_into(
                 base_schema=self._std_schema,
                 schema=s_schema.FlatSchema(),
-                data=[r[0] for r in data],
+                data=[r[0] for r in local_data],
                 schema_class_layout=self._schema_class_layout,
-            )
+            ),
+            s_refl.parse_into(
+                base_schema=self._std_schema,
+                schema=s_schema.FlatSchema(),
+                data=[r[0] for r in global_data],
+                schema_class_layout=self._schema_class_layout,
+            ),
         )
 
     async def _load_reflection_cache(
@@ -344,8 +352,13 @@ class BaseCompiler:
         if self._schema_class_layout is None:
             self._schema_class_layout = await load_schema_class_layout(con)
 
-        if self._intro_query is None:
-            self._intro_query = await load_schema_intro_query(con)
+        if self._local_intro_query is None:
+            self._local_intro_query = await load_schema_intro_query(
+                con, 'local_intro_query')
+
+        if self._global_intro_query is None:
+            self._global_intro_query = await load_schema_intro_query(
+                con, 'global_intro_query')
 
         if self._config_spec is None:
             self._config_spec = config.load_spec_from_schema(
@@ -541,6 +554,37 @@ class Compiler(BaseCompiler):
             # Restore the regular schema.
             ctx.state.current_tx().update_schema(schema)
 
+    def _assert_not_in_migration_block(
+        self,
+        ctx: CompileContext,
+        ql: qlast.Base
+    ) -> None:
+        """Check that a START MIGRATION block is *not* active."""
+        current_tx = ctx.state.current_tx()
+        mstate = current_tx.get_migration_state()
+        if mstate is not None:
+            stmt = status.get_status(ql).decode()
+            raise errors.QueryError(
+                f'cannot execute {stmt} in a migration block',
+                context=ql.context,
+            )
+
+    def _assert_in_migration_block(
+        self,
+        ctx: CompileContext,
+        ql: qlast.Base
+    ) -> dbstate.MigrationState:
+        """Check that a START MIGRATION block *is* active."""
+        current_tx = ctx.state.current_tx()
+        mstate = current_tx.get_migration_state()
+        if mstate is None:
+            stmt = status.get_status(ql).decode()
+            raise errors.QueryError(
+                f'cannot execute {stmt} outside of a migration block',
+                context=ql.context,
+            )
+        return mstate
+
     def _compile_ql_script(
         self,
         ctx: CompileContext,
@@ -579,7 +623,9 @@ class Compiler(BaseCompiler):
         self,
         ctx: CompileContext,
         ql: qlast.Base,
+        *,
         cacheable: bool = True,
+        migration_block_query: bool = False,
     ) -> dbstate.BaseQuery:
 
         current_tx = ctx.state.current_tx()
@@ -640,6 +686,17 @@ class Compiler(BaseCompiler):
             expected_cardinality_one=ctx.expected_cardinality_one,
             output_format=_convert_format(ctx.output_format),
         )
+
+        if (
+            (mstate := current_tx.get_migration_state())
+            and not migration_block_query
+        ):
+            mstate = mstate._replace(
+                accepted_cmds=mstate.accepted_cmds + (ql,),
+            )
+            current_tx.update_migration_state(mstate)
+
+            return dbstate.NullQuery()
 
         sql_bytes = sql_text.encode(defines.EDGEDB_ENCODING)
 
@@ -740,6 +797,9 @@ class Compiler(BaseCompiler):
         ctx: CompileContext,
         stmt: qlast.DDLOperation,
     ) -> dbstate.DDLQuery:
+        if isinstance(stmt, qlast.GlobalObjectCommand):
+            self._assert_not_in_migration_block(ctx, stmt)
+
         current_tx = ctx.state.current_tx()
         schema = current_tx.get_schema()
 
@@ -758,11 +818,36 @@ class Compiler(BaseCompiler):
 
         if mstate := current_tx.get_migration_state():
             mstate = mstate._replace(
-                current_ddl=mstate.current_ddl + (stmt,),
+                accepted_cmds=mstate.accepted_cmds + (stmt,),
             )
 
             context = self._new_delta_context(ctx)
+            orig_schema = schema
             schema = delta.apply(schema, context=context)
+
+            if mstate.last_proposed:
+                if mstate.last_proposed[0].required_user_input:
+                    # Cannot auto-apply the proposed DDL
+                    # if user input is required.
+                    mstate = mstate._replace(last_proposed=tuple())
+                else:
+                    proposed_stmts = mstate.last_proposed[0].statements
+                    ddl_script = '\n'.join(proposed_stmts)
+                    proposed_schema = s_ddl.apply_ddl_script(
+                        ddl_script, schema=orig_schema)
+
+                    if s_ddl.schemas_are_equal(schema, proposed_schema):
+                        # The client has confirmed the proposed migration step,
+                        # advance the proposed script.
+                        mstate = mstate._replace(
+                            last_proposed=mstate.last_proposed[1:],
+                        )
+                    else:
+                        # The client replied with a statement that does not
+                        # match what was proposed, reset the proposed script
+                        # to force script regeneration on next DESCRIBE.
+                        mstate = mstate._replace(last_proposed=tuple())
+
             current_tx.update_migration_state(mstate)
             current_tx.update_schema(schema)
 
@@ -804,17 +889,25 @@ class Compiler(BaseCompiler):
             single_unit=(not is_transactional) or (drop_db is not None),
             new_types=new_types,
             drop_db=drop_db,
-            has_role_ddl=isinstance(stmt, qlast.Role),
+            has_role_ddl=isinstance(stmt, qlast.RoleCommand),
         )
 
-    def _compile_ql_migration(self, ctx: CompileContext, ql: qlast.Migration):
+    def _compile_ql_migration(
+        self,
+        ctx: CompileContext,
+        ql: qlast.MigrationCommand,
+    ):
         current_tx = ctx.state.current_tx()
         schema = current_tx.get_schema()
 
         if isinstance(ql, qlast.CreateMigration):
+            self._assert_not_in_migration_block(ctx, ql)
+
             query = self._compile_and_apply_ddl_stmt(ctx, ql)
 
         elif isinstance(ql, qlast.StartMigration):
+            self._assert_not_in_migration_block(ctx, ql)
+
             if current_tx.is_implicit():
                 savepoint_name = None
                 tx_cmd = qlast.StartTransaction()
@@ -837,7 +930,8 @@ class Compiler(BaseCompiler):
                     initial_savepoint=savepoint_name,
                     guidance=s_obj.DeltaGuidance(),
                     target_schema=target_schema,
-                    current_ddl=tuple(),
+                    accepted_cmds=tuple(),
+                    last_proposed=tuple(),
                 ),
             )
 
@@ -851,13 +945,7 @@ class Compiler(BaseCompiler):
             )
 
         elif isinstance(ql, qlast.PopulateMigration):
-            mstate = current_tx.get_migration_state()
-            if mstate is None:
-                raise errors.QueryError(
-                    'unexpected POPULATE MIGRATION:'
-                    ' not currently in a migration block',
-                    context=ql.context,
-                )
+            mstate = self._assert_in_migration_block(ctx, ql)
 
             diff = s_ddl.delta_schemas(
                 schema,
@@ -868,10 +956,10 @@ class Compiler(BaseCompiler):
                 debug.header('Populate Migration Diff')
                 debug.dump(diff, schema=schema)
 
-            new_ddl = s_ddl.ddlast_from_delta(
-                schema, mstate.target_schema, diff)
-            all_ddl = mstate.current_ddl + new_ddl
-            mstate = mstate._replace(current_ddl=all_ddl)
+            new_ddl = tuple(s_ddl.ddlast_from_delta(
+                schema, mstate.target_schema, diff))
+            all_ddl = mstate.accepted_cmds + new_ddl
+            mstate = mstate._replace(accepted_cmds=all_ddl)
             if debug.flags.delta_plan:
                 debug.header('Populate Migration DDL AST')
                 text = []
@@ -896,17 +984,11 @@ class Compiler(BaseCompiler):
             )
 
         elif isinstance(ql, qlast.DescribeCurrentMigration):
-            mstate = current_tx.get_migration_state()
-            if mstate is None:
-                raise errors.QueryError(
-                    'unexpected DESCRIBE CURRENT MIGRATION:'
-                    ' not currently in a migration block',
-                    context=ql.context,
-                )
+            mstate = self._assert_in_migration_block(ctx, ql)
 
             if ql.language is qltypes.DescribeLanguage.DDL:
                 text = []
-                for stmt in mstate.current_ddl:
+                for stmt in mstate.accepted_cmds:
                     text.append(qlcodegen.generate_source(stmt, pretty=True))
 
                 if text:
@@ -921,11 +1003,12 @@ class Compiler(BaseCompiler):
                     ctx,
                     desc_ql,
                     cacheable=False,
+                    migration_block_query=True,
                 )
 
             elif ql.language is qltypes.DescribeLanguage.JSON:
                 confirmed = []
-                for stmt in mstate.current_ddl:
+                for stmt in mstate.accepted_cmds:
                     confirmed.append(
                         # Add a terminating semicolon to match
                         # "proposed", which is created by
@@ -933,40 +1016,51 @@ class Compiler(BaseCompiler):
                         qlcodegen.generate_source(stmt, pretty=True) + ';',
                     )
 
-                guided_diff = s_ddl.delta_schemas(
-                    schema,
-                    mstate.target_schema,
-                    generate_prompts=True,
-                    guidance=mstate.guidance,
-                )
+                if not mstate.last_proposed:
+                    guided_diff = s_ddl.delta_schemas(
+                        schema,
+                        mstate.target_schema,
+                        generate_prompts=True,
+                        guidance=mstate.guidance,
+                    )
 
-                auto_diff = s_ddl.delta_schemas(
-                    schema,
-                    mstate.target_schema,
-                )
+                    proposed_ddl = s_ddl.statements_from_delta(
+                        schema,
+                        mstate.target_schema,
+                        guided_diff,
+                    )
 
-                proposed_ddl = s_ddl.statements_from_delta(
-                    schema,
-                    mstate.target_schema,
-                    guided_diff,
-                )
+                    proposed_steps = []
 
-                if proposed_ddl:
-                    top_op = next(iter(guided_diff.get_subcommands()))
-                    op_id = top_op.get_annotation('op_id')
-                    assert op_id is not None
+                    if proposed_ddl:
+                        for ddl_text, top_op in proposed_ddl:
+                            prompt_id, prompt_text = top_op.get_user_prompt()
+                            confidence = top_op.get_annotation('confidence')
+                            assert confidence is not None
 
-                    proposed_desc = {
-                        'statements': [{
-                            'text': proposed_ddl[0],
-                        }],
-                        'confidence': top_op.get_annotation('confidence'),
-                        'prompt': top_op.get_annotation('user_prompt'),
-                        'operation_id': op_id,
-                        'data_safe': top_op.is_data_safe(),
-                    }
+                            step = dbstate.ProposedMigrationStep(
+                                statements=(ddl_text,),
+                                confidence=confidence,
+                                prompt=prompt_text,
+                                prompt_id=prompt_id,
+                                data_safe=top_op.is_data_safe(),
+                                required_user_input=tuple(
+                                    top_op.get_required_user_input().items(),
+                                ),
+                            )
+                            proposed_steps.append(step)
+
+                        proposed_desc = proposed_steps[0].to_json()
+                    else:
+                        proposed_desc = None
+
+                    mstate = mstate._replace(
+                        last_proposed=tuple(proposed_steps),
+                    )
+
+                    current_tx.update_migration_state(mstate)
                 else:
-                    proposed_desc = None
+                    proposed_desc = mstate.last_proposed[0].to_json()
 
                 desc = json.dumps({
                     'parent': (
@@ -974,7 +1068,8 @@ class Compiler(BaseCompiler):
                         if mstate.parent_migration is not None
                         else 'initial'
                     ),
-                    'complete': not bool(list(auto_diff.get_subcommands())),
+                    'complete': s_ddl.schemas_are_equal(
+                        schema, mstate.target_schema),
                     'confirmed': confirmed,
                     'proposed': proposed_desc,
                 }).encode('unicode_escape').decode('utf-8')
@@ -986,6 +1081,7 @@ class Compiler(BaseCompiler):
                     ctx,
                     desc_ql,
                     cacheable=False,
+                    migration_block_query=True,
                 )
 
             else:
@@ -995,13 +1091,7 @@ class Compiler(BaseCompiler):
                 )
 
         elif isinstance(ql, qlast.AlterCurrentMigrationRejectProposed):
-            mstate = current_tx.get_migration_state()
-            if mstate is None:
-                raise errors.QueryError(
-                    'unexpected ALTER CURRENT MIGRATION:'
-                    ' not currently in a migration block',
-                    context=ql.context,
-                )
+            mstate = self._assert_in_migration_block(ctx, ql)
 
             diff = s_ddl.delta_schemas(
                 schema,
@@ -1051,7 +1141,10 @@ class Compiler(BaseCompiler):
                         f'delta diff: {top_cmdclass!r}',
                     )
 
-            mstate = mstate._replace(guidance=new_guidance)
+            mstate = mstate._replace(
+                guidance=new_guidance,
+                last_proposed=tuple(),
+            )
             current_tx.update_migration_state(mstate)
 
             query = dbstate.MigrationControlQuery(
@@ -1064,13 +1157,7 @@ class Compiler(BaseCompiler):
             )
 
         elif isinstance(ql, qlast.CommitMigration):
-            mstate = current_tx.get_migration_state()
-            if mstate is None:
-                raise errors.QueryError(
-                    'unexpected POPULATE MIGRATION:'
-                    ' not currently in a migration block',
-                    context=ql.context,
-                )
+            mstate = self._assert_in_migration_block(ctx, ql)
 
             diff = s_ddl.delta_schemas(schema, mstate.target_schema)
             if list(diff.get_subcommands()):
@@ -1094,7 +1181,7 @@ class Compiler(BaseCompiler):
                 last_migration_ref = None
 
             create_migration = qlast.CreateMigration(
-                body=qlast.MigrationBody(commands=mstate.current_ddl),
+                body=qlast.MigrationBody(commands=mstate.accepted_cmds),
                 parent=last_migration_ref,
             )
 
@@ -1125,13 +1212,7 @@ class Compiler(BaseCompiler):
             )
 
         elif isinstance(ql, qlast.AbortMigration):
-            mstate = current_tx.get_migration_state()
-            if mstate is None:
-                raise errors.QueryError(
-                    'unexpected ABORT MIGRATION:'
-                    ' not currently in a migration block',
-                    context=ql.context,
-                )
+            mstate = self._assert_in_migration_block(ctx, ql)
 
             if mstate.initial_savepoint:
                 savepoint_name = str(uuid.uuid4())
@@ -1157,6 +1238,8 @@ class Compiler(BaseCompiler):
         modaliases = None
 
         if isinstance(ql, qlast.StartTransaction):
+            self._assert_not_in_migration_block(ctx, ql)
+
             ctx.state.start_tx()
 
             sql = 'START TRANSACTION'
@@ -1173,6 +1256,8 @@ class Compiler(BaseCompiler):
             cacheable = False
 
         elif isinstance(ql, qlast.CommitTransaction):
+            self._assert_not_in_migration_block(ctx, ql)
+
             new_state: dbstate.TransactionState = ctx.state.commit_tx()
             modaliases = new_state.modaliases
 
@@ -1329,6 +1414,9 @@ class Compiler(BaseCompiler):
         modaliases = ctx.state.current_tx().get_modaliases()
         session_config = ctx.state.current_tx().get_session_config()
 
+        if ql.scope is not qltypes.ConfigScope.SESSION:
+            self._assert_not_in_migration_block(ctx, ql)
+
         if (
             ql.scope is qltypes.ConfigScope.SYSTEM
             and not current_tx.is_implicit()
@@ -1389,13 +1477,13 @@ class Compiler(BaseCompiler):
         ctx: CompileContext,
         ql: qlast.Base
     ) -> Tuple[dbstate.BaseQuery, enums.Capability]:
-        if isinstance(ql, qlast.Migration):
+        if isinstance(ql, qlast.MigrationCommand):
             query = self._compile_ql_migration(ctx, ql)
             if isinstance(query, dbstate.MigrationControlQuery):
                 return (query, enums.Capability.DDL)
             else:  # DESCRIBE CURRENT MIGRATION
                 return (query, enums.Capability(0))
-        elif isinstance(ql, qlast.Database):
+        elif isinstance(ql, qlast.DatabaseCommand):
             return (
                 self._compile_and_apply_ddl_stmt(ctx, ql),
                 enums.Capability.DDL,
@@ -1432,7 +1520,10 @@ class Compiler(BaseCompiler):
         else:
             query = self._compile_ql_query(ctx, ql)
             caps = enums.Capability(0)
-            if query.has_dml:
+            if (
+                isinstance(query, (dbstate.Query, dbstate.SimpleQuery))
+                and query.has_dml
+            ):
                 caps |= enums.Capability.MODIFICATIONS
             return (query, caps)
 
@@ -1442,6 +1533,16 @@ class Compiler(BaseCompiler):
         ctx: CompileContext,
         source: edgeql.Source,
     ) -> List[dbstate.QueryUnit]:
+        current_tx = ctx.state.current_tx()
+        if current_tx.get_migration_state() is not None:
+            original = edgeql.Source.from_string(source.text())
+            ctx = dataclasses.replace(
+                ctx,
+                source=original,
+                implicit_limit=0,
+            )
+            return self._try_compile(ctx=ctx, source=original)
+
         try:
             return self._try_compile(ctx=ctx, source=source)
         except errors.EdgeQLSyntaxError as original_err:
@@ -1629,6 +1730,9 @@ class Compiler(BaseCompiler):
 
                 unit.has_set = True
 
+            elif isinstance(comp, dbstate.NullQuery):
+                pass
+
             else:  # pragma: no cover
                 raise errors.InternalServerError('unknown compile state')
 
@@ -1648,9 +1752,6 @@ class Compiler(BaseCompiler):
             if unit.cacheable and (unit.config_ops or unit.modaliases):
                 raise errors.InternalServerError(
                     f'QueryUnit {unit!r} is cacheable but has config/aliases')
-            if not unit.sql:
-                raise errors.InternalServerError(
-                    f'QueryUnit {unit!r} has no SQL commands in it')
             if not na_cardinality and (
                     len(unit.sql) > 1 or
                     unit.tx_commit or
@@ -1960,7 +2061,10 @@ class Compiler(BaseCompiler):
         schema_ddl = s_ddl.ddl_text_from_schema(
             schema, include_migrations=True)
 
-        all_objects = schema.get_objects(exclude_stdlib=True)
+        all_objects = schema.get_objects(
+            exclude_stdlib=True,
+            exclude_global=True,
+        )
         ids = []
         for obj in all_objects:
             if isinstance(obj, s_obj.QualifiedObject):

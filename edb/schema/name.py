@@ -25,6 +25,7 @@ import functools
 import re
 
 from edb import errors
+from edb.common import markup
 
 
 NameT = TypeVar("NameT", bound="Name")
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
         def from_string(cls: Type[NameT], name: str) -> NameT:
             ...
 
-        def __eq__(self, other: Any) -> bool:
+        def get_local_name(self) -> UnqualName:
             ...
 
         def __lt__(self, other: Any) -> bool:
@@ -85,6 +86,12 @@ if TYPE_CHECKING:
         def __init__(self, module: str, name: str) -> None:
             ...
 
+        def get_local_name(self) -> UnqualName:
+            ...
+
+        def get_module_name(self) -> Name:
+            ...
+
     class UnqualName(Name):
 
         __slots__ = ('name',)
@@ -99,6 +106,9 @@ if TYPE_CHECKING:
             ...
 
         def __init__(self, name: str) -> None:
+            ...
+
+        def get_local_name(self) -> UnqualName:
             ...
 
 else:
@@ -131,6 +141,12 @@ else:
                 name=nqname,
             )
 
+        def get_local_name(self) -> UnqualName:
+            return UnqualName(self.name)
+
+        def get_module_name(self) -> Name:
+            return UnqualName(self.module)
+
         def __str__(self) -> str:
             return f'{self.module}::{self.name}'
 
@@ -147,6 +163,9 @@ else:
             name: str,
         ) -> UnqualNameT:
             return cls(name)
+
+        def get_local_name(self) -> UnqualName:
+            return self
 
         def __str__(self) -> str:
             return self.name
@@ -236,3 +255,11 @@ def compat_name_remangle(name: str) -> Name:
         return QualName(name=compat_sn, module=qname.module)
     else:
         return name_from_string(name)
+
+
+@markup.serializer.no_ref_detect
+@markup.serializer.serializer.register(Name)
+def _serialize_to_markup(obj: Name, *, ctx: markup.Context) -> markup.Markup:
+    return markup.elements.lang.Object(
+        id=id(obj), class_module=type(obj).__module__,
+        classname=type(obj).__name__, repr=str(obj))

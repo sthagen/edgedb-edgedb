@@ -21,13 +21,15 @@
 
 
 from __future__ import annotations
-
 from typing import *
-import textwrap
 
 from collections import defaultdict
+import textwrap
+import copy
+
 from edb import errors
 from edb.common import context as pctx
+from edb.common.ast import visitor as ast_visitor
 
 from edb.ir import ast as irast
 from edb.ir import typeutils
@@ -129,9 +131,18 @@ def compile_ForQuery(
 
         ictx = iterator_ctx or sctx
 
+        contains_dml = qlutils.contains_dml(qlstmt.result)
+        # If the body contains DML, then we need to prohibit
+        # correlation between the iterator and the enclosing
+        # query, since the correlation imposes compilation issues
+        # we aren't willing to tackle.
+        if contains_dml:
+            ictx.path_scope.factoring_allowlist.update(
+                ctx.iterator_path_ids)
         iterator_view = stmtctx.declare_view(
             iterator,
             s_name.UnqualName(qlstmt.iterator_alias),
+            factoring_fence=contains_dml,
             path_id_namespace=ictx.path_id_namespace,
             ctx=ictx,
         )
@@ -168,13 +179,12 @@ def compile_ForQuery(
         sctx.iterator_path_ids |= {stmt.iterator_stmt.path_id}
         node = ictx.path_scope.find_descendant(iterator_stmt.path_id)
         if node is not None:
-            # If the body contains DML, then we need to prohibit
-            # correlation between the iterator and the enclosing
-            # query, since the correlation imposes compilation issues
-            # we aren't willing to tackle.
+            # See above about why we need a factoring fence.
+            # We need to do this again when we move the branch so
+            # as to preserve the fencing.
             # Do this by sticking the iterator subtree onto a branch
             # with a factoring fence.
-            if qlutils.contains_dml(qlstmt.result):
+            if contains_dml:
                 node = node.attach_branch()
                 node.factoring_fence = True
                 node = node.attach_branch()
@@ -222,7 +232,144 @@ def compile_GroupQuery(
         context=expr.context)
 
 
+def subject_substitute(
+        ast: qlast.Base_T, new_subject: qlast.Expr) -> qlast.Base_T:
+    ast = copy.deepcopy(ast)
+    paths: List[qlast.Path] = ast_visitor.find_children(
+        ast,
+        lambda x: isinstance(x, qlast.Path),
+    )
+    for path in paths:
+        if isinstance(path.steps[0], qlast.Subject):
+            path.steps[0] = new_subject
+    return ast
+
+
+def compile_insert_unless_conflict_select(
+    stmt: irast.InsertStmt,
+    insert_subject: qlast.Path,
+    cnstrs: Dict[str, Tuple[s_pointers.Pointer, List[s_constr.Constraint]]],
+    *,
+    parser_context: pctx.ParserContext,
+    ctx: context.ContextLevel,
+) -> irast.Set:
+    """Synthesize a select of conflicting objects for UNLESS CONFLICT
+
+    `cnstrs` contains the constraints to consider.
+    """
+    matches = []
+    # Find the IR corresponding to our fields
+    for elem, _ in stmt.subject.shape:
+        assert elem.rptr is not None
+        name = elem.rptr.ptrref.shortname.name
+        if name in cnstrs:
+            key = elem.expr
+            assert key
+            matches.append((name, key))
+
+    if not matches:
+        raise errors.QueryError(
+            'INSERT UNLESS CONFLICT property requires matching shape',
+            context=parser_context,
+        )
+
+    ctx.anchors = ctx.anchors.copy()
+
+    conds: List[qlast.Expr] = []
+    for ptrname, key in matches:
+        # FIXME: The wrong thing will definitely happen if there are
+        # volatile entries here
+        source_alias = ctx.aliases.get('a')
+        ctx.anchors[source_alias] = setgen.ensure_set(key, ctx=ctx)
+        anchor = qlast.Path(steps=[qlast.ObjectRef(name=source_alias)])
+        ptr_val = qlast.Path(partial=True, steps=[
+            qlast.Ptr(ptr=qlast.ObjectRef(name=ptrname))
+        ])
+        ptr, ptr_cnstrs = cnstrs[ptrname]
+        ptr_card = ptr.get_cardinality(ctx.env.schema)
+
+        for cnstr in ptr_cnstrs:
+            lhs: qlast.Expr = anchor
+            rhs: qlast.Expr = ptr_val
+            # If there is a subjectexpr, substitute our lhs and rhs in
+            # for __subject__ in the subjectexpr and compare *that*
+            if (subjectexpr := cnstr.get_subjectexpr(ctx.env.schema)):
+                assert isinstance(subjectexpr.qlast, qlast.Expr)
+                lhs = subject_substitute(subjectexpr.qlast, lhs)
+                rhs = subject_substitute(subjectexpr.qlast, rhs)
+
+            conds.append(qlast.BinOp(
+                op='=' if ptr_card.is_single() else 'IN',
+                left=lhs, right=rhs,
+            ))
+
+    # We use `any` to compute the disjunction here because some might
+    # be empty.
+    if len(conds) == 1:
+        cond = conds[0]
+    else:
+        cond = qlast.FunctionCall(
+            func='any',
+            args=[qlast.Set(elements=conds)],
+        )
+
+    # Produce a query that finds the conflicting objects
+    select_ast = qlast.SelectQuery(
+        result=insert_subject,
+        where=cond,
+    )
+    select_ir = dispatch.compile(select_ast, ctx=ctx)
+    select_ir = setgen.scoped_set(
+        select_ir, force_reassign=True, ctx=ctx)
+    assert isinstance(select_ir, irast.Set)
+
+    return select_ir
+
+
 def compile_insert_unless_conflict(
+    stmt: irast.InsertStmt,
+    insert_subject: qlast.Path,
+    *, ctx: context.ContextLevel,
+) -> irast.OnConflictClause:
+    """Compile an UNLESS CONFLICT clause with no ON
+
+    This requires synthesizing a conditional based on all the exclusive
+    constraints on the object.
+    """
+
+    schema = ctx.env.schema
+
+    schema, typ = typeutils.ir_typeref_to_type(schema, stmt.subject.typeref)
+    assert isinstance(typ, s_objtypes.ObjectType)
+    pointers = {}
+
+    exclusive_constr = schema.get('std::exclusive', type=s_constr.Constraint)
+    for ptr in typ.get_pointers(schema).objects(schema):
+        ptr = ptr.get_nearest_non_derived_parent(schema)
+        ex_cnstrs = [c for c in ptr.get_constraints(schema).objects(schema)
+                     if c.issubclass(schema, exclusive_constr)]
+        if ex_cnstrs:
+            name = ptr.get_shortname(schema).name
+            if name != 'id':
+                pointers[name] = ptr, ex_cnstrs
+
+    ctx.env.schema = schema
+
+    obj_constrs = typ.get_constraints(schema).objects(schema)
+    if obj_constrs:
+        # We don't support synthesizing a conditional for object
+        # exclusive constraints yet, so we can't produce a select IR
+        select_ir = None
+    else:
+        select_ir = compile_insert_unless_conflict_select(
+            stmt, insert_subject, pointers,
+            parser_context=stmt.context, ctx=ctx)
+
+    return irast.OnConflictClause(
+        constraint=None, select_ir=select_ir, else_ir=None)
+
+
+def compile_insert_unless_conflict_on(
     stmt: irast.InsertStmt,
     insert_subject: qlast.Path,
     constraint_spec: qlast.Expr,
@@ -283,44 +430,13 @@ def compile_insert_unless_conflict(
         s_mod.Module, ptr.get_name(schema).module).id
 
     field_name = cspec_res.rptr.ptrref.shortname
-
-    # Find the IR corresponding to our field
-    # FIXME: Is there a better way to do this?
-    for elem, _ in stmt.subject.shape:
-        if elem.rptr.ptrref.shortname == field_name:
-            key = elem.expr
-            break
-    else:
-        raise errors.QueryError(
-            'INSERT UNLESS CONFLICT property requires matching shape',
-            context=constraint_spec.context,
-        )
-
-    # FIXME: This reuse of the source
-    ctx.anchors = ctx.anchors.copy()
-    source_alias = ctx.aliases.get('a')
-    ctx.anchors[source_alias] = setgen.ensure_set(key, ctx=ctx)
-    anchor = qlast.Path(steps=[qlast.ObjectRef(name=source_alias)])
-
-    ctx.env.schema = schema
+    ds = {field_name.name: (ptr, ex_cnstrs)}
+    select_ir = compile_insert_unless_conflict_select(
+        stmt, insert_subject, ds, parser_context=stmt.context, ctx=ctx)
 
     # Compile an else branch
-    else_info = None
+    else_ir = None
     if else_branch:
-        # Produce a query that finds the conflicting objects
-        nobe = qlast.SelectQuery(
-            result=insert_subject,
-            where=qlast.BinOp(
-                op='=',
-                left=constraint_spec,
-                right=anchor
-            ),
-        )
-        select_ir = dispatch.compile(nobe, ctx=ctx)
-        select_ir = setgen.scoped_set(
-            select_ir, force_reassign=True, ctx=ctx)
-        assert isinstance(select_ir, irast.Set)
-
         # The ELSE needs to be able to reference the subject in an
         # UPDATE, even though that would normally be prohibited.
         ctx.path_scope.factoring_allowlist.add(stmt.subject.path_id)
@@ -329,11 +445,12 @@ def compile_insert_unless_conflict(
         else_ir = dispatch.compile(
             astutils.ensure_qlstmt(else_branch), ctx=ctx)
         assert isinstance(else_ir, irast.Set)
-        else_info = irast.OnConflictElse(select_ir, else_ir)
 
     return irast.OnConflictClause(
-        irast.ConstraintRef(id=ex_cnstrs[0].id, module_id=module_id),
-        else_info
+        constraint=irast.ConstraintRef(
+            id=ex_cnstrs[0].id, module_id=module_id),
+        select_ir=select_ir,
+        else_ir=else_ir
     )
 
 
@@ -360,7 +477,7 @@ def compile_InsertQuery(
         assert isinstance(subject, irast.Set)
 
         subject_stype = setgen.get_set_type(subject, ctx=ictx)
-        if subject_stype.get_is_abstract(ctx.env.schema):
+        if subject_stype.get_abstract(ctx.env.schema):
             raise errors.QueryError(
                 f'cannot insert into abstract '
                 f'{subject_stype.get_verbosename(ctx.env.schema)}',
@@ -396,11 +513,11 @@ def compile_InsertQuery(
             constraint_spec, else_branch = expr.unless_conflict
 
             if constraint_spec:
-                stmt.on_conflict = compile_insert_unless_conflict(
+                stmt.on_conflict = compile_insert_unless_conflict_on(
                     stmt, expr.subject, constraint_spec, else_branch, ctx=ictx)
             else:
-                stmt.on_conflict = irast.OnConflictClause(
-                    constraint=None, else_ir=None)
+                stmt.on_conflict = compile_insert_unless_conflict(
+                    stmt, expr.subject, ctx=ictx)
 
         stmt_subject_stype = setgen.get_set_type(subject, ctx=ictx)
 
@@ -676,7 +793,7 @@ def compile_DescribeStmt(
             itemclass = objref.itemclass
 
             if itemclass is qltypes.SchemaObjectClass.MODULE:
-                modules.append(objref.name)
+                modules.append(s_utils.ast_ref_to_unqualname(objref))
             else:
                 itemtype: Optional[Type[s_obj.Object]] = None
 
@@ -1145,6 +1262,7 @@ def compile_query_subject(
 
     if is_ptr_alias:
         assert view_rptr is not None
+        assert expr_rptr is not None
         # We are inside an expression that defines a link alias in
         # the parent shape, ie. Spam { alias := Spam.bar }, so
         # `Spam.alias` should be a subclass of `Spam.bar` inheriting

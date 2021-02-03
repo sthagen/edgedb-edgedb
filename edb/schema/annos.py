@@ -92,55 +92,6 @@ class AnnotationValue(
         else:
             return vn
 
-    @classmethod
-    def _maybe_fix_name(
-        cls,
-        name: sn.QualName,
-        *,
-        schema: s_schema.Schema,
-        context: so.ComparisonContext,
-    ) -> sn.Name:
-        obj = schema.get(name, type=AnnotationValue)
-
-        base = obj.get_annotation(schema)
-        base_name = context.get_obj_name(schema, base)
-
-        quals = list(sn.quals_from_fullname(name))
-        return sn.QualName(
-            name=sn.get_specialized_name(base_name, *quals),
-            module=name.module,
-        )
-
-    @classmethod
-    def compare_field_value(
-        cls,
-        field: so.Field[Type[so.T]],
-        our_value: so.T,
-        their_value: so.T,
-        *,
-        our_schema: s_schema.Schema,
-        their_schema: s_schema.Schema,
-        context: so.ComparisonContext,
-    ) -> float:
-        # When comparing names, patch up the names to take into
-        # account renames of the base abstract annotations.
-        if field.name == 'name':
-            assert isinstance(our_value, sn.QualName)
-            assert isinstance(their_value, sn.QualName)
-            our_value = cls._maybe_fix_name(  # type: ignore
-                our_value, schema=our_schema, context=context)
-            their_value = cls._maybe_fix_name(  # type: ignore
-                their_value, schema=their_schema, context=context)
-
-        return super().compare_field_value(
-            field,
-            our_value,
-            their_value,
-            our_schema=our_schema,
-            their_schema=their_schema,
-            context=context,
-        )
-
 
 class AnnotationSubject(so.Object):
 
@@ -153,9 +104,11 @@ class AnnotationSubject(so.Object):
         inheritable=False, ephemeral=True, coerce=True, compcoef=0.909,
         default=so.DEFAULT_CONSTRUCTOR)
 
-    def get_annotation(self,
-                       schema: s_schema.Schema,
-                       name: str) -> Optional[str]:
+    def get_annotation(
+        self,
+        schema: s_schema.Schema,
+        name: sn.QualName,
+    ) -> Optional[str]:
         attrval = self.get_annotations(schema).get(schema, name, None)
         return attrval.get_value(schema) if attrval is not None else None
 
@@ -172,7 +125,7 @@ class AnnotationCommand(sd.QualifiedObjectCommand[Annotation],
         field: str,
         astnode: Type[qlast.DDLOperation],
     ) -> Optional[str]:
-        if field in {'is_abstract', 'inheritable'}:
+        if field in {'abstract', 'inheritable'}:
             return field
         else:
             return super().get_ast_attr_for_field(field, astnode)
@@ -193,21 +146,22 @@ class CreateAnnotation(AnnotationCommand, sd.CreateObject[Annotation]):
         assert isinstance(astnode, qlast.CreateAnnotation)
 
         cmd.set_attribute_value('inheritable', astnode.inheritable)
-        cmd.set_attribute_value('is_abstract', True)
+        cmd.set_attribute_value('abstract', True)
 
         assert isinstance(cmd, CreateAnnotation)
         return cmd
 
 
 class RenameAnnotation(AnnotationCommand, sd.RenameObject[Annotation]):
+
     def _canonicalize(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
         scls: so.Object,
-    ) -> List[sd.Command]:
+    ) -> None:
+        super()._canonicalize(schema, context, scls)
         assert isinstance(scls, Annotation)
-        commands = list(super()._canonicalize(schema, context, scls))
 
         # AnnotationValues have names derived from the abstract
         # annotations. We unfortunately need to go update their names.
@@ -217,17 +171,23 @@ class RenameAnnotation(AnnotationCommand, sd.RenameObject[Annotation]):
                 scls, scls_type=AnnotationValue, field_name='annotation'))
 
         for ref in annot_vals:
+            if ref.get_implicit_bases(schema):
+                # This annotation value is inherited, and presumably
+                # the rename in parent will propagate.
+                continue
             ref_name = ref.get_name(schema)
             quals = list(sn.quals_from_fullname(ref_name))
             new_ref_name = sn.QualName(
                 name=sn.get_specialized_name(self.new_name, *quals),
                 module=ref_name.module,
             )
-            commands.append(
-                self._canonicalize_ref_rename(
-                    ref, ref_name, new_ref_name, schema, context, scls))
 
-        return commands
+            self.add(self.init_rename_branch(
+                ref,
+                new_ref_name,
+                schema=schema,
+                context=context,
+            ))
 
 
 class AlterAnnotation(AnnotationCommand, sd.AlterObject[Annotation]):
@@ -295,8 +255,11 @@ class AnnotationValueCommand(
         context: sd.CommandContext,
     ) -> s_schema.Schema:
         schema = super().populate_ddl_identity(schema, context)
-        annoname = sn.shortname_from_fullname(self.classname)
-        anno = schema.get(annoname, type=Annotation)
+        if not isinstance(self, sd.CreateObject):
+            anno = self.scls.get_annotation(schema)
+        else:
+            annoname = sn.shortname_from_fullname(self.classname)
+            anno = schema.get(annoname, type=Annotation)
         self.set_ddl_identity('annotation', anno)
         return schema
 
@@ -349,7 +312,7 @@ class CreateAnnotationValue(
         anno = self.get_ddl_identity('annotation')
         assert anno is not None
         self.set_attribute_value(
-            'is_final',
+            'final',
             not anno.get_inheritable(schema),
         )
         self.set_attribute_value('internal', True)
@@ -382,7 +345,10 @@ class AlterAnnotationValue(
         astnode: qlast.DDLOperation,
         context: sd.CommandContext
     ) -> AlterAnnotationValue:
-        assert isinstance(astnode, qlast.AlterAnnotationValue)
+        assert isinstance(
+            astnode,
+            (qlast.CreateAnnotationValue, qlast.AlterAnnotationValue),
+        )
         cmd = super()._cmd_tree_from_ast(schema, astnode, context)
         assert isinstance(cmd, AlterAnnotationValue)
 

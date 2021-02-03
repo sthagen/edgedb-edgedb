@@ -33,6 +33,7 @@ from edb.schema import pointers as s_pointers
 from edb.schema import schema as s_schema
 from edb.schema import sources as s_sources
 from edb.schema import types as s_types
+from edb.schema import utils as s_utils
 
 from edb.edgeql import ast as qlast
 
@@ -84,39 +85,49 @@ TypeLike = Union[Type, s_types.Type]
 T = TypeVar('T')
 
 
-class ObjectIndex(Generic[T]):
+class UnqualObjectIndex(Generic[T]):
 
-    def __init__(self, items: Mapping[str, T]) -> None:
+    def __init__(self, items: Mapping[sn.UnqualName, T]) -> None:
         self._items = items
 
     def items(
         self,
         schema: s_schema.Schema,
-    ) -> Iterable[Tuple[str, T]]:
+    ) -> Iterable[Tuple[sn.UnqualName, T]]:
         return self._items.items()
 
 
 class Source(NamedObject):
 
-    pointers: Dict[str, Union[s_pointers.Pointer, Pointer]]
+    pointers: Dict[sn.UnqualName, Union[s_pointers.Pointer, Pointer]]
 
     '''Abstract type that mocks the s_sources.Source for tracing purposes.'''
     def __init__(self, name: sn.QualName) -> None:
         super().__init__(name)
         self.pointers = {}
 
+    def maybe_get_ptr(
+        self,
+        schema: s_schema.Schema,
+        name: sn.UnqualName,
+    ) -> Optional[Union[s_pointers.Pointer, Pointer]]:
+        return self.pointers.get(name)
+
     def getptr(
         self,
         schema: s_schema.Schema,
-        name: str,
-    ) -> Optional[Union[s_pointers.Pointer, Pointer]]:
-        return self.pointers.get(name)
+        name: sn.UnqualName,
+    ) -> Union[s_pointers.Pointer, Pointer]:
+        ptr = self.maybe_get_ptr(schema, name)
+        if ptr is None:
+            raise AssertionError(f'{self.name} has no link or property {name}')
+        return ptr
 
     def get_pointers(
         self,
         schema: s_schema.Schema,
-    ) -> ObjectIndex[Union[s_pointers.Pointer, Pointer]]:
-        return ObjectIndex(self.pointers)
+    ) -> UnqualObjectIndex[Union[s_pointers.Pointer, Pointer]]:
+        return UnqualObjectIndex(self.pointers)
 
 
 Source_T = TypeVar("Source_T", bound="Source")
@@ -138,6 +149,11 @@ class UnionType(Type):
     ) -> None:
         self.types = types
 
+    def get_name(self, schema: s_schema.Schema) -> sn.QualName:
+        component_ids = sorted(str(t.get_name(schema)) for t in self.types)
+        nqname = f"({' | '.join(component_ids)})"
+        return sn.QualName(name=nqname, module='__derived__')
+
 
 class Pointer(Source):
 
@@ -155,14 +171,14 @@ class Pointer(Source):
     def is_pointer(self) -> bool:
         return True
 
-    def getptr(
+    def maybe_get_ptr(
         self,
         schema: s_schema.Schema,
-        name: str,
+        name: sn.UnqualName,
     ) -> Optional[Union[s_pointers.Pointer, Pointer]]:
-        if (not (res := super().getptr(schema, name))
+        if (not (res := super().maybe_get_ptr(schema, name))
                 and isinstance(self.target, (Source, s_sources.Source))):
-            res = self.target.getptr(schema, name)
+            res = self.target.maybe_get_ptr(schema, name)
         return res
 
     def get_target(
@@ -492,7 +508,10 @@ def trace_Path(
                     return None
 
                 elif isinstance(ptr, (s_links.Link, Pointer)):
-                    lprop = ptr.getptr(ctx.schema, step.ptr.name)
+                    lprop = ptr.maybe_get_ptr(
+                        ctx.schema,
+                        s_utils.ast_ref_to_unqualname(step.ptr),
+                    )
                     if lprop is None:
                         # Invalid link property reference, bail.
                         return None
@@ -522,7 +541,10 @@ def trace_Path(
                         return None
                 else:
                     if isinstance(tip, (Source, s_sources.Source)):
-                        ptr = tip.getptr(ctx.schema, step.ptr.name)
+                        ptr = tip.maybe_get_ptr(
+                            ctx.schema,
+                            s_utils.ast_ref_to_unqualname(step.ptr),
+                        )
                         if ptr is None:
                             # Invalid pointer reference, bail.
                             return None
@@ -552,7 +574,10 @@ def trace_Path(
             if isinstance(prev_step, qlast.Ptr):
                 if prev_step.direction == '<':
                     if isinstance(tip, (s_sources.Source, ObjectType)):
-                        ptr = tip.getptr(ctx.schema, prev_step.ptr.name)
+                        ptr = tip.maybe_get_ptr(
+                            ctx.schema,
+                            s_utils.ast_ref_to_unqualname(prev_step.ptr),
+                        )
                         if ptr is None:
                             # Invalid pointer reference, bail.
                             return None
@@ -837,3 +862,12 @@ def trace_DescribeStmt(
     if isinstance(node.object, qlast.ObjectRef):
         fq_name = ctx.get_ref_name(node.object)
         ctx.refs.add(fq_name)
+
+
+@trace.register
+def trace_Placeholder(
+    node: qlast.Placeholder,
+    *,
+    ctx: TracerContext,
+) -> None:
+    pass

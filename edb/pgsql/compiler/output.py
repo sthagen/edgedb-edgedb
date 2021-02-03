@@ -87,7 +87,7 @@ def _build_json(
 
         result: pgast.BaseExpr = pgast.FuncCall(
             name=json_func,
-            args=chunks[0],
+            args=list(chunks[0]),
             null_safe=null_safe,
             ser_safe=ser_safe,
             nullable=nullable,
@@ -96,7 +96,7 @@ def _build_json(
         for chunk in chunks[1:]:
             fc = pgast.FuncCall(
                 name=json_func,
-                args=chunk,
+                args=list(chunk),
                 null_safe=null_safe,
                 ser_safe=ser_safe,
                 nullable=nullable,
@@ -656,7 +656,7 @@ def wrap_script_stmt(
     count_val = pgast.FuncCall(
         name=('count',),
         args=[pgast.ColumnRef(name=[stmt_res.name])]
-    ),
+    )
 
     result = pgast.SelectStmt(
         target_list=[
@@ -710,9 +710,13 @@ def top_output_as_value(
         # into a JSON array.
         return aggregate_json_output(stmt, ir_set, env=env)
 
-    elif (env.output_format is context.OutputFormat.NATIVE and
-            env.explicit_top_cast is not None):
-
+    elif (
+        env.explicit_top_cast is not None
+        and (
+            env.output_format is context.OutputFormat.NATIVE
+            or env.output_format is context.OutputFormat.NATIVE_INTERNAL
+        )
+    ):
         typecast = pgast.TypeCast(
             arg=stmt.target_list[0].val,
             type_name=pgast.TypeName(

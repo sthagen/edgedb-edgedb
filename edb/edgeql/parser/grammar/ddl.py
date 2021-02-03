@@ -284,10 +284,18 @@ def commands_block(parent, *commands, opt=True):
 
 
 class UsingStmt(Nonterm):
+
     def reduce_USING_ParenExpr(self, *kids):
         self.val = qlast.SetField(
             name='expr',
             value=kids[1].val,
+            special_syntax=True,
+        )
+
+    def reduce_RESET_EXPRESSION(self, *kids):
+        self.val = qlast.SetField(
+            name='expr',
+            value=None,
             special_syntax=True,
         )
 
@@ -296,34 +304,17 @@ class SetFieldStmt(Nonterm):
     # field := <expr>
     def reduce_SET_Identifier_ASSIGN_Expr(self, *kids):
         self.val = qlast.SetField(
-            name=kids[1].val,
+            name=kids[1].val.lower(),
             value=kids[3].val,
         )
 
 
 class ResetFieldStmt(Nonterm):
     # RESET field
-    def reduce_RESET_Identifier(self, *kids):
-        fname = kids[1].val.lower()
-        special_syntax = True
-        if fname == 'expression':
-            fname = 'expr'
-        elif fname == 'abstract':
-            fname = 'is_abstract'
-        elif fname == 'final':
-            fname = 'is_final'
-        elif fname == 'optionality':
-            fname = 'required'
-        elif fname == 'type':
-            fname = 'target'
-        elif fname in ('delegated', 'cardinality'):
-            pass
-        else:
-            special_syntax = False
+    def reduce_RESET_IDENT(self, *kids):
         self.val = qlast.SetField(
-            name=fname,
+            name=kids[1].val.lower(),
             value=None,
-            special_syntax=special_syntax,
         )
 
 
@@ -381,22 +372,29 @@ class AlterAbstract(Nonterm):
     def reduce_DROP_ABSTRACT(self, *kids):
         # TODO: Raise a DeprecationWarning once we have facility for that.
         self.val = qlast.SetField(
-            name='is_abstract',
+            name='abstract',
             value=qlast.BooleanConstant.from_python(False),
             special_syntax=True,
         )
 
     def reduce_SET_NOT_ABSTRACT(self, *kids):
         self.val = qlast.SetField(
-            name='is_abstract',
+            name='abstract',
             value=qlast.BooleanConstant.from_python(False),
             special_syntax=True,
         )
 
     def reduce_SET_ABSTRACT(self, *kids):
         self.val = qlast.SetField(
-            name='is_abstract',
+            name='abstract',
             value=qlast.BooleanConstant.from_python(True),
+            special_syntax=True,
+        )
+
+    def reduce_RESET_ABSTRACT(self, *kids):
+        self.val = qlast.SetField(
+            name='abstract',
+            value=None,
             special_syntax=True,
         )
 
@@ -406,22 +404,29 @@ class AlterFinal(Nonterm):
     def reduce_DROP_FINAL(self, *kids):
         # TODO: Raise a DeprecationWarning once we have facility for that.
         self.val = qlast.SetField(
-            name='is_final',
+            name='final',
             value=qlast.BooleanConstant.from_python(False),
             special_syntax=True,
         )
 
     def reduce_SET_NOT_FINAL(self, *kids):
         self.val = qlast.SetField(
-            name='is_final',
+            name='final',
             value=qlast.BooleanConstant.from_python(False),
             special_syntax=True,
         )
 
     def reduce_SET_FINAL(self, *kids):
         self.val = qlast.SetField(
-            name='is_final',
+            name='final',
             value=qlast.BooleanConstant.from_python(True),
+            special_syntax=True,
+        )
+
+    def reduce_RESET_FINAL(self, *kids):
+        self.val = qlast.SetField(
+            name='final',
+            value=None,
             special_syntax=True,
         )
 
@@ -477,14 +482,14 @@ class AlterOwnedStmt(Nonterm):
 
     def reduce_DROP_OWNED(self, *kids):
         self.val = qlast.SetField(
-            name='is_owned',
+            name='owned',
             value=qlast.BooleanConstant(value='false'),
             special_syntax=True,
         )
 
     def reduce_SET_OWNED(self, *kids):
         self.val = qlast.SetField(
-            name='is_owned',
+            name='owned',
             value=qlast.BooleanConstant(value='true'),
             special_syntax=True,
         )
@@ -722,6 +727,13 @@ class SetDelegatedStmt(Nonterm):
             special_syntax=True,
         )
 
+    def reduce_RESET_DELEGATED(self, *kids):
+        self.val = qlast.SetField(
+            name='delegated',
+            value=None,
+            special_syntax=True,
+        )
+
 
 commands_block(
     'AlterConcreteConstraint',
@@ -805,7 +817,7 @@ class CreateScalarTypeStmt(Nonterm):
         """
         self.val = qlast.CreateScalarType(
             name=kids[4].val,
-            is_abstract=True,
+            abstract=True,
             bases=kids[5].val,
             commands=kids[6].val
         )
@@ -817,7 +829,7 @@ class CreateScalarTypeStmt(Nonterm):
         """
         self.val = qlast.CreateScalarType(
             name=kids[4].val,
-            is_final=True,
+            final=True,
             bases=kids[5].val,
             commands=kids[6].val
         )
@@ -990,30 +1002,6 @@ class DropIndexStmt(Nonterm):
         )
 
 
-class OptAlterUsingClause(Nonterm):
-    def reduce_USING_ParenExpr(self, *kids):
-        self.val = kids[1].val
-
-    def reduce_empty(self):
-        self.val = None
-
-
-class SetPropertyTypeStmt(Nonterm):
-    def reduce_SETTYPE_FullTypeExpr_OptAlterUsingClause(self, *kids):
-        self.val = qlast.SetPointerType(
-            value=kids[1].val,
-            cast_expr=kids[2].val,
-        )
-
-
-class SetLinkTypeStmt(Nonterm):
-    def reduce_SETTYPE_FullTypeExpr_OptAlterUsingClause(self, *kids):
-        self.val = qlast.SetPointerType(
-            value=kids[1].val,
-            cast_expr=kids[2].val,
-        )
-
-
 #
 # CREATE PROPERTY
 #
@@ -1143,39 +1131,58 @@ class CreateConcretePropertyStmt(Nonterm):
 
 
 #
-# ALTER LINK ... { ALTER PROPERTY
+# ALTER LINK/PROPERTY
 #
+
+
+class OptAlterUsingClause(Nonterm):
+    def reduce_USING_ParenExpr(self, *kids):
+        self.val = kids[1].val
+
+    def reduce_empty(self):
+        self.val = None
+
 
 class SetCardinalityStmt(Nonterm):
 
-    def reduce_SET_SINGLE(self, *kids):
-        self.val = qlast.SetField(
+    def reduce_SET_SINGLE_OptAlterUsingClause(self, *kids):
+        self.val = qlast.SetPointerCardinality(
             name='cardinality',
             value=qlast.StringConstant.from_python(
                 qltypes.SchemaCardinality.One),
             special_syntax=True,
+            conv_expr=kids[2].val,
         )
 
     def reduce_SET_MULTI(self, *kids):
-        self.val = qlast.SetField(
+        self.val = qlast.SetPointerCardinality(
             name='cardinality',
             value=qlast.StringConstant.from_python(
                 qltypes.SchemaCardinality.Many),
             special_syntax=True,
         )
 
+    def reduce_RESET_CARDINALITY_OptAlterUsingClause(self, *kids):
+        self.val = qlast.SetPointerCardinality(
+            name='cardinality',
+            value=None,
+            special_syntax=True,
+            conv_expr=kids[2].val,
+        )
+
 
 class SetRequiredStmt(Nonterm):
 
-    def reduce_SET_REQUIRED(self, *kids):
-        self.val = qlast.SetField(
+    def reduce_SET_REQUIRED_OptAlterUsingClause(self, *kids):
+        self.val = qlast.SetPointerOptionality(
             name='required',
             value=qlast.BooleanConstant.from_python(True),
             special_syntax=True,
+            fill_expr=kids[2].val,
         )
 
     def reduce_SET_OPTIONAL(self, *kids):
-        self.val = qlast.SetField(
+        self.val = qlast.SetPointerOptionality(
             name='required',
             value=qlast.BooleanConstant.from_python(False),
             special_syntax=True,
@@ -1183,10 +1190,31 @@ class SetRequiredStmt(Nonterm):
 
     def reduce_DROP_REQUIRED(self, *kids):
         # TODO: Raise a DeprecationWarning once we have facility for that.
-        self.val = qlast.SetField(
+        self.val = qlast.SetPointerOptionality(
             name='required',
             value=qlast.BooleanConstant.from_python(False),
             special_syntax=True,
+        )
+
+    def reduce_RESET_OPTIONALITY(self, *kids):
+        self.val = qlast.SetPointerOptionality(
+            name='required',
+            value=None,
+            special_syntax=True,
+        )
+
+
+class SetPointerTypeStmt(Nonterm):
+
+    def reduce_SETTYPE_FullTypeExpr_OptAlterUsingClause(self, *kids):
+        self.val = qlast.SetPointerType(
+            value=kids[1].val,
+            cast_expr=kids[2].val,
+        )
+
+    def reduce_RESET_TYPE(self, *kids):
+        self.val = qlast.SetPointerType(
+            value=None,
         )
 
 
@@ -1200,7 +1228,7 @@ commands_block(
     CreateAnnotationValueStmt,
     AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
-    SetPropertyTypeStmt,
+    SetPointerTypeStmt,
     SetCardinalityStmt,
     SetRequiredStmt,
     AlterSimpleExtending,
@@ -1415,7 +1443,7 @@ commands_block(
     DropAnnotationValueStmt,
     SetCardinalityStmt,
     SetRequiredStmt,
-    SetLinkTypeStmt,
+    SetPointerTypeStmt,
     AlterSimpleExtending,
     CreateConcreteConstraintStmt,
     AlterConcreteConstraintStmt,
@@ -1486,7 +1514,7 @@ class CreateObjectTypeStmt(Nonterm):
         self.val = qlast.CreateObjectType(
             name=kids[3].val,
             bases=kids[4].val,
-            is_abstract=True,
+            abstract=True,
             commands=kids[5].val,
         )
 
@@ -1498,7 +1526,7 @@ class CreateObjectTypeStmt(Nonterm):
         self.val = qlast.CreateObjectType(
             name=kids[2].val,
             bases=kids[3].val,
-            is_abstract=False,
+            abstract=False,
             commands=kids[4].val,
         )
 
@@ -1884,7 +1912,7 @@ class CreateOperatorStmt(Nonterm):
             params=kids[5].val,
             returning_typemod=kids[7].val,
             returning=kids[8].val,
-            is_abstract=True,
+            abstract=True,
             **self._process_operator_body(kids[9], abstract=True)
         )
 
@@ -2309,7 +2337,7 @@ class OptCreateMigrationBody(Nonterm):
             LBRACE CreateMigrationBody OptSemicolons RBRACE
         """
         message, stmts = self._process_body(kids[1].val)
-        body = qlast.MigrationBody(commands=stmts)
+        body = qlast.MigrationBody(commands=tuple(stmts))
         contexts = [kids[1].context]
         if kids[2].context is not None:
             contexts.append(kids[2].context)
@@ -2321,7 +2349,7 @@ class OptCreateMigrationBody(Nonterm):
             LBRACE Semicolons CreateMigrationBody OptSemicolons RBRACE
         """
         message, stmts = self._process_body(kids[2].val)
-        body = qlast.MigrationBody(commands=stmts)
+        body = qlast.MigrationBody(commands=tuple(stmts))
         body.context = pctx.merge_context(
             [kids[1].context, kids[2].context, kids[3].context])
         self.val = MigrationBody(body=body, message=message)
@@ -2331,14 +2359,14 @@ class OptCreateMigrationBody(Nonterm):
             LBRACE OptSemicolons RBRACE
         """
         self.val = []
-        body = qlast.MigrationBody(commands=[])
+        body = qlast.MigrationBody(commands=tuple())
         body.context = kids[1].context
         if body.context is None:
             body.context = pctx.empty_context()
         self.val = MigrationBody(body=body, message=None)
 
     def reduce_empty(self):
-        body = qlast.MigrationBody(commands=[])
+        body = qlast.MigrationBody(commands=tuple())
         body.context = pctx.empty_context()
         self.val = MigrationBody(body=body, message=None)
 

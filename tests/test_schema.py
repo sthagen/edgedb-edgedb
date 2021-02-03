@@ -32,6 +32,7 @@ from edb.edgeql import qltypes
 
 from edb.schema import ddl as s_ddl
 from edb.schema import links as s_links
+from edb.schema import name as s_name
 from edb.schema import objtypes as s_objtypes
 
 from edb.testbase import lang as tb
@@ -207,9 +208,11 @@ _123456789_123456789_123456789 -> str
         """)
 
         obj = schema.get('test::Object')
+        foo_bar = obj.getptr(schema, s_name.UnqualName('foo_plus_bar'))
         self.assertEqual(
-            obj.getptr(schema, 'foo_plus_bar').get_cardinality(schema),
-            qltypes.SchemaCardinality.One)
+            foo_bar.get_cardinality(schema),
+            qltypes.SchemaCardinality.One,
+        )
 
     def test_schema_computable_cardinality_inference_02(self):
         schema = self.load_schema("""
@@ -222,9 +225,11 @@ _123456789_123456789_123456789 -> str
         """)
 
         obj = schema.get('test::Object')
+        foo_bar = obj.getptr(schema, s_name.UnqualName('foo_plus_bar'))
         self.assertEqual(
-            obj.getptr(schema, 'foo_plus_bar').get_cardinality(schema),
-            qltypes.SchemaCardinality.Many)
+            foo_bar.get_cardinality(schema),
+            qltypes.SchemaCardinality.Many,
+        )
 
     @tb.must_fail(errors.SchemaDefinitionError,
                   "possibly more than one element returned by an expression "
@@ -324,13 +329,14 @@ _123456789_123456789_123456789 -> str
         Obj4 = schema.get('test::Object4')
         Obj5 = schema.get('test::Object5')
         Obj6 = schema.get('test::Object6')
-        obj1_id = Obj1.getptr(schema, 'id')
-        obj1_type = Obj1.getptr(schema, '__type__')
-        obj1_type_source = obj1_type.getptr(schema, 'source')
-        obj2_type = Obj2.getptr(schema, '__type__')
-        foo = Obj2.getptr(schema, 'foo')
-        foo_target = foo.getptr(schema, 'target')
-        bar = Obj5.getptr(schema, 'bar')
+        obj1_id = Obj1.getptr(schema, s_name.UnqualName('id'))
+        obj1_type = Obj1.getptr(schema, s_name.UnqualName('__type__'))
+        obj1_type_source = obj1_type.getptr(
+            schema, s_name.UnqualName('source'))
+        obj2_type = Obj2.getptr(schema, s_name.UnqualName('__type__'))
+        foo = Obj2.getptr(schema, s_name.UnqualName('foo'))
+        foo_target = foo.getptr(schema, s_name.UnqualName('target'))
+        bar = Obj5.getptr(schema, s_name.UnqualName('bar'))
 
         self.assertEqual(
             schema.get_referrers(Obj1),
@@ -468,10 +474,10 @@ _123456789_123456789_123456789 -> str
         """)
 
         Obj1 = schema.get('test::Object1')
-        obj1_num = Obj1.getptr(schema, 'num')
+        obj1_num = Obj1.getptr(schema, s_name.UnqualName('num'))
 
         Obj2 = schema.get('test::Object2')
-        obj2_num = Obj2.getptr(schema, 'num')
+        obj2_num = Obj2.getptr(schema, s_name.UnqualName('num'))
 
         self.assertEqual(
             schema.get_referrers(obj1_num),
@@ -496,10 +502,10 @@ _123456789_123456789_123456789 -> str
         """)
 
         Obj1 = schema.get('test::Object1')
-        obj1_num = Obj1.getptr(schema, 'num')
+        obj1_num = Obj1.getptr(schema, s_name.UnqualName('num'))
 
         Obj2 = schema.get('test::Object2')
-        obj2_num = Obj2.getptr(schema, 'num')
+        obj2_num = Obj2.getptr(schema, s_name.UnqualName('num'))
 
         self.assertEqual(
             schema.get_referrers(obj1_num),
@@ -525,14 +531,23 @@ _123456789_123456789_123456789 -> str
         Object1 = schema.get('test::Object1')
         Object2 = schema.get('test::Object2')
 
-        self.assertEqual(Object1.get_annotation(schema, 'test::noninh'), 'bar')
+        self.assertEqual(
+            Object1.get_annotation(schema, s_name.QualName('test', 'noninh')),
+            'bar',
+        )
         # Attributes are non-inheritable by default
-        self.assertIsNone(Object2.get_annotation(schema, 'test::noninh'))
+        self.assertIsNone(
+            Object2.get_annotation(schema, s_name.QualName('test', 'noninh')),
+        )
 
         self.assertEqual(
-            Object1.get_annotation(schema, 'test::inh'), 'inherit me')
+            Object1.get_annotation(schema, s_name.QualName('test', 'inh')),
+            'inherit me',
+        )
         self.assertEqual(
-            Object2.get_annotation(schema, 'test::inh'), 'inherit me')
+            Object2.get_annotation(schema, s_name.QualName('test', 'inh')),
+            'inherit me',
+        )
 
     def test_schema_annotation_inheritance_02(self):
         schema = tb._load_std_schema()
@@ -552,7 +567,7 @@ _123456789_123456789_123456789 -> str
         inh_anno = schema.get('default::inh_anno')
         der = schema.get('default::Derived')
         annos = der.get_annotations(schema)
-        anno = annos.get(schema, 'default::inh_anno')
+        anno = annos.get(schema, s_name.QualName('default', 'inh_anno'))
         self.assertEqual(anno.get_annotation(schema), inh_anno)
 
         no_anno = annos.get(schema, 'default::noinh_anno', default=None)
@@ -578,7 +593,7 @@ _123456789_123456789_123456789 -> str
         ''')
 
         User = schema.get('default::User')
-        name_prop = User.getptr(schema, 'name')
+        name_prop = User.getptr(schema, s_name.UnqualName('name'))
         constr = name_prop.get_constraints(schema).objects(schema)[0]
         base_names = constr.get_bases(schema).names(schema)
         self.assertEqual(len(base_names), 1)
@@ -603,7 +618,7 @@ _123456789_123456789_123456789 -> str
         ''')
 
         User = schema.get('default::User')
-        name_prop = User.getptr(schema, 'name')
+        name_prop = User.getptr(schema, s_name.UnqualName('name'))
         constr = name_prop.get_constraints(schema).objects(schema)[0]
         base_names = constr.get_bases(schema).names(schema)
         self.assertEqual(len(base_names), 1)
@@ -631,7 +646,7 @@ _123456789_123456789_123456789 -> str
         ''')
 
         VegRecipes = schema.get('default::VegRecipes')
-        name_prop = VegRecipes.getptr(schema, 'name')
+        name_prop = VegRecipes.getptr(schema, s_name.UnqualName('name'))
         constr = name_prop.get_constraints(schema).objects(schema)
         self.assertEqual(
             len(constr), 0,
@@ -659,7 +674,7 @@ _123456789_123456789_123456789 -> str
         ''')
 
         VegRecipes = schema.get('default::VegRecipes')
-        name_prop = VegRecipes.getptr(schema, 'name')
+        name_prop = VegRecipes.getptr(schema, s_name.UnqualName('name'))
         constr = name_prop.get_constraints(schema).objects(schema)
 
         self.assertEqual(
@@ -806,9 +821,9 @@ _123456789_123456789_123456789 -> str
 
         with self.assertRaisesRegex(
             errors.SchemaDefinitionError,
-            "cannot alter the cardinality of property 'foo1' of object type "
-            "'test::Foo' because this affects expression of property 'bar1' "
-            "of object type 'test::Foo'"
+            "cannot convert property 'foo1' of object type 'test::Foo' to "
+            "'multi' cardinality because this affects expression of "
+            "property 'bar1' of object type 'test::Foo'"
         ):
             self.run_ddl(schema, '''
                 ALTER TYPE Foo ALTER PROPERTY foo1 SET MULTI
@@ -852,7 +867,7 @@ _123456789_123456789_123456789 -> str
         ''', default_module='test')
 
         Bar = schema.get('test::Bar', type=s_objtypes.ObjectType)
-        foo1 = Bar.getptr(schema, 'foo1')
+        foo1 = Bar.getptr(schema, s_name.UnqualName('foo1'))
         self.assertEqual(str(foo1.get_cardinality(schema)), 'Many')
 
     def test_schema_ref_diamond_inheritance(self):
@@ -958,12 +973,13 @@ _123456789_123456789_123456789 -> str
 
         self.assertEqual(
             obj.get_annotations(schema).get(
-                schema, 'test::attr').get_verbosename(
+                schema, s_name.QualName('test', 'attr')).get_verbosename(
                     schema, with_parent=True),
             "annotation 'test::attr' of object type 'test::Object1'",
         )
 
-        foo_prop = obj.get_pointers(schema).get(schema, 'foo')
+        foo_prop = obj.get_pointers(schema).get(
+            schema, s_name.UnqualName('foo'))
         self.assertEqual(
             foo_prop.get_verbosename(schema, with_parent=True),
             "property 'foo' of object type 'test::Object1'",
@@ -971,7 +987,7 @@ _123456789_123456789_123456789 -> str
 
         self.assertEqual(
             foo_prop.get_annotations(schema).get(
-                schema, 'test::attr').get_verbosename(
+                schema, s_name.QualName('test', 'attr')).get_verbosename(
                     schema, with_parent=True),
             "annotation 'test::attr' of property 'foo' of "
             "object type 'test::Object1'",
@@ -985,16 +1001,18 @@ _123456789_123456789_123456789 -> str
             "object type 'test::Object1'",
         )
 
-        bar_link = obj.get_pointers(schema).get(schema, 'bar')
+        bar_link = obj.get_pointers(schema).get(
+            schema, s_name.UnqualName('bar'))
         self.assertEqual(
             bar_link.get_verbosename(schema, with_parent=True),
             "link 'bar' of object type 'test::Object1'",
         )
 
-        bar_link_prop = bar_link.get_pointers(schema).get(schema, 'bar_prop')
+        bar_link_prop = bar_link.get_pointers(schema).get(
+            schema, s_name.UnqualName('bar_prop'))
         self.assertEqual(
             bar_link_prop.get_annotations(schema).get(
-                schema, 'test::attr').get_verbosename(
+                schema, s_name.QualName('test', 'attr')).get_verbosename(
                     schema, with_parent=True),
             "annotation 'test::attr' of property 'bar_prop' of "
             "link 'bar' of object type 'test::Object1'",
@@ -1045,20 +1063,22 @@ _123456789_123456789_123456789 -> str
         A = schema.get('test::A')
         T2 = schema.get('test::T2')
         F = schema.get('test::F')
-        A_t = A.getptr(schema, 't')
-        A_t2 = A.getptr(schema, 't2')
-        A_tf_link = A.getptr(schema, 'tf')
+        A_t = A.getptr(schema, s_name.UnqualName('t'))
+        A_t2 = A.getptr(schema, s_name.UnqualName('t2'))
+        A_tf_link = A.getptr(schema, s_name.UnqualName('tf'))
         A_tf = A_tf_link.get_target(schema)
 
         # Check that ((T1 | T2) & F) has properties from both parts
         # of the intersection.
-        self.assertIsNotNone(A_tf.getptr(schema, 'n'))
-        self.assertIsNotNone(A_tf.getptr(schema, 'f'))
+        A_tf.getptr(schema, s_name.UnqualName('n'))
+        A_tf.getptr(schema, s_name.UnqualName('f'))
 
         # Ditto for link properties defined on a common link.
-        tfd = A_tf.getptr(schema, 'd')
-        tfd.getptr(schema, 'f_d_prop')
-        tfd.getptr(schema, 't1_d_prop')
+        tfd = A_tf.getptr(schema, s_name.UnqualName('d'))
+        tfd.getptr(schema, s_name.UnqualName('f_d_prop'))
+
+        # t1_d_prop is only present in T1, and so wouldn't be in T1 | T2
+        self.assertIsNone(tfd.maybe_get_ptr(schema, 't1_d_prop'))
 
         self.assertTrue(
             A_t2.get_target(schema).issubclass(
@@ -1094,11 +1114,13 @@ _123456789_123456789_123456789 -> str
         B = schema.get('test::B')
         C = schema.get('test::C')
         std_link = schema.get('std::link')
-        BaseObject__type__ = BaseObject.getptr(schema, '__type__')
-        Object__type__ = Object.getptr(schema, '__type__')
-        A__type__ = A.getptr(schema, '__type__')
-        B__type__ = B.getptr(schema, '__type__')
-        C__type__ = C.getptr(schema, '__type__')
+        BaseObject__type__ = BaseObject.getptr(
+            schema, s_name.UnqualName('__type__'))
+        Object__type__ = Object.getptr(
+            schema, s_name.UnqualName('__type__'))
+        A__type__ = A.getptr(schema, s_name.UnqualName('__type__'))
+        B__type__ = B.getptr(schema, s_name.UnqualName('__type__'))
+        C__type__ = C.getptr(schema, s_name.UnqualName('__type__'))
         self.assertEqual(
             C__type__.get_ancestors(schema).objects(schema),
             (
@@ -1142,7 +1164,7 @@ _123456789_123456789_123456789 -> str
 
         std_prop = schema.get('std::property')
         B = schema.get('test::B')
-        B_name = B.getptr(schema, 'name')
+        B_name = B.getptr(schema, s_name.UnqualName('name'))
         schema, derived = std_prop.derive_ref(
             schema,
             B,
@@ -2015,6 +2037,67 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
 
         self._assert_migration_consistency(schema)
 
+    @test.xfail('''
+        The error is not raised.
+    ''')
+    def test_schema_get_migration_41(self):
+        schema = r'''
+        type Base {
+            property firstname -> str {
+                constraint max_len_value(10);
+                # Test that it's illegal to restate the constraint,
+                # just like in DDL.
+                constraint max_len_value(10);
+            }
+        }
+        '''
+
+        with self.assertRaisesRegex(
+                errors.SchemaError,
+                r'Constraint .+ is already present in the schema'):
+            self._assert_migration_consistency(schema)
+
+    def test_schema_get_migration_42(self):
+        schema = r'''
+        type Base {
+            property firstname -> str {
+                constraint max_len_value(10);
+            }
+        }
+
+        type Derived extending Base {
+            overloaded property firstname -> str {
+                # Same constraint, but stricter.
+                constraint max_len_value(5);
+            }
+        }
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    @test.xfail('''
+        edb.errors.InvalidReferenceError:
+        constraint 'std::max_len_value' does not exist
+    ''')
+    def test_schema_get_migration_43(self):
+        schema = r'''
+        type Base {
+            property firstname -> str {
+                constraint max_len_value(10);
+            }
+        }
+
+        type Derived extending Base {
+            overloaded property firstname -> str {
+                # Test that it's legal to restate the constraint when
+                # overloading.
+                constraint max_len_value(10);
+            }
+        }
+        '''
+
+        self._assert_migration_consistency(schema)
+
     def test_schema_get_migration_multi_module_01(self):
         schema = r'''
             # The two declared types declared are from different
@@ -2671,31 +2754,6 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             }
         """])
 
-    def test_schema_migrations_equivalence_25(self):
-        self._assert_migration_equivalence([r"""
-            type Child;
-
-            type Base {
-                multi link bar -> Child;
-            }
-        """, r"""
-            type Child;
-
-            type Base {
-                # reduce link cardinality
-                link bar -> Child;
-            }
-        """, r"""
-            type Child;
-
-            type Base {
-                link bar -> Child {
-                    # further restrict the link
-                    constraint exclusive
-                }
-            }
-        """])
-
     def test_schema_migrations_equivalence_26(self):
         self._assert_migration_equivalence([r"""
             type Child;
@@ -3203,6 +3261,216 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             type Foo {
                 property val -> float64;
                 property comp := .val + 2;
+            };
+        """])
+
+    @test.xfail('''
+        unexpected difference in schema produced by incremental
+        migration on step 2:
+
+        Target types in UserAlias don't agree
+    ''')
+    def test_schema_migrations_equivalence_44(self):
+        # change a link used in a computable
+        self._assert_migration_equivalence([r"""
+            type Action {
+                required link user -> User;
+            };
+            type Post extending Action;
+            type User {
+                multi link actions := .<user[IS Post];
+            };
+
+            alias UserAlias := User {
+                action_ids := .actions.id
+            };
+        """, r"""
+            type Action {
+                required link user -> User;
+            };
+            type Post extending Action;
+            type User {
+                multi link actions := .<user[IS Action];
+            };
+
+            alias UserAlias := User {
+                action_ids := .actions.id
+            };
+        """])
+
+    @test.xfail('''
+        unexpected difference in schema produced by incremental
+        migration on step 2:
+
+        ... from_alias = None | True
+    ''')
+    def test_schema_migrations_equivalence_45(self):
+        # change a link used in a computable
+        self._assert_migration_equivalence([r"""
+            type Action {
+                required link user -> User;
+            };
+            type Post extending Action;
+            type User {
+                multi link actions := .<user[IS Post];
+            };
+
+            alias UserAlias := User {
+                action_ids := .actions.id
+            };
+        """, r"""
+            type Action {
+                required link user -> User;
+            };
+            type Post extending Action;
+            type User {
+                multi link actions := .<user[IS Post];
+                # Similar to previous test, but with an intermediate
+                # step. Separating addition of a new computable and
+                # then swapping the old one for the new one.
+                #
+                # Basically, we model a situation where some kind of
+                # link "actions" has to exist throughout the entire
+                # process (part of some interface that cannot be
+                # easily changed maybe).
+                multi link new_actions := .<user[IS Action];
+            };
+
+            alias UserAlias := User {
+                action_ids := .actions.id,
+                new_action_ids := .new_actions.id,
+            };
+        """, r"""
+            type Action {
+                required link user -> User;
+            };
+            type Post extending Action;
+            type User {
+                multi link actions := .<user[IS Action];
+            };
+
+            alias UserAlias := User {
+                action_ids := .actions.id
+            };
+        """])
+
+    @test.xfail('''
+        unexpected difference in schema produced by incremental
+        migration on step 2:
+
+        Target types in UserAlias don't agree
+    ''')
+    def test_schema_migrations_equivalence_46(self):
+        # change a link used in a computable
+        self._assert_migration_equivalence([r"""
+            type Action;
+            type Post extending Action {
+                required link user -> User;
+            };
+            type User {
+                multi link actions := .<user[IS Post]
+            };
+
+            alias UserAlias := User {
+                action_ids := .actions.id
+            };
+        """, r"""
+            type Action {
+                required link user -> User;
+            };
+            type Post extending Action;
+            type User {
+                multi link actions := .<user[IS Action]
+            };
+
+            alias UserAlias := User {
+                action_ids := .actions.id
+            };
+        """])
+
+    @test.xfail('''
+        edb.errors.SchemaError: cannot drop link 'user' of object type
+        'default::Action' because other objects in the schema depend
+        on it
+    ''')
+    def test_schema_migrations_equivalence_47(self):
+        # change a link used in a computable
+        self._assert_migration_equivalence([r"""
+            type Action {
+                required link user -> User;
+            };
+            type Post extending Action;
+            type User {
+                multi link actions := .<user[IS Action]
+            };
+        """, r"""
+            type Action;
+            type Post extending Action {
+                required link user -> User;
+            };
+            type User {
+                multi link actions := .<user[IS Post]
+            };
+        """])
+
+    @test.xfail('''
+        edb.errors.SchemaError: link 'owned' of object type
+        'default::User' cannot be cast automatically from object type
+        'default::Post' to object type 'default::Action'
+
+        Notice that since this link is a computable, we shouldn't care
+        about "converting" it.
+    ''')
+    def test_schema_migrations_equivalence_48(self):
+        # change a link used in a computable
+        self._assert_migration_equivalence([r"""
+            type Action {
+                required property name -> str;
+            };
+            type Post {
+                required property stamp -> datetime;
+                required link user -> User;
+            };
+            type User {
+                multi link owned := .<user[IS Post]
+            };
+        """, r"""
+            type Action {
+                required property name -> str;
+                required link user -> User;
+            };
+            type Post {
+                required property stamp -> datetime;
+            };
+            type User {
+                multi link owned := .<user[IS Action]
+            };
+        """])
+
+    def test_schema_migrations_equivalence_compound_01(self):
+        # Check that union types can be referenced in computables
+        # Bug #2002.
+        self._assert_migration_equivalence([r"""
+            type Type1;
+            type Type2;
+            type Type3 {
+                link l1 -> (Type1 | Type2);
+                link l2 := (SELECT .l1);
+            };
+        """, r"""
+            type Type11;  # Rename
+            type Type2;
+            type Type3 {
+                link l1 -> (Type11 | Type2);
+                link l2 := (SELECT .l1);
+            };
+        """, r"""
+            type Type11;
+            type Type2;
+            type TypeS;
+            type Type3 {
+                link l1 -> (Type11 | Type2 | TypeS);  # Expand union
+                link l2 := (SELECT .l1);
             };
         """])
 
@@ -3756,6 +4024,92 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             type Derived extending Base;
         """])
 
+    def test_schema_migrations_equivalence_annotation_04(self):
+        self._assert_migration_equivalence([r"""
+            type Base;
+        """, r"""
+            abstract inheritable annotation bar_anno;
+
+            type Base {
+                annotation bar_anno := 'Base bar_anno 04';
+            }
+
+            type Derived extending Base;
+        """, r"""
+            # rename bar_anno -> foo_anno
+            abstract inheritable annotation foo_anno;
+
+            type Base {
+                annotation foo_anno := 'Base bar_anno 04';
+            }
+
+            type Derived extending Base;
+        """])
+
+    def test_schema_migrations_equivalence_annotation_05(self):
+        self._assert_migration_equivalence([r"""
+            abstract inheritable annotation my_anno;
+
+            type Base {
+                property my_prop -> str {
+                    annotation my_anno := 'Base my_anno 05';
+                }
+            }
+
+            type Derived extending Base {
+                overloaded property my_prop -> str {
+                    annotation my_anno := 'Derived my_anno 05';
+                }
+            }
+        """, r"""
+            # rename annotated & inherited property
+            abstract inheritable annotation my_anno;
+
+            type Base {
+                property renamed_prop -> str {
+                    annotation my_anno := 'Base my_anno 05';
+                }
+            }
+
+            type Derived extending Base {
+                overloaded property renamed_prop -> str {
+                    annotation my_anno := 'Derived my_anno 05';
+                }
+            }
+        """])
+
+    def test_schema_migrations_equivalence_annotation_06(self):
+        self._assert_migration_equivalence([r"""
+            abstract inheritable annotation my_anno;
+
+            type Base {
+                link my_link -> Object {
+                    annotation my_anno := 'Base my_anno 06';
+                }
+            }
+
+            type Derived extending Base {
+                overloaded link my_link -> Object {
+                    annotation my_anno := 'Derived my_anno 06';
+                }
+            }
+        """, r"""
+            # rename annotated & inherited link
+            abstract inheritable annotation my_anno;
+
+            type Base {
+                link renamed_link -> Object {
+                    annotation my_anno := 'Base my_anno 06';
+                }
+            }
+
+            type Derived extending Base {
+                overloaded link renamed_link -> Object {
+                    annotation my_anno := 'Derived my_anno 06';
+                }
+            }
+        """])
+
     def test_schema_migrations_equivalence_index_01(self):
         self._assert_migration_equivalence([r"""
             type Base {
@@ -3865,6 +4219,55 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             type Base {
                 property first_name -> str;
                 # drop constraint
+            }
+        """])
+
+    def test_schema_migrations_equivalence_constraint_02(self):
+        self._assert_migration_equivalence([r"""
+            type Base {
+                property firstname -> str {
+                    constraint max_len_value(10)
+                }
+            }
+
+            type Derived extending Base;
+        """, r"""
+            # rename constrained & inherited property
+            type Base {
+                property first_name -> str {
+                    constraint max_len_value(10)
+                }
+            }
+
+            type Derived extending Base;
+        """])
+
+    def test_schema_migrations_equivalence_constraint_03(self):
+        self._assert_migration_equivalence([r"""
+            type Base {
+                property firstname -> str {
+                    constraint max_len_value(10);
+                }
+            }
+
+            type Derived extending Base {
+                overloaded property firstname -> str {
+                    # add another constraint to make the prop overloaded
+                    constraint min_len_value(5);
+                }
+            }
+        """, r"""
+            # rename constrained & inherited property
+            type Base {
+                property first_name -> str {
+                    constraint max_len_value(10);
+                }
+            }
+
+            type Derived extending Base {
+                overloaded property first_name -> str {
+                    constraint min_len_value(5);
+                }
             }
         """])
 
@@ -4250,6 +4653,65 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             };
         """])
 
+    def test_schema_migrations_equivalence_collections_24(self):
+        self._assert_migration_equivalence([r"""
+            scalar type MyScalar extending str;
+
+            type User {
+                required property tup -> tuple<x:MyScalar>;
+            };
+        """, r"""
+            scalar type MyScalarRenamed extending str;
+
+            type User {
+                required property tup -> tuple<x:MyScalarRenamed>;
+            };
+        """])
+
+    def test_schema_migrations_equivalence_collections_25(self):
+        self._assert_migration_equivalence([r"""
+            scalar type MyScalar extending str;
+
+            type User {
+                required property arr -> array<MyScalar>;
+            };
+        """, r"""
+            scalar type MyScalarRenamed extending str;
+
+            type User {
+                required property tup -> array<MyScalarRenamed>;
+            };
+        """])
+
+    def test_schema_migrations_equivalence_collections_26(self):
+        self._assert_migration_equivalence([r"""
+            scalar type MyScalar extending str;
+            scalar type MyScalar2 extending int64;
+
+            type User {
+                required property tup ->
+                    tuple<
+                        a: tuple<x:MyScalar>,
+                        b: MyScalar,
+                        c: array<MyScalar2>,
+                        d: tuple<array<MyScalar2>>,
+                    >;
+            };
+        """, r"""
+            scalar type MyScalarRenamed extending str;
+            scalar type MyScalar2Renamed extending int64;
+
+            type User {
+                required property tup ->
+                    tuple<
+                        a: tuple<x:MyScalarRenamed>,
+                        b: MyScalarRenamed,
+                        c: array<MyScalar2Renamed>,
+                        d: tuple<array<MyScalar2Renamed>>,
+                    >;
+            };
+        """])
+
     def test_schema_migrations_equivalence_rename_refs_01(self):
         self._assert_migration_equivalence([r"""
             type Note {
@@ -4353,8 +4815,8 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             alias Alias2 := (SELECT Note.note);
             alias Alias3 := Note { command := .note ++ "!" };
 
-            type Foo {
-                link a -> Alias1;
+            alias Foo := Note {
+                a := Alias1
             };
         """, r"""
             type Note {
@@ -4364,8 +4826,8 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             alias Blias2 := (SELECT Note.note);
             alias Blias3 := Note { command := .note ++ "!" };
 
-            type Foo {
-                link a -> Blias1;
+            alias Foo := Note {
+                a := Blias1
             };
         """])
 
@@ -4666,10 +5128,6 @@ class TestDescribe(tb.BaseSchemaLoadTest):
     """Test the DESCRIBE command."""
 
     re_filter = re.compile(r'[\s]+|(,(?=\s*[})]))')
-    uuid_re = re.compile(
-        r'[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}'
-        r'-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
-    )
     maxDiff = 10000
 
     def _assert_describe(
@@ -4697,11 +5155,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 ),
             )
 
-            output = self.uuid_re.sub(
-                '@SID@',
-                stmt.expr.expr.result.expr.value,
-            )
-
+            output = stmt.expr.expr.result.expr.value
             if isinstance(expected_output, list):
                 for variant in expected_output:
                     try:
@@ -5718,9 +6172,10 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             {
                 CREATE MULTI LINK intersection_of -> schema::ObjectType;
                 CREATE MULTI LINK union_of -> schema::ObjectType;
-                CREATE PROPERTY is_compound_type := (
+                CREATE PROPERTY compound_type := (
                     (EXISTS (.union_of) OR EXISTS (.intersection_of))
                 );
+                CREATE PROPERTY is_compound_type := (.compound_type);
                 CREATE MULTI LINK links := (
                     .pointers[IS schema::Link]
                 );
@@ -5746,9 +6201,10 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                     .pointers[IS schema::Property]
                 );
                 multi link union_of -> schema::ObjectType;
-                property is_compound_type := (
+                property compound_type := (
                     (EXISTS (.union_of) OR EXISTS (.intersection_of))
                 );
+                property is_compound_type := (.compound_type);
             };
             """,
         )

@@ -709,7 +709,7 @@ class CallableLike:
     def get_verbosename(self, schema: s_schema.Schema) -> str:
         raise NotImplementedError
 
-    def get_is_abstract(self, schema: s_schema.Schema) -> bool:
+    def get_abstract(self, schema: s_schema.Schema) -> bool:
         raise NotImplementedError
 
 
@@ -733,7 +733,7 @@ class CallableObject(
     return_typemod = so.SchemaField(
         ft.TypeModifier, compcoef=0.4, coerce=True)
 
-    is_abstract = so.SchemaField(
+    abstract = so.SchemaField(
         bool, default=False, compcoef=0.909)
 
     def as_create_delta(
@@ -911,7 +911,7 @@ class CallableCommand(sd.QualifiedObjectCommand[CallableObjectT]):
             # Some Callables, like the concrete constraints,
             # have no params in their AST.
             return []
-        assert isinstance(astnode, qlast.CallableObject)
+        assert isinstance(astnode, qlast.CallableObjectCommand)
         return cls._get_param_desc_from_params_ast(
             schema, modaliases, astnode.params, param_offset=param_offset)
 
@@ -949,13 +949,13 @@ class RenameCallableObject(
         schema: s_schema.Schema,
         context: sd.CommandContext,
         scls: so.Object,
-    ) -> List[sd.Command]:
-        assert isinstance(scls, CallableObject)
-        commands = list(super()._canonicalize(schema, context, scls))
+    ) -> None:
+        super()._canonicalize(schema, context, scls)
 
+        assert isinstance(scls, CallableObject)
         # Don't do anything for concrete constraints
-        if not isinstance(scls, Function) and not scls.get_is_abstract(schema):
-            return commands
+        if not isinstance(scls, Function) and not scls.get_abstract(schema):
+            return
 
         # params don't get picked up by the base _canonicalize because
         # they aren't RefDicts (and use a different mangling scheme to
@@ -966,13 +966,12 @@ class RenameCallableObject(
 
         assert isinstance(self.new_name, sn.QualName)
         for dparam, oparam in zip(params, param_list.objects(schema)):
-            ref_name = oparam.get_name(schema)
-            new_ref_name = dparam.get_fqname(schema, self.new_name)
-            commands.append(
-                self._canonicalize_ref_rename(
-                    oparam, ref_name, new_ref_name, schema, context, scls))
-
-        return commands
+            self.add(self.init_rename_branch(
+                oparam,
+                dparam.get_fqname(schema, self.new_name),
+                schema=schema,
+                context=context,
+            ))
 
 
 class AlterCallableObject(
@@ -986,9 +985,9 @@ class AlterCallableObject(
         context: sd.CommandContext,
         *,
         parent_node: Optional[qlast.DDLOperation] = None,
-    ) -> Optional[qlast.CallableObject]:
+    ) -> Optional[qlast.CallableObjectCommand]:
         node = cast(
-            qlast.CallableObject,
+            qlast.CallableObjectCommand,
             super()._get_ast(schema, context, parent_node=parent_node)
         )
 
@@ -1752,7 +1751,7 @@ class RenameFunction(RenameCallableObject[Function], FunctionCommand):
         )
         return out
 
-    def validate_rename(
+    def validate_alter(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,

@@ -184,7 +184,7 @@ def new_tuple_set(
     for elem in elements:
         elem_path_id = pathctx.get_tuple_indirection_path_id(
             result_path_id, elem.name, get_set_type(elem.val, ctx=ctx),
-            ctx=ctx).strip_weak_namespaces()
+            ctx=ctx)
         final_elems.append(irast.TupleElement(
             name=elem.name,
             val=elem.val,
@@ -229,7 +229,6 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
                 'could not resolve partial path ',
                 context=expr.context)
 
-    extra_scopes = {}
     computables = []
     path_sets = []
 
@@ -283,8 +282,6 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
                         is_binding=True,
                         ctx=ctx,
                     )
-
-                    extra_scopes[path_tip] = view_scope_info
                 else:
                     path_tip = class_set(stype, ctx=ctx)
 
@@ -324,25 +321,26 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
                         ctx=ctx,
                     )
 
+                    assert ind_prefix.rptr is not None
                     prefix_type = get_set_type(ind_prefix.rptr.source, ctx=ctx)
-                    assert isinstance(prefix_type, s_sources.Source)
+                    assert isinstance(prefix_type, s_objtypes.ObjectType)
 
                     if not ptrs:
                         tip_type = get_set_type(path_tip, ctx=ctx)
                         s_vn = prefix_type.get_verbosename(ctx.env.schema)
                         t_vn = tip_type.get_verbosename(ctx.env.schema)
-                        ptr = ind_prefix.rptr.ptrref.shortname.name
+                        pn = ind_prefix.rptr.ptrref.shortname.name
                         if direction is s_pointers.PointerDirection.Inbound:
                             s_vn, t_vn = t_vn, s_vn
                         raise errors.InvalidReferenceError(
                             f"property '{ptr_name}' does not exist because"
-                            f" there are no '{ptr}' links between"
+                            f" there are no '{pn}' links between"
                             f" {s_vn} and {t_vn}",
                             context=ptr_expr.ptr.context,
                         )
 
                     prefix_ptr_name = (
-                        next(iter(ptrs)).get_shortname(ctx.env.schema).name)
+                        next(iter(ptrs)).get_local_name(ctx.env.schema))
 
                     ptr = schemactx.get_union_pointer(
                         ptrname=prefix_ptr_name,
@@ -363,7 +361,6 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
                         'a non-link object',
                         context=step.context,
                     )
-                    assert isinstance(ptr, s_links.Link)
             else:
                 source = get_set_type(path_tip, ctx=ctx)
 
@@ -379,6 +376,7 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
                     ignore_computable=True,
                     source_context=step.context, ctx=ctx)
 
+                assert path_tip.rptr is not None
                 ptrcls = typegen.ptrcls_from_ptrref(
                     path_tip.rptr.ptrref, ctx=ctx)
                 if _is_computable_ptr(ptrcls, ctx=ctx):
@@ -414,18 +412,36 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
                 raise RuntimeError(
                     'unexpected expression as a non-first path item')
 
-            with ctx.newscope(fenced=True, temporary=True) as subctx:
+            # We need to fence this if the head is a mutating
+            # statement, to make sure that the factoring allowlist
+            # works right.
+            is_subquery = isinstance(step, qlast.Statement)
+            with ctx.newscope(fenced=is_subquery) as subctx:
                 path_tip = ensure_set(
                     dispatch.compile(step, ctx=subctx), ctx=subctx)
 
+                # If the head of the path is a direct object
+                # reference, wrap it in an expression set to give it a
+                # new path id. This prevents the object path from being
+                # spuriously visible to computable paths defined in a shape
+                # at the root of a path. (See test_edgeql_select_tvariant_04
+                # for an example).
+                if (
+                    path_tip.path_id.is_objtype_path()
+                    and not path_tip.path_id.is_view_path()
+                    and path_tip.path_id.src_path() is None
+                ):
+                    path_tip = expression_set(
+                        ensure_stmt(path_tip, ctx=subctx),
+                        ctx=subctx)
+
                 if path_tip.path_id.is_type_intersection_path():
+                    assert path_tip.rptr is not None
                     scope_set = path_tip.rptr.source
                 else:
                     scope_set = path_tip
 
-                extra_scopes[scope_set] = context.ScopeInfo(
-                    path_scope=subctx.path_scope,
-                )
+                scope_set = scoped_set(scope_set, ctx=subctx)
 
         for key_path_id in path_tip.path_id.iter_weak_namespace_prefixes():
             mapped = ctx.view_map.get(key_path_id)
@@ -488,24 +504,6 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
     for fence in fences:
         fence.fenced = True
 
-    for ir_set, scope_info in extra_scopes.items():
-        nodes = tuple(
-            node for node in ctx.path_scope.find_descendants(ir_set.path_id)
-        )
-
-        if not nodes:
-            # The path portion not being a descendant means
-            # that is is already present in the scope above us,
-            # along with the view scope.
-            continue
-
-        assert len(nodes) == 1
-
-        nodes[0].fuse_subtree(scope_info.path_scope.copy())
-
-        if ir_set.path_scope_id is None:
-            pathctx.assign_set_scope(ir_set, nodes[0], ctx=ctx)
-
     for ir_set in computables:
         scope = ctx.path_scope.find_descendant(ir_set.path_id)
         if scope is None:
@@ -515,10 +513,13 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
 
         with ctx.new() as subctx:
             subctx.path_scope = scope
+            assert ir_set.rptr is not None
             comp_ir_set = computable_ptr_set(ir_set.rptr, ctx=subctx)
             i = path_sets.index(ir_set)
             if i != len(path_sets) - 1:
-                path_sets[i + 1].rptr.source = comp_ir_set
+                prptr = path_sets[i + 1].rptr
+                assert prptr is not None
+                prptr.source = comp_ir_set
             else:
                 path_tip = comp_ir_set
             path_sets[i] = comp_ir_set
@@ -599,7 +600,10 @@ def resolve_ptr(
     ptr: Optional[s_pointers.Pointer] = None
 
     if direction is s_pointers.PointerDirection.Outbound:
-        ptr = near_endpoint.getptr(ctx.env.schema, pointer_name)
+        ptr = near_endpoint.maybe_get_ptr(
+            ctx.env.schema,
+            s_name.UnqualName(pointer_name),
+        )
 
         if ptr is not None:
             ref = ptr.get_nearest_non_derived_parent(ctx.env.schema)
@@ -616,14 +620,10 @@ def resolve_ptr(
                         p.get_nearest_non_derived_parent(ctx.env.schema),
                         track_ref)
 
-            opaque = (
-                direction is s_pointers.PointerDirection.Inbound
-                and not far_endpoints
-            )
-
+            opaque = not far_endpoints
             ctx.env.schema, ptr = s_pointers.get_or_create_union_pointer(
                 ctx.env.schema,
-                ptrname=pointer_name,
+                ptrname=s_name.UnqualName(pointer_name),
                 source=near_endpoint,
                 direction=direction,
                 components=ptrs,
@@ -812,8 +812,9 @@ def type_intersection_set(
             elif stype.issubclass(ctx.env.schema, component_endpoint):
                 assert isinstance(stype, s_objtypes.ObjectType)
                 narrow_ptr = stype.getptr(
-                    ctx.env.schema, component.shortname.name)
-                assert narrow_ptr is not None
+                    ctx.env.schema,
+                    component.shortname.get_local_name(),
+                )
                 rptr_specialization.append(
                     irtyputils.ptrref_from_ptrcls(
                         schema=ctx.env.schema,
@@ -1026,6 +1027,7 @@ def computable_ptr_set(
     try:
         comp_info = ctx.source_map[ptrcls]
         qlexpr = comp_info.qlexpr
+        assert isinstance(comp_info.context, context.ContextLevel)
         qlctx = comp_info.context
         inner_source_path_id = comp_info.path_id
         path_id_ns = comp_info.path_id_ns

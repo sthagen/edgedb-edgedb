@@ -270,10 +270,12 @@ def _load_reflection_schema():
             reflschema, classlayout = cache
         else:
             std_schema = _load_std_schema()
-            refldelta, classlayout, _ = s_refl.generate_structure(std_schema)
+            reflection = s_refl.generate_structure(std_schema)
+            classlayout = reflection.class_layout
             context = sd.CommandContext()
             context.stdmode = True
-            reflschema = refldelta.apply(std_schema, context)
+            reflschema = reflection.intro_schema_delta.apply(
+                std_schema, context)
 
             if devmode.is_in_dev_mode():
                 buildmeta.write_data_cache(
@@ -391,7 +393,7 @@ class BaseSchemaTest(BaseDocTest):
                     last_migration_ref = None
 
                 create_migration = qlast.CreateMigration(
-                    body=qlast.MigrationBody(commands=migration_script),
+                    body=qlast.MigrationBody(commands=tuple(migration_script)),
                     parent=last_migration_ref,
                 )
 

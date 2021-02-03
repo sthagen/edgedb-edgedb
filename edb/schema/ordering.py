@@ -140,12 +140,19 @@ def reconstruct_tree(
     def ok_to_attach_to(
         op_to_attach: sd.Command,
         op_to_attach_to: sd.ObjectCommand[so.Object],
+        only_if_confident: bool = False,
     ) -> bool:
         """Determine if a given command can be attached to another.
 
         Returns True, if *op_to_attach* can be attached to *op_to_attach_to*
         without violating the dependency order.
         """
+        if only_if_confident and isinstance(op_to_attach, sd.ObjectCommand):
+            # Avoid reattaching the subcommand if confidence is below 100%,
+            # so that granular prompts can be generated.
+            confidence = op_to_attach.get_annotation('confidence')
+            if confidence is not None and confidence < 1.0:
+                return False
         tgt_offset = offsets[op_to_attach_to]
         tgt_offset_len = len(tgt_offset)
         deps = dependencies[op_to_attach]
@@ -289,7 +296,14 @@ def reconstruct_tree(
             for op_type in allowed_op_types:
                 parent_op = opindex.get((op_type, candidate))
 
-                if parent_op is not None and ok_to_attach_to(op, parent_op):
+                if (
+                    parent_op is not None
+                    and ok_to_attach_to(
+                        op,
+                        parent_op,
+                        only_if_confident=not as_implicit,
+                    )
+                ):
                     attach(
                         opbranch,
                         parent_op,
@@ -555,7 +569,7 @@ def _trace_op(
                 )
                 and (
                     not isinstance(ref, s_pointers.Pointer)
-                    or not ref.get_is_from_alias(old_schema)
+                    or not ref.get_from_alias(old_schema)
                 )
             ):
                 # If the ref is an implicit descendant (i.e. an inherited ref),
@@ -592,7 +606,7 @@ def _trace_op(
                 # For DROP OWNED and DROP we want it after the rebase.
                 is_set_owned = (
                     isinstance(op, referencing.AlterOwned)
-                    and op.get_attribute_value('is_owned')
+                    and op.get_attribute_value('owned')
                 )
                 if is_set_owned:
                     ref_item = get_deps(('rebase', str(referrer_name)))
@@ -604,7 +618,7 @@ def _trace_op(
                     isinstance(obj, referencing.ReferencedInheritingObject)
                     and (
                         not isinstance(obj, s_pointers.Pointer)
-                        or not obj.get_is_from_alias(old_schema)
+                        or not obj.get_from_alias(old_schema)
                     )
                 ):
                     for ancestor in obj.get_implicit_ancestors(old_schema):
@@ -687,6 +701,7 @@ def _trace_op(
             item = get_deps(('rename', ref_name_str))
             item.deps.add(('create', this_name_str))
             item.deps.add(('alter', this_name_str))
+            item.deps.add(('rename', this_name_str))
 
             if isinstance(ref, s_pointers.Pointer):
                 # The current item is a type referred to by
@@ -788,9 +803,7 @@ def get_object(
         if isinstance(name, sn.QualName):
             return schema.get(name)
         else:
-            t_id = s_types.type_id_from_name(name)
-            assert t_id is not None
-            return schema.get_by_id(t_id)
+            return schema.get_global(metaclass, name)
     elif not issubclass(metaclass, so.QualifiedObject):
         obj = schema.get_global(metaclass, name)
         assert isinstance(obj, so.Object)

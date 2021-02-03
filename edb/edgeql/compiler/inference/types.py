@@ -48,7 +48,8 @@ def amend_empty_set_type(
     alias = es.path_id.target_name_hint.name
     typename = s_name.QualName(module='__derived__', name=alias)
     es.path_id = irast.PathId.from_type(
-        env.schema, t, env=env, typename=typename
+        env.schema, t, env=env, typename=typename,
+        namespace=es.path_id.namespace,
     )
 
 
@@ -322,7 +323,7 @@ def __infer_typecast(
 ) -> s_types.Type:
     stype = infer_type(ir.to_type, env)
 
-    # is_polymorphic is synonymous to get_is_abstract for scalars
+    # is_polymorphic is synonymous to get_abstract for scalars
     if stype.is_polymorphic(env.schema):
         raise errors.QueryError(
             f'cannot cast into generic type '

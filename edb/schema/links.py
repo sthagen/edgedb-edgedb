@@ -41,6 +41,7 @@ from . import sources
 from . import utils
 
 if TYPE_CHECKING:
+    from . import objtypes as s_objtypes
     from . import types as s_types
     from . import schema as s_schema
 
@@ -116,6 +117,10 @@ class Link(
         compcoef=0.9,
         merge_fn=merge_actions)
 
+    def get_target(self, schema: s_schema.Schema) -> s_objtypes.ObjectType:
+        return self.get_field_value(  # type: ignore[no-any-return]
+            schema, 'target')
+
     def is_link_property(self, schema: s_schema.Schema) -> bool:
         return False
 
@@ -162,8 +167,7 @@ class Link(
         target: s_types.Type,
     ) -> s_schema.Schema:
         schema = super().set_target(schema, target)
-        tgt_prop = self.getptr(schema, 'target')
-        assert tgt_prop is not None
+        tgt_prop = self.getptr(schema, sn.UnqualName('target'))
         schema = tgt_prop.set_target(schema, target)
         return schema
 
@@ -230,7 +234,7 @@ class LinkCommand(
         scls = self.scls
         assert isinstance(scls, Link)
 
-        if not scls.get_is_owned(schema):
+        if not scls.get_owned(schema):
             return
 
         target = scls.get_target(schema)
@@ -241,6 +245,18 @@ class LinkCommand(
             raise errors.InvalidLinkTargetError(
                 f'invalid link target, expected object type, got '
                 f'{target.get_schema_class_displayname()}',
+                context=srcctx,
+            )
+
+        if (
+            not scls.is_pure_computable(schema)
+            and not scls.get_from_alias(schema)
+            and target.is_view(schema)
+        ):
+            srcctx = self.get_attribute_source_context('target')
+            raise errors.InvalidLinkTargetError(
+                f'invalid link type: {target.get_displayname(schema)!r}'
+                f' is an expression alias, not a proper object type',
                 context=srcctx,
             )
 
@@ -279,8 +295,8 @@ class LinkCommand(
 
 
 class CreateLink(
+    pointers.CreatePointer[Link],
     LinkCommand,
-    referencing.CreateReferencedInheritingObject[Link],
 ):
     astnode = [qlast.CreateConcreteLink, qlast.CreateLink]
     referenced_astnode = qlast.CreateConcreteLink
@@ -431,8 +447,8 @@ class CreateLink(
         )
         src_prop.set_attribute_value('required', True)
         src_prop.set_attribute_value('readonly', True)
-        src_prop.set_attribute_value('is_final', True)
-        src_prop.set_attribute_value('is_owned', True)
+        src_prop.set_attribute_value('final', True)
+        src_prop.set_attribute_value('owned', True)
         src_prop.set_attribute_value('cardinality',
                                      qltypes.SchemaCardinality.One)
 
@@ -464,8 +480,8 @@ class CreateLink(
         )
         tgt_prop.set_attribute_value('required', False)
         tgt_prop.set_attribute_value('readonly', True)
-        tgt_prop.set_attribute_value('is_final', True)
-        tgt_prop.set_attribute_value('is_owned', True)
+        tgt_prop.set_attribute_value('final', True)
+        tgt_prop.set_attribute_value('owned', True)
         tgt_prop.set_attribute_value('cardinality',
                                      qltypes.SchemaCardinality.One)
 
@@ -474,7 +490,10 @@ class CreateLink(
         return cmd
 
 
-class RenameLink(LinkCommand, sd.RenameObject[Link]):
+class RenameLink(
+    LinkCommand,
+    referencing.RenameReferencedInheritingObject[Link],
+):
     pass
 
 
@@ -503,8 +522,7 @@ class SetLinkType(
 
         if not context.canonical:
             # We need to update the target link prop as well
-            tgt_prop = scls.getptr(schema, 'target')
-            assert tgt_prop is not None
+            tgt_prop = scls.getptr(schema, sn.UnqualName('target'))
             tgt_prop_alter = tgt_prop.init_delta_command(
                 schema, sd.AlterObject)
             tgt_prop_alter.set_attribute_value('target', new_target)
@@ -521,10 +539,18 @@ class AlterLinkUpperCardinality(
     pass
 
 
+class AlterLinkLowerCardinality(
+    pointers.AlterPointerLowerCardinality[Link],
+    referrer_context_class=LinkSourceCommandContext,
+    field='required',
+):
+    pass
+
+
 class AlterLinkOwned(
     referencing.AlterOwned[Link],
     referrer_context_class=LinkSourceCommandContext,
-    field='is_owned',
+    field='owned',
 ):
     pass
 
@@ -652,8 +678,12 @@ class DeleteLink(
                 and target.is_view(schema)
                 and target.get_alias_is_persistent(schema)):
 
-            del_cmd = target.init_delta_command(schema, sd.DeleteObject)
-            assert isinstance(del_cmd, sd.DeleteObject)
+            del_cmd = target.init_delta_command(
+                schema,
+                sd.DeleteObject,
+                expiring_refs={scls},
+                if_unused=True,
+            )
             subcmds = del_cmd._canonicalize(schema, context, target)
             del_cmd.update(subcmds)
             commands.append(del_cmd)
@@ -667,7 +697,7 @@ class DeleteLink(
         *,
         parent_node: Optional[qlast.DDLOperation] = None,
     ) -> Optional[qlast.DDLOperation]:
-        if self.get_orig_attribute_value('is_from_alias'):
+        if self.get_orig_attribute_value('from_alias'):
             # This is an alias type, appropriate DDL would be generated
             # from the corresponding Alter/DeleteAlias node.
             return None

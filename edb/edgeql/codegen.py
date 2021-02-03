@@ -588,6 +588,11 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
     def visit_Parameter(self, node: qlast.Parameter) -> None:
         self.write(param_to_str(node.name))
 
+    def visit_Placeholder(self, node: qlast.Placeholder) -> None:
+        self.write('\\(')
+        self.write(node.name)
+        self.write(')')
+
     def visit_StringConstant(self, node: qlast.StringConstant) -> None:
         if not _NON_PRINTABLE_RE.search(node.value):
             for d in ("'", '"', '$$'):
@@ -1143,7 +1148,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 keywords.extend(('SET', 'REQUIRED'))
             else:
                 keywords.extend(('SET', 'OPTIONAL'))
-        elif fname == 'is_abstract':
+        elif fname == 'abstract':
             if node.value is None:
                 keywords.extend(('RESET', 'ABSTRACT'))
             elif self._eval_bool_expr(node.value):
@@ -1157,7 +1162,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 keywords.extend(('SET', 'DELEGATED'))
             else:
                 keywords.extend(('SET', 'NOT', 'DELEGATED'))
-        elif fname == 'is_final':
+        elif fname == 'final':
             if node.value is None:
                 keywords.extend(('RESET', 'FINAL'))
             elif self._eval_bool_expr(node.value):
@@ -1171,7 +1176,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 value = self._eval_enum_expr(
                     node.value, qltypes.SchemaCardinality)
                 keywords.extend(('SET', value.to_edgeql()))
-        elif fname == 'is_owned':
+        elif fname == 'owned':
             if node.value is None:
                 keywords.extend(('DROP', 'OWNED'))
             elif self._eval_bool_expr(node.value):
@@ -1307,9 +1312,9 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
 
     def visit_CreateScalarType(self, node: qlast.CreateScalarType) -> None:
         keywords = []
-        if node.is_abstract:
+        if node.abstract:
             keywords.append('ABSTRACT')
-        if node.is_final:
+        if node.final:
             keywords.append('FINAL')
         keywords.append('SCALAR')
         keywords.append('TYPE')
@@ -1536,12 +1541,45 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         self._visit_DropObject(node, 'LINK', unqualified=True)
 
     def visit_SetPointerType(self, node: qlast.SetPointerType) -> None:
-        self.write('SET TYPE ')
-        self.visit(node.value)
-        if node.cast_expr is not None:
+        if node.value is None:
+            self.write('RESET TYPE')
+        else:
+            self.write('SET TYPE ')
+            self.visit(node.value)
+            if node.cast_expr is not None:
+                self.write(' USING (')
+                self.visit(node.cast_expr)
+                self.write(')')
+
+    def visit_SetPointerCardinality(
+        self,
+        node: qlast.SetPointerCardinality,
+    ) -> None:
+        if node.value is None:
+            self.write('RESET CARDINALITY')
+        else:
+            value = self._eval_enum_expr(node.value, qltypes.SchemaCardinality)
+            self.write(f'SET {value.to_edgeql()}')
+        if node.conv_expr is not None:
             self.write(' USING (')
-            self.visit(node.cast_expr)
+            self.visit(node.conv_expr)
             self.write(')')
+
+    def visit_SetPointerOptionality(
+        self,
+        node: qlast.SetPointerOptionality,
+    ) -> None:
+        if node.value is None:
+            self.write('RESET OPTIONALITY')
+        else:
+            if self._eval_bool_expr(node.value):
+                self.write('SET REQUIRED')
+            else:
+                self.write('SET OPTIONAL')
+            if node.fill_expr is not None:
+                self.write(' USING (')
+                self.visit(node.fill_expr)
+                self.write(')')
 
     def visit_OnTargetDelete(self, node: qlast.OnTargetDelete) -> None:
         self._write_keywords('ON TARGET DELETE ', node.cascade.to_edgeql())
@@ -1549,9 +1587,9 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
     def visit_CreateObjectType(self, node: qlast.CreateObjectType) -> None:
         keywords = []
 
-        if node.is_abstract:
+        if node.abstract:
             keywords.append('ABSTRACT')
-        if node.is_final:
+        if node.final:
             keywords.append('FINAL')
         keywords.append('TYPE')
 
@@ -1604,7 +1642,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             self.write(node.returning_typemod.to_edgeql(), ' ')
             self.visit(node.returning)
 
-            if node.is_abstract:
+            if node.abstract:
                 return
 
             if node.commands:
@@ -1648,7 +1686,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 self.write('}')
 
         op_type = []
-        if node.is_abstract:
+        if node.abstract:
             op_type.append('ABSTRACT')
         if node.kind:
             op_type.append(node.kind.upper())

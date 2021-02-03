@@ -55,6 +55,7 @@ from edb.schema import pseudo as s_pseudo
 from edb.schema import roles as s_roles
 from edb.schema import sources as s_sources
 from edb.schema import types as s_types
+from edb.schema import utils as s_utils
 
 from edb.common import markup
 from edb.common import ordered
@@ -246,6 +247,36 @@ class Nop(MetaCommand, adapts=sd.Nop):
     pass
 
 
+class Query(MetaCommand, adapts=sd.Query):
+
+    def apply(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        schema = super().apply(schema, context)
+
+        sql_tree = compiler.compile_ir_to_sql_tree(
+            self.expr.irast,
+            output_format=compiler.OutputFormat.NATIVE_INTERNAL,
+            explicit_top_cast=irtyputils.type_to_typeref(
+                schema,
+                schema.get('std::str'),
+            ),
+        )
+
+        sql_text = codegen.generate_source(sql_tree)
+
+        # The INTO _dummy_text bit is needed because PL/pgSQL _really_
+        # wants the result of a returning query to be stored in a variable,
+        # and the PERFORM hack does not work if the query has DML CTEs.
+        self.pgops.add(dbops.Query(
+            text=f'{sql_text} INTO _dummy_text',
+        ))
+
+        return schema
+
+
 class AlterObjectProperty(MetaCommand, adapts=sd.AlterObjectProperty):
     pass
 
@@ -297,6 +328,14 @@ class CreateTuple(TupleCommand, adapts=s_types.CreateTuple):
         self.pgops.add(dbops.CreateCompositeType(type=ctype))
 
         return schema
+
+
+class AlterTuple(TupleCommand, adapts=s_types.AlterTuple):
+    pass
+
+
+class RenameTuple(TupleCommand, adapts=s_types.RenameTuple):
+    pass
 
 
 class DeleteTuple(TupleCommand, adapts=s_types.DeleteTuple):
@@ -403,6 +442,14 @@ class CreateArray(ArrayCommand, adapts=s_types.CreateArray):
         schema = self.__class__.get_adaptee().apply(self, schema, context)
         schema = ArrayCommand.apply(self, schema, context)
         return schema
+
+
+class AlterArray(ArrayCommand, adapts=s_types.AlterArray):
+    pass
+
+
+class RenameArray(ArrayCommand, adapts=s_types.RenameArray):
+    pass
 
 
 class DeleteArray(ArrayCommand, adapts=s_types.DeleteArray):
@@ -766,7 +813,7 @@ class CreateOperator(OperatorCommand, CreateObject,
     ) -> s_schema.Schema:
         schema = super().apply(schema, context)
         oper = self.scls
-        if oper.get_is_abstract(schema):
+        if oper.get_abstract(schema):
             return schema
 
         oper_language = oper.get_language(schema)
@@ -897,7 +944,7 @@ class DeleteOperator(
         orig_schema = schema
         oper = schema.get(self.classname)
 
-        if oper.get_is_abstract(schema):
+        if oper.get_abstract(schema):
             return super().apply(schema, context)
 
         name = common.get_backend_name(schema, oper, catenate=False)
@@ -1296,7 +1343,7 @@ class CreateScalarType(ScalarTypeMetaCommand,
 
         schema = ScalarTypeMetaCommand.apply(self, schema, context)
 
-        if scalar.get_is_abstract(schema):
+        if scalar.get_abstract(schema):
             return schema
 
         new_domain_name = types.pg_type_from_scalar(schema, scalar)
@@ -2161,121 +2208,348 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
         else:
             return False
 
-    def adjust_pointer_storage(self, pointer, schema, orig_schema, context):
-        source_ctx = self.get_referrer_context_or_die(context)
-        source_op = source_ctx.op
-
-        if not pointer.is_endpoint_pointer(orig_schema):
-            self._alter_pointer_type(pointer, schema, orig_schema, context)
-
+    def _alter_pointer_cardinality(
+        self,
+        schema: s_schema.Schema,
+        orig_schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> None:
+        ptr = self.scls
+        ptr_stor_info = types.get_pointer_storage_info(ptr, schema=schema)
         old_ptr_stor_info = types.get_pointer_storage_info(
-            pointer, schema=orig_schema)
-        new_ptr_stor_info = types.get_pointer_storage_info(
-            pointer, schema=schema)
+            ptr, schema=orig_schema)
+        ptr_table = ptr_stor_info.table_type == 'link'
+        is_lprop = ptr.is_link_property(schema)
+        is_multi = ptr_table and not is_lprop
+        is_required = ptr.get_required(schema)
 
-        if old_ptr_stor_info.table_type != new_ptr_stor_info.table_type:
-            # The attribute is being moved from one table to another
-            opg = dbops.CommandGroup(priority=0)
-            at = source_op.get_alter_table(schema, context, manual=True)
+        ref_op = self.get_referrer_context_or_die(context).op
 
-            if old_ptr_stor_info.table_type == 'ObjectType':
-                move_data = dbops.Query(textwrap.dedent(f'''\
-                    INSERT INTO {q(*new_ptr_stor_info.table_name)}
-                    (source, target)
-                    (SELECT
-                        s.id AS source,
-                        s.{qi(old_ptr_stor_info.column_name)} AS target
-                        FROM
-                        {q(*old_ptr_stor_info.table_name)} AS s
-                    );
-                '''))
+        if is_multi:
+            if isinstance(self, sd.AlterObjectFragment):
+                source_op = self.get_parent_op(context)
+            else:
+                source_op = self
+        else:
+            source_op = ref_op
 
-                opg.add_command(move_data)
+        # Ignore cardinality changes resulting from the creation of
+        # an overloaded pointer as there is no data yet.
+        if isinstance(source_op, sd.CreateObject):
+            return
 
-                # Moved from source table to pointer table.
-                # The pointer table has already been created by now.
-                col = dbops.Column(
-                    name=old_ptr_stor_info.column_name,
-                    type=common.qname(*old_ptr_stor_info.column_type))
-                opg.add_command(self.drop_inhview(
-                    orig_schema, context, source_op.scls,
-                    drop_ancestors=True))
-                at.add_command(dbops.AlterTableDropColumn(col))
+        if self.conv_expr is not None:
+            _, conv_sql_expr, orig_rel_alias, _ = (
+                self._compile_conversion_expr(
+                    pointer=ptr,
+                    conv_expr=self.conv_expr,
+                    schema=schema,
+                    orig_schema=orig_schema,
+                    context=context,
+                    orig_rel_is_always_source=True,
+                    target_as_singleton=False,
+                )
+            )
 
-                opg.add_command(at)
+            if is_lprop:
+                obj_id_ref = f'{qi(orig_rel_alias)}.source'
+            else:
+                obj_id_ref = f'{qi(orig_rel_alias)}.id'
 
-                self.schedule_inhviews_update(
-                    schema,
-                    context,
-                    source_op.scls,
-                    update_descendants=True,
-                    update_ancestors=True,
+            if is_required and not is_multi:
+                conv_sql_expr = textwrap.dedent(f'''\
+                    edgedb.raise_on_null(
+                        ({conv_sql_expr}),
+                        'not_null_violation',
+                        msg => 'missing value for required property',
+                        detail => '{{"object_id": "' || {obj_id_ref} || '"}}',
+                        "column" => {ql(str(ptr.id))}
+                    )
+                ''')
+        else:
+            orig_rel_alias = f'alias_{uuidgen.uuid1mc()}'
+
+            if not is_multi:
+                raise AssertionError(
+                    'explicit conversion expression was expected'
+                    ' for multi->single transition'
                 )
             else:
-                otabname = common.get_backend_name(
-                    orig_schema, pointer, catenate=False)
-
-                # Moved from link to object
-                cols = self.get_columns(pointer, schema)
-
-                for col in cols:
-                    cond = dbops.ColumnExists(
-                        new_ptr_stor_info.table_name, column_name=col.name)
-                    op = (dbops.AlterTableAddColumn(col), None, (cond, ))
-                    at.add_operation(op)
-
-                opg.add_command(at)
-
-                move_data = dbops.Query(textwrap.dedent(f'''\
-                    UPDATE {q(*new_ptr_stor_info.table_name)}
-                    SET {qi(new_ptr_stor_info.column_name)} = l.target
-                    FROM {q(*old_ptr_stor_info.table_name)} AS l
-                    WHERE id = l.source
-                '''))
-
-                opg.add_command(move_data)
-
-                if not has_table(pointer, schema):
-                    opg.add_command(self.drop_inhview(
-                        orig_schema, context, source_op.scls,
-                        drop_ancestors=True))
-
-                    opg.add_command(self.drop_inhview(
-                        orig_schema, context, pointer,
-                        drop_ancestors=True
-                    ))
-
-                    condition = dbops.TableExists(name=otabname)
-                    dt = dbops.DropTable(
-                        name=otabname, conditions=[condition])
-
-                    opg.add_command(dt)
-
-                self.schedule_inhviews_update(
-                    schema,
-                    context,
-                    source_op.scls,
-                    update_descendants=True,
+                # single -> multi
+                conv_sql_expr = (
+                    f'SELECT '
+                    f'{qi(orig_rel_alias)}.{qi(old_ptr_stor_info.column_name)}'
                 )
 
-            self.pgops.add(opg)
+        tab = q(*ptr_stor_info.table_name)
+        target_col = ptr_stor_info.column_name
+
+        if not is_multi:
+            # Moving from pointer table to source table.
+            cols = self.get_columns(ptr, schema)
+            alter_table = source_op.get_alter_table(
+                schema, context, manual=True)
+
+            for col in cols:
+                cond = dbops.ColumnExists(
+                    ptr_stor_info.table_name,
+                    column_name=col.name,
+                )
+                op = (dbops.AlterTableAddColumn(col), None, (cond, ))
+                alter_table.add_operation(op)
+
+            self.pgops.add(alter_table)
+
+            update_qry = textwrap.dedent(f'''\
+                UPDATE {tab} AS {qi(orig_rel_alias)}
+                SET {qi(target_col)} = ({conv_sql_expr})
+            ''')
+            self.pgops.add(dbops.Query(update_qry))
+
+            if not has_table(ptr, schema):
+                self.pgops.add(
+                    self.drop_inhview(
+                        orig_schema,
+                        context,
+                        source_op.scls,
+                        drop_ancestors=True,
+                    ),
+                )
+
+                self.pgops.add(
+                    self.drop_inhview(
+                        orig_schema,
+                        context,
+                        ptr,
+                        drop_ancestors=True
+                    ),
+                )
+                otabname = common.get_backend_name(
+                    orig_schema, ptr, catenate=False)
+                condition = dbops.TableExists(name=otabname)
+                dt = dbops.DropTable(name=otabname, conditions=[condition])
+                self.pgops.add(dt)
+
+            self.schedule_inhviews_update(
+                schema,
+                context,
+                source_op.scls,
+                update_descendants=True,
+            )
+        else:
+            # Moving from source table to pointer table.
+            self.provide_table(ptr, schema, context)
+            source = ptr.get_source(orig_schema)
+            src_tab = q(*common.get_backend_name(
+                orig_schema,
+                source,
+                catenate=False,
+            ))
+
+            update_qry = textwrap.dedent(f'''\
+                INSERT INTO {tab} (source, target)
+                (
+                    SELECT
+                        {qi(orig_rel_alias)}.id,
+                        q.val
+                    FROM
+                        {src_tab} AS {qi(orig_rel_alias)},
+                        LATERAL (
+                            {conv_sql_expr}
+                        ) AS q(val)
+                    WHERE
+                        q.val IS NOT NULL
+                )
+                ON CONFLICT (source, target) DO NOTHING
+            ''')
+
+            self.pgops.add(dbops.Query(update_qry))
+
+            check_qry = textwrap.dedent(f'''\
+                SELECT
+                    edgedb.raise(
+                        NULL::text,
+                        'not_null_violation',
+                        msg => 'missing value for required property',
+                        detail => '{{"object_id": "' || id || '"}}',
+                        "column" => {ql(str(ptr.id))}
+                    )
+                FROM {src_tab}
+                WHERE id != ALL (SELECT source FROM {tab})
+                LIMIT 1
+                INTO _dummy_text;
+            ''')
+
+            self.pgops.add(dbops.Query(check_qry))
+
+            self.pgops.add(
+                self.drop_inhview(
+                    orig_schema,
+                    context,
+                    ref_op.scls,
+                    drop_ancestors=True,
+                ),
+            )
+
+            ref_op = self.get_referrer_context_or_die(context).op
+            alter_table = ref_op.get_alter_table(
+                schema, context, manual=True)
+            col = dbops.Column(
+                name=old_ptr_stor_info.column_name,
+                type=common.qname(*old_ptr_stor_info.column_type),
+            )
+            alter_table.add_operation(dbops.AlterTableDropColumn(col))
+            self.pgops.add(alter_table)
+
+            self.schedule_inhviews_update(
+                schema,
+                context,
+                ref_op.scls,
+                update_descendants=True,
+                update_ancestors=True,
+            )
+
+    def _alter_pointer_optionality(
+        self,
+        schema: s_schema.Schema,
+        orig_schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> None:
+        new_required = self.scls.get_required(schema)
+
+        ptr = self.scls
+        ptr_stor_info = types.get_pointer_storage_info(ptr, schema=schema)
+        ptr_table = ptr_stor_info.table_type == 'link'
+        is_lprop = ptr.is_link_property(schema)
+        is_multi = ptr_table and not is_lprop
+        is_required = ptr.get_required(schema)
+
+        if is_multi:
+            if isinstance(self, sd.AlterObjectFragment):
+                source_op = self.get_parent_op(context)
+            else:
+                source_op = self
+        else:
+            source_ctx = self.get_referrer_context_or_die(context)
+            source_op = source_ctx.op
+
+        # Ignore optionality changes resulting from the creation of
+        # an overloaded pointer as there is no data yet.
+        if isinstance(source_op, sd.CreateObject):
+            return
+
+        if self.fill_expr is not None:
+            _, fill_sql_expr, orig_rel_alias, _ = (
+                self._compile_conversion_expr(
+                    pointer=ptr,
+                    conv_expr=self.fill_expr,
+                    schema=schema,
+                    orig_schema=orig_schema,
+                    context=context,
+                    orig_rel_is_always_source=True,
+                )
+            )
+
+            if is_lprop:
+                obj_id_ref = f'{qi(orig_rel_alias)}.source'
+            else:
+                obj_id_ref = f'{qi(orig_rel_alias)}.id'
+
+            if is_required and not is_multi:
+                fill_sql_expr = textwrap.dedent(f'''\
+                    edgedb.raise_on_null(
+                        ({fill_sql_expr}),
+                        'not_null_violation',
+                        msg => 'missing value for required property',
+                        detail => '{{"object_id": "' || {obj_id_ref} || '"}}',
+                        "column" => {ql(str(ptr.id))}
+                    )
+                ''')
+
+            tab = q(*ptr_stor_info.table_name)
+            target_col = ptr_stor_info.column_name
+
+            if not is_multi:
+                # For singleton pointers we simply update the
+                # requisite column of the host source in every
+                # row where it is NULL.
+                update_qry = textwrap.dedent(f'''\
+                    UPDATE {tab} AS {qi(orig_rel_alias)}
+                    SET {qi(target_col)} = ({fill_sql_expr})
+                    WHERE {qi(target_col)} IS NULL
+                ''')
+                self.pgops.add(dbops.Query(update_qry))
+            else:
+                # For multi pointers we have to INSERT the
+                # result of USING into the link table for
+                # every source object that has _no entries_
+                # in said link table.
+                source = ptr.get_source(orig_schema)
+                src_tab = q(*common.get_backend_name(
+                    orig_schema,
+                    source,
+                    catenate=False,
+                ))
+
+                update_qry = textwrap.dedent(f'''\
+                    INSERT INTO {tab} (source, target)
+                    (
+                        SELECT
+                            {qi(orig_rel_alias)}.id,
+                            q.val
+                        FROM
+                            (
+                                SELECT *
+                                FROM {src_tab}
+                                WHERE id != ALL (
+                                    SELECT source FROM {tab}
+                                )
+                            ) AS {qi(orig_rel_alias)},
+                            LATERAL (
+                                {fill_sql_expr}
+                            ) AS q(val)
+                        WHERE
+                            q.val IS NOT NULL
+                    )
+                ''')
+
+                self.pgops.add(dbops.Query(update_qry))
+
+                check_qry = textwrap.dedent(f'''\
+                    SELECT
+                        edgedb.raise(
+                            NULL::text,
+                            'not_null_violation',
+                            msg => 'missing value for required property',
+                            detail => '{{"object_id": "' || id || '"}}',
+                            "column" => {ql(str(ptr.id))}
+                        )
+                    FROM {src_tab}
+                    WHERE id != ALL (SELECT source FROM {tab})
+                    LIMIT 1
+                    INTO _dummy_text;
+                ''')
+
+                self.pgops.add(dbops.Query(check_qry))
+
+        if not ptr_table or is_lprop:
+            alter_table = source_op.get_alter_table(
+                schema,
+                context,
+                manual=True,
+            )
+            alter_table.add_operation(
+                dbops.AlterTableAlterColumnNull(
+                    column_name=ptr_stor_info.column_name,
+                    null=not new_required,
+                )
+            )
+            self.pgops.add(alter_table)
 
     def _alter_pointer_type(self, pointer, schema, orig_schema, context):
         old_ptr_stor_info = types.get_pointer_storage_info(
             pointer, schema=orig_schema)
-        old_target = pointer.get_target(orig_schema)
         new_target = pointer.get_target(schema)
-
-        alters = self.get_subcommands(type=s_pointers.SetPointerType)
-
-        if alters:
-            assert len(alters) == 1, 'expected only one SET TYPE'
-            using_eql_expr = next(iter(alters)).cast_expr
-        else:
-            using_eql_expr = None
-
-        if old_target == new_target and using_eql_expr is None:
-            return
 
         ptr_table = old_ptr_stor_info.table_type == 'link'
         is_link = isinstance(pointer, s_links.Link)
@@ -2286,7 +2560,7 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
 
         if is_multi:
             if isinstance(self, sd.AlterObjectFragment):
-                source_op = self.get_parent_op()
+                source_op = self.get_parent_op(context)
             else:
                 source_op = self
         else:
@@ -2298,145 +2572,70 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
         if is_link and isinstance(source_op, sd.CreateObject):
             return
 
-        # Changes to alias pointers are immaterial.  Perhaps this should
-        # be moved up the call stack?
-        if self.maybe_get_object_aux_data('is_from_alias'):
-            return
-
         new_target = pointer.get_target(schema)
         orig_target = pointer.get_target(orig_schema)
         new_type = types.pg_type_from_object(
             schema, new_target, persistent_tuples=True)
 
         source = source_op.scls
-        using_expr = None
-        using_expr_is_trivial = False
+        using_eql_expr = self.cast_expr
 
         # For links, when the new type is a supertype of the old, no
         # SQL-level changes are necessary, unless an explicit conversion
         # expression was specified.
         if (
             is_link
-            and using_expr is None
-            and orig_target.issubclass(schema, new_target)
+            and using_eql_expr is None
+            and orig_target.issubclass(orig_schema, new_target)
         ):
             return
 
-        if using_eql_expr is not None:
-            # The EdgeQL statement contained a USING clause.  There are
-            # two major possibilities: 1) trivial case, where the USING
-            # clause refers only to the columns of the source table, in
-            # which case we simply compile that into an equivalent SQL
-            # USING clause, and 2) complex case, which supports arbitrary
-            # queries, but requires a temporary column, which is populated
-            # with the transition query and then used as the source for
-            # the SQL USING clause.
-            if using_eql_expr.irast is not None:
-                ir = using_eql_expr.irast
-            else:
-                using_eql_expr = self._compile_expr(
-                    orig_schema,
-                    context,
-                    using_eql_expr,
-                    target_as_singleton=True,
-                )
-                ir = using_eql_expr.irast
-
-            assert ir is not None
-
-            expr_is_nullable = using_eql_expr.cardinality.can_be_zero()
-
-            refs = irutils.get_longest_paths(ir.expr)
-            ref_tables = schemamech.get_ref_storage_info(ir.schema, refs)
-
-            local_table_only = all(
-                t == old_ptr_stor_info.table_name
-                for t in ref_tables
+        if using_eql_expr is None and not is_link:
+            # A lack of an explicit EdgeQL conversion expression means
+            # that the new type is assignment-castable from the old type
+            # in the EdgeDB schema.  BUT, it would not necessarily be
+            # assignment-castable in Postgres, especially if the types are
+            # compound.  Thus, generate an explicit cast expression.
+            pname = pointer.get_shortname(schema).name
+            using_eql_expr = s_expr.Expression.from_ast(
+                ql_ast.TypeCast(
+                    expr=ql_ast.Path(
+                        partial=True,
+                        steps=[
+                            ql_ast.Ptr(
+                                ptr=ql_ast.ObjectRef(name=pname),
+                                type='property' if is_lprop else None,
+                            ),
+                        ],
+                    ),
+                    type=s_utils.typeref_to_ast(schema, new_target),
+                ),
+                schema=orig_schema,
             )
 
-            using_expr_is_trivial = (
-                not is_link
-                # SQL SET TYPE cannot contain references
-                # outside of the local table.
-                and local_table_only
-                # Changes to a multi-pointer might involve contraction of
-                # the overall cardinality, i.e. the deletion some rows.
-                and not is_multi
-                # If the property is required, and the USING expression
-                # was not proven by the compiler to not return ZERO, we
-                # must inject an explicit NULL guard, as the SQL null
-                # violation error is very nondescript in the context of
-                # a table rewrite, making it hard to pinpoint the failing
-                # object.
-                and (not is_required or not expr_is_nullable)
+        # There are two major possibilities about the USING claus:
+        # 1) trivial case, where the USING clause refers only to the
+        # columns of the source table, in which case we simply compile that
+        # into an equivalent SQL USING clause, and 2) complex case, which
+        # supports arbitrary queries, but requires a temporary column,
+        # which is populated with the transition query and then used as the
+        # source for the SQL USING clause.
+        using_eql_expr, using_sql_expr, orig_rel_alias, sql_expr_is_trivial = (
+            self._compile_conversion_expr(
+                pointer=pointer,
+                conv_expr=using_eql_expr,
+                schema=schema,
+                orig_schema=orig_schema,
+                context=context,
             )
+        )
 
-            need_temp_col = (
-                (is_multi and expr_is_nullable)
-                or (changing_col_type and not using_expr_is_trivial)
-            )
+        expr_is_nullable = using_eql_expr.cardinality.can_be_zero()
 
-            if not using_expr_is_trivial:
-                # Non-trivial conversion expression means that we
-                # are compiling a full-blown EdgeQL statement as
-                # opposed to compiling a scalar fragment in trivial
-                # expression mode.
-                alias = f'alias_{uuidgen.uuid1mc()}'
-                external_rvars = {}
-
-                if is_lprop:
-                    tgt_path_id = irpathid.PathId.from_pointer(
-                        orig_schema,
-                        pointer,
-                    ).src_path()
-                else:
-                    tgt_path_id = irpathid.PathId.from_pointer(
-                        orig_schema,
-                        pointer,
-                    )
-
-                ptr_path_id = tgt_path_id.ptr_path()
-                src_path_id = ptr_path_id.src_path()
-
-                if ptr_table:
-                    rvar = compiler.new_external_rvar(
-                        rel_name=(alias,),
-                        path_id=ptr_path_id,
-                        outputs={
-                            (src_path_id, ('identity',)): 'source',
-                        },
-                    )
-                    external_rvars[ptr_path_id, 'source'] = rvar
-                    external_rvars[ptr_path_id, 'value'] = rvar
-                    external_rvars[src_path_id, 'identity'] = rvar
-                    if local_table_only:
-                        external_rvars[src_path_id, 'source'] = rvar
-                        external_rvars[src_path_id, 'value'] = rvar
-                    if is_lprop:
-                        external_rvars[tgt_path_id, 'identity'] = rvar
-                        external_rvars[tgt_path_id, 'value'] = rvar
-                else:
-                    src_rvar = compiler.new_external_rvar(
-                        rel_name=(alias,),
-                        path_id=src_path_id,
-                        outputs={},
-                    )
-                    external_rvars[src_path_id, 'identity'] = src_rvar
-                    external_rvars[src_path_id, 'value'] = src_rvar
-                    external_rvars[src_path_id, 'source'] = src_rvar
-            else:
-                external_rvars = None
-
-            sql_tree = compiler.compile_ir_to_sql_tree(
-                ir,
-                output_format=compiler.OutputFormat.NATIVE_INTERNAL,
-                singleton_mode=using_expr_is_trivial,
-                external_rvars=external_rvars,
-            )
-
-            using_expr = codegen.generate_source(sql_tree)
-        else:
-            need_temp_col = False
+        need_temp_col = (
+            (is_multi and expr_is_nullable)
+            or (changing_col_type and not sql_expr_is_trivial)
+        )
 
         if changing_col_type:
             self.pgops.add(source_op.drop_inhview(
@@ -2462,7 +2661,7 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
                 aux_ptr_table = old_lb_ptr_stor_info.table_name
                 aux_ptr_col = old_lb_ptr_stor_info.column_name
 
-        if using_expr is not None and not using_expr_is_trivial:
+        if not sql_expr_is_trivial:
             if need_temp_col:
                 alter_table = source_op.get_alter_table(
                     schema, context, priority=0, force_new=True, manual=True)
@@ -2476,14 +2675,14 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
                 target_col = temp_column.name
 
             if is_multi:
-                obj_id_ref = f'{qi(alias)}.source'
+                obj_id_ref = f'{qi(orig_rel_alias)}.source'
             else:
-                obj_id_ref = f'{qi(alias)}.id'
+                obj_id_ref = f'{qi(orig_rel_alias)}.id'
 
             if is_required and not is_multi:
-                using_expr = textwrap.dedent(f'''\
+                using_sql_expr = textwrap.dedent(f'''\
                     edgedb.raise_on_null(
-                        ({using_expr}),
+                        ({using_sql_expr}),
                         'not_null_violation',
                         msg => 'missing value for required property',
                         detail => '{{"object_id": "' || {obj_id_ref} || '"}}',
@@ -2492,14 +2691,14 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
                 ''')
 
             update_qry = textwrap.dedent(f'''\
-                UPDATE {tab} AS {qi(alias)}
-                SET {qi(target_col)} = ({using_expr})
+                UPDATE {tab} AS {qi(orig_rel_alias)}
+                SET {qi(target_col)} = ({using_sql_expr})
             ''')
 
             self.pgops.add(dbops.Query(update_qry))
             actual_using_expr = qi(target_col)
         else:
-            actual_using_expr = using_expr
+            actual_using_expr = using_sql_expr
 
         if changing_col_type or need_temp_col:
             alter_table = source_op.get_alter_table(
@@ -2576,8 +2775,10 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
             alter_table.add_operation(alter_type)
         elif need_temp_col:
             move_data = dbops.Query(textwrap.dedent(f'''\
-                UPDATE {q(*old_ptr_stor_info.table_name)} AS {qi(alias)}
-                SET {qi(old_ptr_stor_info.column_name)} = ({qi(target_col)})
+                UPDATE
+                    {q(*old_ptr_stor_info.table_name)} AS {qi(orig_rel_alias)}
+                SET
+                    {qi(old_ptr_stor_info.column_name)} = ({qi(target_col)})
             '''))
             self.pgops.add(move_data)
 
@@ -2595,6 +2796,166 @@ class PointerMetaCommand(MetaCommand, sd.ObjectCommand,
                 update_descendants=True,
                 update_ancestors=True,
             )
+
+    def _compile_conversion_expr(
+        self,
+        *,
+        pointer: s_pointers.Pointer,
+        conv_expr: s_expr.Expression,
+        schema: s_schema.Schema,
+        orig_schema: s_schema.Schema,
+        context: sd.CommandContext,
+        orig_rel_is_always_source: bool = False,
+        target_as_singleton: bool = True,
+    ) -> Tuple[
+        s_expr.Expression,  # Possibly-amended EdgeQL conversion expression
+        str,                # SQL text
+        str,                # original relation alias
+        bool,               # whether SQL expression is trivial
+    ]:
+        old_ptr_stor_info = types.get_pointer_storage_info(
+            pointer, schema=orig_schema)
+
+        ptr_table = old_ptr_stor_info.table_type == 'link'
+        is_link = isinstance(pointer, s_links.Link)
+        is_lprop = pointer.is_link_property(schema)
+        is_multi = ptr_table and not is_lprop
+        is_required = pointer.get_required(schema)
+
+        new_target = pointer.get_target(schema)
+        expr_is_trivial = False
+
+        if conv_expr.irast is not None:
+            ir = conv_expr.irast
+        else:
+            conv_expr = self._compile_expr(
+                orig_schema,
+                context,
+                conv_expr,
+                target_as_singleton=target_as_singleton,
+            )
+            ir = conv_expr.irast
+
+        assert ir is not None
+
+        if ir.stype != new_target and not is_link:
+            # The result of an EdgeQL USING clause does not match
+            # the target type exactly, but is castable.  Like in the
+            # case of an empty USING clause, we still have to make
+            # ane explicit EdgeQL cast rather than rely on Postgres
+            # casting.
+            conv_expr = self._compile_expr(
+                orig_schema,
+                context,
+                s_expr.Expression.from_ast(
+                    ql_ast.TypeCast(
+                        expr=conv_expr.qlast,
+                        type=s_utils.typeref_to_ast(schema, new_target),
+                    ),
+                    schema=orig_schema,
+                ),
+                target_as_singleton=target_as_singleton,
+            )
+
+            ir = conv_expr.irast
+
+        expr_is_nullable = conv_expr.cardinality.can_be_zero()
+
+        refs = irutils.get_longest_paths(ir.expr)
+        ref_tables = schemamech.get_ref_storage_info(ir.schema, refs)
+
+        local_table_only = all(
+            t == old_ptr_stor_info.table_name
+            for t in ref_tables
+        )
+
+        # TODO: implement IR complexity inference
+        can_translate_to_sql_value_expr = False
+
+        expr_is_trivial = (
+            # Only allow trivial USING if we can compile the
+            # EdgeQL expression into a trivial SQL value expression.
+            can_translate_to_sql_value_expr
+            # No link expr is trivially translatable into
+            # a USING SQL clause.
+            and not is_link
+            # SQL SET TYPE cannot contain references
+            # outside of the local table.
+            and local_table_only
+            # Changes to a multi-pointer might involve contraction of
+            # the overall cardinality, i.e. the deletion some rows.
+            and not is_multi
+            # If the property is required, and the USING expression
+            # was not proven by the compiler to not return ZERO, we
+            # must inject an explicit NULL guard, as the SQL null
+            # violation error is very nondescript in the context of
+            # a table rewrite, making it hard to pinpoint the failing
+            # object.
+            and (not is_required or not expr_is_nullable)
+        )
+
+        alias = f'alias_{uuidgen.uuid1mc()}'
+
+        if not expr_is_trivial:
+            # Non-trivial conversion expression means that we
+            # are compiling a full-blown EdgeQL statement as
+            # opposed to compiling a scalar fragment in trivial
+            # expression mode.
+            external_rvars = {}
+
+            if is_lprop:
+                tgt_path_id = irpathid.PathId.from_pointer(
+                    orig_schema,
+                    pointer,
+                ).src_path()
+            else:
+                tgt_path_id = irpathid.PathId.from_pointer(
+                    orig_schema,
+                    pointer,
+                )
+
+            ptr_path_id = tgt_path_id.ptr_path()
+            src_path_id = ptr_path_id.src_path()
+
+            if ptr_table and not orig_rel_is_always_source:
+                rvar = compiler.new_external_rvar(
+                    rel_name=(alias,),
+                    path_id=ptr_path_id,
+                    outputs={
+                        (src_path_id, ('identity',)): 'source',
+                    },
+                )
+                external_rvars[ptr_path_id, 'source'] = rvar
+                external_rvars[ptr_path_id, 'value'] = rvar
+                external_rvars[src_path_id, 'identity'] = rvar
+                if local_table_only and not is_lprop:
+                    external_rvars[src_path_id, 'source'] = rvar
+                    external_rvars[src_path_id, 'value'] = rvar
+                elif is_lprop:
+                    external_rvars[tgt_path_id, 'identity'] = rvar
+                    external_rvars[tgt_path_id, 'value'] = rvar
+            else:
+                src_rvar = compiler.new_external_rvar(
+                    rel_name=(alias,),
+                    path_id=src_path_id,
+                    outputs={},
+                )
+                external_rvars[src_path_id, 'identity'] = src_rvar
+                external_rvars[src_path_id, 'value'] = src_rvar
+                external_rvars[src_path_id, 'source'] = src_rvar
+        else:
+            external_rvars = None
+
+        sql_tree = compiler.compile_ir_to_sql_tree(
+            ir,
+            output_format=compiler.OutputFormat.NATIVE_INTERNAL,
+            singleton_mode=expr_is_trivial,
+            external_rvars=external_rvars,
+        )
+
+        sql_text = codegen.generate_source(sql_tree)
+
+        return (conv_expr, sql_text, alias, expr_is_trivial)
 
 
 class LinkMetaCommand(CompositeObjectMetaCommand, PointerMetaCommand):
@@ -2626,17 +2987,13 @@ class LinkMetaCommand(CompositeObjectMetaCommand, PointerMetaCommand):
                 columns=[src_col, tgt_col]))
 
         if not link.generic(schema) and link.scalar():
-            try:
-                tgt_prop = link.getptr(schema, 'target')
-            except KeyError:
-                pass
-            else:
-                tgt_ptr = types.get_pointer_storage_info(
-                    tgt_prop, schema=schema)
-                columns.append(
-                    dbops.Column(
-                        name=tgt_ptr.column_name,
-                        type=common.qname(*tgt_ptr.column_type)))
+            tgt_prop = link.getptr(schema, 'target')
+            tgt_ptr = types.get_pointer_storage_info(
+                tgt_prop, schema=schema)
+            columns.append(
+                dbops.Column(
+                    name=tgt_ptr.column_name,
+                    type=common.qname(*tgt_ptr.column_type)))
 
         table = dbops.Table(name=new_table_name)
         table.add_columns(columns)
@@ -2803,8 +3160,8 @@ class RenameLink(LinkMetaCommand, adapts=s_links.RenameLink):
         schema = LinkMetaCommand.apply(self, schema, context)
         return schema
 
-    def _rename_begin(self, schema, context):
-        schema = super()._rename_begin(schema, context)
+    def _alter_begin(self, schema, context):
+        schema = super()._alter_begin(schema, context)
         scls = self.scls
 
         self.attach_alter_table(context)
@@ -2854,8 +3211,18 @@ class SetLinkType(LinkMetaCommand, adapts=s_links.SetLinkType):
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
+        orig_schema = schema
         schema = s_links.SetLinkType.apply(self, schema, context)
-        return LinkMetaCommand.apply(self, schema, context)
+        schema = LinkMetaCommand.apply(self, schema, context)
+        pop = self.get_parent_op(context)
+        orig_type = self.scls.get_target(orig_schema)
+        new_type = self.scls.get_target(schema)
+        if (
+            not pop.maybe_get_object_aux_data('from_alias')
+            and (orig_type != new_type or self.cast_expr is not None)
+        ):
+            self._alter_pointer_type(self.scls, schema, orig_schema, context)
+        return schema
 
 
 class AlterLinkUpperCardinality(
@@ -2867,8 +3234,50 @@ class AlterLinkUpperCardinality(
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
+        pop = self.get_parent_op(context)
+        orig_schema = schema
         schema = s_links.AlterLinkUpperCardinality.apply(self, schema, context)
-        return LinkMetaCommand.apply(self, schema, context)
+        schema = LinkMetaCommand.apply(self, schema, context)
+
+        if (
+            not self.scls.generic(schema)
+            and not self.scls.is_pure_computable(schema)
+            and not pop.maybe_get_object_aux_data('from_alias')
+        ):
+            orig_card = self.scls.get_cardinality(orig_schema)
+            new_card = self.scls.get_cardinality(schema)
+            if orig_card != new_card:
+                self._alter_pointer_cardinality(schema, orig_schema, context)
+
+        return schema
+
+
+class AlterLinkLowerCardinality(
+    LinkMetaCommand,
+    adapts=s_links.AlterLinkLowerCardinality,
+):
+    def apply(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        pop = self.get_parent_op(context)
+        orig_schema = schema
+        schema = s_links.AlterLinkLowerCardinality.apply(
+            self, schema, context)
+        schema = LinkMetaCommand.apply(self, schema, context)
+
+        if not self.scls.generic(schema):
+            orig_required = self.scls.get_required(orig_schema)
+            new_required = self.scls.get_required(schema)
+            if (
+                not pop.maybe_get_object_aux_data('from_alias')
+                and not self.scls.is_endpoint_pointer(schema)
+                and orig_required != new_required
+            ):
+                self._alter_pointer_optionality(schema, orig_schema, context)
+
+        return schema
 
 
 class AlterLinkOwned(
@@ -2894,33 +3303,6 @@ class AlterLink(LinkMetaCommand, adapts=s_links.AlterLink):
             ctx.original_schema = orig_schema
             self.provide_table(link, schema, context)
             self.attach_alter_table(context)
-
-            if not link.generic(schema):
-                self.adjust_pointer_storage(link, schema, orig_schema, context)
-
-                old_ptr_stor_info = types.get_pointer_storage_info(
-                    link, schema=orig_schema)
-                ptr_stor_info = types.get_pointer_storage_info(
-                    link, schema=schema)
-
-                link_required = link.get_required(schema)
-                old_link_required = link.get_required(orig_schema)
-
-                if (old_ptr_stor_info.table_type == 'ObjectType' and
-                        ptr_stor_info.table_type == 'ObjectType' and
-                        link_required != old_link_required):
-
-                    ot_ctx = context.get(s_objtypes.ObjectTypeCommandContext)
-                    alter_table = ot_ctx.op.get_alter_table(
-                        schema, context)
-
-                    alter_table.add_operation(
-                        dbops.AlterTableAlterColumnNull(
-                            column_name=ptr_stor_info.column_name,
-                            null=not link.get_required(schema)))
-
-            if isinstance(link.get_target(schema), s_scalars.ScalarType):
-                self.alter_pointer_default(link, schema, context)
 
             otd = self.get_resolved_attribute_value(
                 'on_target_delete',
@@ -2962,10 +3344,10 @@ class DeleteLink(LinkMetaCommand, adapts=s_links.DeleteLink):
 
             if (not isinstance(objtype.op, s_objtypes.DeleteObjectType)
                     and ptr_stor_info.table_type == 'ObjectType'
-                    and objtype.scls.getptr(schema, link_name) is None):
+                    and objtype.scls.maybe_get_ptr(schema, link_name) is None):
                 # Only drop the column if the parent is not being dropped
                 # and the link was not reinherited in the same delta.
-                if objtype.scls.getptr(schema, link_name) is None:
+                if objtype.scls.maybe_get_ptr(schema, link_name) is None:
                     # This must be a separate so that objects depending
                     # on this column can be dropped correctly.
                     #
@@ -2985,7 +3367,7 @@ class DeleteLink(LinkMetaCommand, adapts=s_links.DeleteLink):
                         update_descendants=True,
                     )
 
-            if link.get_is_owned(orig_schema):
+            if link.get_owned(orig_schema):
                 self.schedule_endpoint_delete_action_update(
                     link, orig_schema, schema, context)
 
@@ -3209,8 +3591,19 @@ class SetPropertyType(
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
+        pop = self.get_parent_op(context)
+        orig_schema = schema
         schema = s_props.SetPropertyType.apply(self, schema, context)
-        return PropertyMetaCommand.apply(self, schema, context)
+        schema = PropertyMetaCommand.apply(self, schema, context)
+        orig_type = self.scls.get_target(orig_schema)
+        new_type = self.scls.get_target(schema)
+        if (
+            not pop.maybe_get_object_aux_data('from_alias')
+            and not self.scls.is_endpoint_pointer(schema)
+            and (orig_type != new_type or self.cast_expr is not None)
+        ):
+            self._alter_pointer_type(self.scls, schema, orig_schema, context)
+        return schema
 
 
 class AlterPropertyUpperCardinality(
@@ -3222,9 +3615,52 @@ class AlterPropertyUpperCardinality(
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
+        pop = self.get_parent_op(context)
+        orig_schema = schema
         schema = s_props.AlterPropertyUpperCardinality.apply(
             self, schema, context)
-        return PropertyMetaCommand.apply(self, schema, context)
+        schema = PropertyMetaCommand.apply(self, schema, context)
+
+        if (
+            not self.scls.generic(schema)
+            and not self.scls.is_pure_computable(schema)
+            and not self.scls.is_endpoint_pointer(schema)
+            and not pop.maybe_get_object_aux_data('from_alias')
+        ):
+            orig_card = self.scls.get_cardinality(orig_schema)
+            new_card = self.scls.get_cardinality(schema)
+            if orig_card != new_card:
+                self._alter_pointer_cardinality(schema, orig_schema, context)
+
+        return schema
+
+
+class AlterPropertyLowerCardinality(
+    PropertyMetaCommand,
+    adapts=s_props.AlterPropertyLowerCardinality,
+):
+    def apply(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        pop = self.get_parent_op(context)
+        orig_schema = schema
+        schema = s_props.AlterPropertyLowerCardinality.apply(
+            self, schema, context)
+        schema = PropertyMetaCommand.apply(self, schema, context)
+
+        if not self.scls.generic(schema):
+            orig_required = self.scls.get_required(orig_schema)
+            new_required = self.scls.get_required(schema)
+            if (
+                not pop.maybe_get_object_aux_data('from_alias')
+                and not self.scls.is_endpoint_pointer(schema)
+                and orig_required != new_required
+            ):
+                self._alter_pointer_optionality(schema, orig_schema, context)
+
+        return schema
 
 
 class AlterPropertyOwned(
@@ -3256,34 +3692,8 @@ class AlterProperty(
         with context(
                 s_props.PropertyCommandContext(schema, self, prop)) as ctx:
             ctx.original_schema = orig_schema
-
             self.provide_table(prop, schema, context)
-
-            if not prop.generic(schema):
-                prop_required = prop.get_required(schema)
-                old_prop_required = prop.get_required(orig_schema)
-                ptr_stor_info = types.get_pointer_storage_info(
-                    prop, schema=schema)
-
-                if (
-                    prop_required != old_prop_required
-                    and (
-                        ptr_stor_info.table_type != 'link'
-                        or prop.is_link_property(schema)
-                    )
-                ):
-                    src_ctx = context.get(s_sources.SourceCommandContext)
-                    src_op = src_ctx.op
-                    alter_table = src_op.get_alter_table(schema, context)
-                    alter_table.add_operation(
-                        dbops.AlterTableAlterColumnNull(
-                            column_name=ptr_stor_info.column_name,
-                            null=not prop.get_required(schema)))
-
             self.alter_pointer_default(prop, schema, context)
-
-            if not prop.generic(schema):
-                self.adjust_pointer_storage(prop, schema, orig_schema, context)
 
         return schema
 
@@ -3309,7 +3719,7 @@ class DeleteProperty(
             source = source_op = None
 
         if (source
-                and not source.getptr(
+                and not source.maybe_get_ptr(
                     schema, prop.get_shortname(orig_schema).name)
                 and has_table(source, schema)):
 
@@ -3710,7 +4120,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
         for link_op, link, orig_schema in self.link_ops:
             if isinstance(link_op, DeleteLink):
                 if (link.generic(orig_schema)
-                        or not link.get_is_owned(orig_schema)
+                        or not link.get_owned(orig_schema)
                         or link.is_pure_computable(orig_schema)):
                     continue
                 source = link.get_source(orig_schema)
@@ -3726,7 +4136,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
             else:
                 if (
                     link.generic(schema)
-                    or not link.get_is_owned(schema)
+                    or not link.get_owned(schema)
                     or link.is_pure_computable(schema)
                 ):
                     continue
@@ -3752,7 +4162,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
 
             for link in source.get_pointers(src_schema).objects(src_schema):
                 if (not isinstance(link, s_links.Link)
-                        or not link.get_is_owned(src_schema)
+                        or not link.get_owned(src_schema)
                         or link.is_pure_computable(src_schema)):
                     continue
                 ptr_stor_info = types.get_pointer_storage_info(
@@ -3778,7 +4188,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
 
             for link in schema.get_referrers(target, scls_type=s_links.Link,
                                              field_name='target'):
-                if (not link.get_is_owned(schema)
+                if (not link.get_owned(schema)
                         or link.is_pure_computable(schema)):
                     continue
                 source = link.get_source(schema)
@@ -4154,7 +4564,7 @@ class CreateRole(ObjectMetaCommand, adapts=s_roles.CreateRole):
         instance_params = backend_params.instance_params
         capabilities = instance_params.capabilities
 
-        if role.get_is_superuser(schema):
+        if role.get_superuser(schema):
             if instance_params.base_superuser:
                 # If the cluster is exposing an explicit superuser role,
                 # become a member of that instead of creating a superuser
@@ -4175,7 +4585,7 @@ class CreateRole(ObjectMetaCommand, adapts=s_roles.CreateRole):
         role = dbops.Role(
             name=str(role.get_name(schema)),
             allow_login=True,
-            is_superuser=superuser_flag,
+            superuser=superuser_flag,
             password=passwd,
             membership=membership,
             metadata=dict(
@@ -4207,7 +4617,7 @@ class AlterRole(ObjectMetaCommand, adapts=s_roles.AlterRole):
                 password_hash=passwd,
                 builtin=role.get_builtin(schema),
             )
-        if self.has_attribute_value('is_superuser'):
+        if self.has_attribute_value('superuser'):
             ctx_backend_params = context.backend_runtime_params
             if ctx_backend_params is not None:
                 backend_params = cast(
@@ -4238,7 +4648,7 @@ class AlterRole(ObjectMetaCommand, adapts=s_roles.AlterRole):
                     & pgcluster.BackendCapabilities.SUPERUSER_ACCESS
                 )
 
-            kwargs['is_superuser'] = superuser_flag
+            kwargs['superuser'] = superuser_flag
 
         dbrole = dbops.Role(name=rolname, **kwargs)
         self.pgops.add(dbops.AlterRole(dbrole))

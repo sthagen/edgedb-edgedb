@@ -156,10 +156,10 @@ def get_known_type_id(
 
 class DeltaGuidance(NamedTuple):
 
-    banned_creations: FrozenSet[Tuple[Type[Object], str]] = frozenset()
-    banned_deletions: FrozenSet[Tuple[Type[Object], str]] = frozenset()
+    banned_creations: FrozenSet[Tuple[Type[Object], sn.Name]] = frozenset()
+    banned_deletions: FrozenSet[Tuple[Type[Object], sn.Name]] = frozenset()
     banned_alters: FrozenSet[
-        Tuple[Type[Object], Tuple[str, str]]
+        Tuple[Type[Object], Tuple[sn.Name, sn.Name]]
     ] = frozenset()
 
 
@@ -196,6 +196,7 @@ class ComparisonContext:
     renames: Dict[Tuple[Type[Object], sn.Name], sd.RenameObject[Object]]
     deletions: Dict[Tuple[Type[Object], sn.Name], sd.DeleteObject[Object]]
     guidance: Optional[DeltaGuidance]
+    parent_ops: List[sd.ObjectCommand[Any]]
 
     def __init__(
         self,
@@ -209,6 +210,8 @@ class ComparisonContext:
         self.guidance = guidance
         self.renames = {}
         self.deletions = {}
+        self.placeholder_ctr: Dict[str, int] = collections.Counter()
+        self.parent_ops = []
 
     def is_deleting(self, schema: s_schema.Schema, obj: Object) -> bool:
         return (type(obj), obj.get_name(schema)) in self.deletions
@@ -229,6 +232,14 @@ class ComparisonContext:
             return rename_op.new_name
         else:
             return obj_name
+
+    def get_placeholder(self, prefix: str) -> str:
+        ctr = self.placeholder_ctr[prefix]
+        self.placeholder_ctr[prefix] += 1
+        if ctr == 0:
+            return f'{prefix}'
+        else:
+            return f'{prefix}_{ctr}'
 
 
 # derived from ProtoField for validation
@@ -670,7 +681,7 @@ class ObjectMeta(type):
                         ftype.schema_restore
                     ),
                 ) -> Any:
-                    data = schema.get_obj_data_raw(self.id)
+                    data = schema.get_obj_data_raw(self)
                     v = data[_fi]
                     if v is not None:
                         return _sr(v)
@@ -695,7 +706,7 @@ class ObjectMeta(type):
                     _fn: str = field.name,
                     _fi: int = findex,
                 ) -> Any:
-                    data = schema.get_obj_data_raw(self.id)
+                    data = schema.get_obj_data_raw(self)
                     v = data[_fi]
                     if v is not None:
                         return v
@@ -1002,6 +1013,10 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         return name
 
     @classmethod
+    def get_local_name_static(cls, name: sn.Name) -> sn.UnqualName:
+        return cls.get_shortname_static(name).get_local_name()
+
+    @classmethod
     def get_displayname_static(cls, name: sn.Name) -> str:
         return str(cls.get_shortname_static(name))
 
@@ -1021,6 +1036,9 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
 
     def get_shortname(self, schema: s_schema.Schema) -> sn.Name:
         return type(self).get_shortname_static(self.get_name(schema))
+
+    def get_local_name(self, schema: s_schema.Schema) -> sn.UnqualName:
+        return type(self).get_local_name_static(self.get_name(schema))
 
     def get_displayname(self, schema: s_schema.Schema) -> str:
         return type(self).get_displayname_static(self.get_name(schema))
@@ -1045,19 +1063,26 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         return hash(self.id)
 
     @classmethod
-    def _prepare_id(
-        cls, id: Optional[uuid.UUID], data: Dict[str, Any]
+    def generate_id(
+        cls,
+        schema: s_schema.Schema,
+        data: Dict[str, Any],
     ) -> uuid.UUID:
-        if id is not None:
-            return id
+        return uuidgen.uuid1mc()
 
+    @classmethod
+    def _prepare_id(
+        cls,
+        schema: s_schema.Schema,
+        data: Dict[str, Any],
+    ) -> uuid.UUID:
         name = data.get('name')
         assert isinstance(name, (str, sn.Name))
 
         try:
             return get_known_type_id(name)
         except errors.SchemaError:
-            return uuidgen.uuid1mc()
+            return cls.generate_id(schema, data)
 
     @classmethod
     def _create_from_id(cls: Type[Object_T], id: uuid.UUID) -> Object_T:
@@ -1086,7 +1111,8 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
             value = field.coerce_value(schema, value)
             obj_data[field.index] = value
 
-        id = cls._prepare_id(id, data)
+        if id is None:
+            id = cls._prepare_id(schema, data)
         scls = cls._create_from_id(id)
         schema = schema.add(id, cls, tuple(obj_data))
 
@@ -1103,7 +1129,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         field = type(self).get_field(field_name)
 
         if isinstance(field, SchemaField):
-            data = schema.get_obj_data_raw(self.id)
+            data = schema.get_obj_data_raw(self)
             val = data[field.index]
             if val is not None:
                 if field.is_reducible:
@@ -1133,7 +1159,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         field = type(self).get_field(field_name)
 
         if isinstance(field, SchemaField):
-            data = schema.get_obj_data_raw(self.id)
+            data = schema.get_obj_data_raw(self)
             val = data[field.index]
             if val is not None:
                 if field.is_reducible:
@@ -1163,10 +1189,10 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         assert field.is_schema_field
 
         if value is None:
-            return schema.unset_obj_field(self.id, name)
+            return schema.unset_obj_field(self, name)
         else:
             value = field.coerce_value(schema, value)
-            return schema.set_obj_field(self.id, name, value)
+            return schema.set_obj_field(self, name, value)
 
     def update(
         self, schema: s_schema.Schema, updates: Dict[str, Any]
@@ -1183,7 +1209,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
                 new_val = field.coerce_value(schema, new_val)
                 updates[field_name] = new_val
 
-        return schema.update_obj(self.id, updates)
+        return schema.update_obj(self, updates)
 
     def is_type(self) -> bool:
         return False
@@ -1250,6 +1276,14 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
     ) -> bool:
         return True
 
+    def is_parent_ref(
+        self,
+        schema: s_schema.Schema,
+        reference: Object,
+    ) -> bool:
+        """Return True if *reference* is a structural ancestor of self."""
+        return False
+
     def is_generated(self, schema: s_schema.Schema) -> bool:
         return False
 
@@ -1311,7 +1345,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         # so we should use the default for comparisons. This means
         # that we perform the comparison as if explicit = False.
         #
-        # E.g. 'is_owned' being None and False is semantically
+        # E.g. 'owned' being None and False is semantically
         # identical and should not be considered a change.
         if (isinstance(field, SchemaField) and not field.inheritable):
             explicit = False
@@ -1469,14 +1503,19 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
             ddl_identity=self.get_ddl_identity(schema),
             **kwargs,
         )
+        self.record_cmd_object_aux_data(schema, cmd)
+        return cmd
 
-        for field in cls.get_aux_cmd_data_fields():
+    def record_cmd_object_aux_data(
+        self: Object_T,
+        schema: s_schema.Schema,
+        cmd: sd.ObjectCommand[Any],
+    ) -> None:
+        for field in type(self).get_aux_cmd_data_fields():
             cmd.set_object_aux_data(
                 field.name,
                 self.get_field_value(schema, field.name),
             )
-
-        return cmd
 
     def init_parent_delta_branch(
         self: Object_T,
@@ -1554,16 +1593,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         )
 
         if context.generate_prompts:
-            svn = self.get_verbosename(schema, with_parent=True)
-            prompt = f'did you create {svn}?'
-            delta.set_annotation('user_prompt', prompt)
-            delta.set_annotation('op_id', sd.get_object_command_id(delta))
             delta.set_annotation('orig_cmdclass', type(delta))
-
-        # IDs are assigned once when the object is created and
-        # never changed.
-        id_value = self.get_explicit_field_value(schema, 'id')
-        delta.set_attribute_value('id', id_value)
 
         ff = cls.get_fields(sorted=True).items()
         fields = {fn: f for fn, f in ff if f.simpledelta and not f.ephemeral}
@@ -1633,18 +1663,9 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         delta.set_annotation('confidence', confidence)
 
         if context.generate_prompts:
-            svn = self.get_verbosename(self_schema, with_parent=True)
-            self_name = self.get_name(self_schema)
             other_name = other.get_name(other_schema)
-            if self_name != other_name:
-                ovn = other.get_displayname(other_schema)
-                prompt = f'did you rename {svn} to {ovn!r}?'
-            else:
-                prompt = f'did you alter {svn}?'
-
-            delta.set_annotation('user_prompt', prompt)
-            delta.set_annotation('new_name', other_name)
-            delta.set_annotation('op_id', sd.get_object_command_id(delta))
+            if self.get_name(self_schema) != other_name:
+                delta.set_annotation('new_name', other_name)
             delta.set_annotation('orig_cmdclass', type(delta))
 
         ff = cls.get_fields(sorted=True).items()
@@ -1710,16 +1731,21 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
                 key=lambda o: o.get_name(other_schema),
             )
 
+            context.parent_ops.append(delta)
+
             delta.add(
                 sd.delta_objects(
                     oldcoll_idx,
                     newcoll_idx,
                     sclass=refdict.ref_cls,
+                    parent_confidence=confidence,
                     context=context,
                     old_schema=self_schema,
                     new_schema=other_schema,
                 ),
             )
+
+            context.parent_ops.pop()
 
         return delta
 
@@ -1739,10 +1765,6 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         )
 
         if context.generate_prompts:
-            svn = self.get_verbosename(schema, with_parent=True)
-            prompt = f'did you drop {svn}?'
-            delta.set_annotation('user_prompt', prompt)
-            delta.set_annotation('op_id', sd.get_object_command_id(delta))
             delta.set_annotation('orig_cmdclass', type(delta))
 
         context.deletions[type(self), delta.classname] = delta
@@ -1796,7 +1818,7 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         else:
             orig_is_computed = is_computed
 
-        delta.set_attribute_value(
+        cmd = delta.set_attribute_value(
             fname,
             value,
             orig_value=orig_value,
@@ -1804,6 +1826,14 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
             orig_computed=orig_is_computed,
             from_default=from_default,
         )
+
+        context.parent_ops.append(delta)
+        cmd.record_diff_annotations(
+            schema=schema,
+            orig_schema=orig_schema,
+            context=context,
+        )
+        context.parent_ops.pop()
 
     def record_field_create_delta(
         self: Object_T,
@@ -2182,7 +2212,7 @@ class ObjectCollection(
             f'{type(self)} parameters are not resolved'
 
         cls: Type[ObjectCollection[Object_T]] = self.__class__
-        types: Optional[Tuple[type, ...]] = self.types
+        types: Optional[Tuple[type, ...]] = self.orig_args
         if types is None or not cls.is_anon_parametrized():
             typeargs = None
         else:
@@ -2284,7 +2314,7 @@ class ObjectCollection(
         compcoef: float,
     ) -> float:
         if ours is not None:
-            our_names = tuple(
+            our_names = cls._container(
                 context.get_obj_name(our_schema, obj)
                 for obj in ours.objects(our_schema)
             )
@@ -2334,48 +2364,48 @@ class ObjectCollectionShell(Shell, Generic[Object_T]):
         return f'<{tn} {cn}({items}) at 0x{id(self):x}>'
 
 
-OIBT = TypeVar("OIBT", bound="ObjectIndexBase[Object]")
-KeyFunction = Callable[["s_schema.Schema", Object_T], str]
+Key_T = TypeVar("Key_T")
+KeyFunction = Callable[["s_schema.Schema", Object_T], Key_T]
+OIBT = TypeVar("OIBT", bound="ObjectIndexBase[Object, Any]")
 
 
 class ObjectIndexBase(
+    Generic[Key_T, Object_T],
     ObjectCollection[Object_T],
     container=tuple,
 ):
-    _key: KeyFunction[Object_T]
+    _key: KeyFunction[Object_T, Key_T]
 
     def __init_subclass__(
         cls,
         *,
-        key: Optional[KeyFunction[Object_T]] = None,
+        key: Optional[KeyFunction[Object_T, Key_T]] = None,
     ) -> None:
         super().__init_subclass__()
         if key is not None:
             cls._key = key
-        elif cls._key is None:
-            raise TypeError('missing required "key" class argument')
 
     @classmethod
-    def get_key_for(cls, schema: s_schema.Schema, obj: Object) -> str:
-        return cls._key(schema, obj)
+    def get_key_for(cls, schema: s_schema.Schema, obj: Object) -> Key_T:
+        return cls._key(schema, obj)  # type: ignore  # mypy bug?
 
     @classmethod
     def get_key_for_name(
         cls,
         schema: s_schema.Schema,
         name: sn.Name,
-    ) -> str:
-        return str(name)
+    ) -> Key_T:
+        raise NotImplementedError
 
     @classmethod
     def create(
-        cls: Type[ObjectIndexBase[Object_T]],
+        cls: Type[ObjectIndexBase[Key_T, Object_T]],
         schema: s_schema.Schema,
         data: Iterable[Object_T],
         **kwargs: Any,
-    ) -> ObjectIndexBase[Object_T]:
+    ) -> ObjectIndexBase[Key_T, Object_T]:
         coll = cast(
-            ObjectIndexBase[Object_T],
+            ObjectIndexBase[Key_T, Object_T],
             super().create(schema, data, **kwargs)
         )
         coll._check_duplicates(schema)
@@ -2463,11 +2493,11 @@ class ObjectIndexBase(
     def delete(
         self: OIBT,
         schema: s_schema.Schema,
-        names: Iterable[str],
+        names: Iterable[Key_T],
     ) -> Tuple[s_schema.Schema, OIBT]:
         items = dict(self.items(schema))
         for name in names:
-            items.pop(name)
+            items.pop(name)  # type: ignore[call-overload]  # mypy bug
         return (
             schema,
             cast(OIBT, type(self).create(schema, items.values())),
@@ -2476,7 +2506,7 @@ class ObjectIndexBase(
     def items(
         self,
         schema: s_schema.Schema,
-    ) -> Tuple[Tuple[str, Object_T], ...]:
+    ) -> Tuple[Tuple[Key_T, Object_T], ...]:
         result = []
         keyfunc = type(self)._key
 
@@ -2485,7 +2515,7 @@ class ObjectIndexBase(
 
         return tuple(result)
 
-    def keys(self, schema: s_schema.Schema) -> Tuple[str, ...]:
+    def keys(self, schema: s_schema.Schema) -> Tuple[Key_T, ...]:
         result = []
         keyfunc = type(self)._key
 
@@ -2494,13 +2524,13 @@ class ObjectIndexBase(
 
         return tuple(result)
 
-    def has(self, schema: s_schema.Schema, name: str) -> bool:
+    def has(self, schema: s_schema.Schema, name: Key_T) -> bool:
         return name in self.keys(schema)
 
     def get(
         self,
         schema: s_schema.Schema,
-        name: str,
+        name: Key_T,
         default: Any = NoDefault,
     ) -> Optional[Object_T]:
         items = dict(self.items(schema))
@@ -2510,23 +2540,30 @@ class ObjectIndexBase(
             return items.get(name, default)
 
 
-def _fullname_object_key(schema: s_schema.Schema, o: Object) -> str:
-    return str(o.get_name(schema))
+def _fullname_object_key(schema: s_schema.Schema, o: Object) -> sn.Name:
+    return o.get_name(schema)
 
 
 class ObjectIndexByFullname(
-    ObjectIndexBase[Object_T],
+    ObjectIndexBase[sn.Name, Object_T],
     key=_fullname_object_key,
 ):
-    pass
+
+    @classmethod
+    def get_key_for_name(
+        cls,
+        schema: s_schema.Schema,
+        name: sn.Name,
+    ) -> sn.Name:
+        return name
 
 
-def _shortname_object_key(schema: s_schema.Schema, o: Object) -> str:
-    return str(o.get_shortname(schema))
+def _shortname_object_key(schema: s_schema.Schema, o: Object) -> sn.Name:
+    return o.get_shortname(schema)
 
 
 class ObjectIndexByShortname(
-    ObjectIndexBase[Object_T],
+    ObjectIndexBase[sn.Name, Object_T],
     key=_shortname_object_key,
 ):
 
@@ -2535,21 +2572,20 @@ class ObjectIndexByShortname(
         cls,
         schema: s_schema.Schema,
         name: sn.Name,
-    ) -> str:
-        return str(sn.shortname_from_fullname(name))
+    ) -> sn.Name:
+        return sn.shortname_from_fullname(name)
 
 
 def _unqualified_object_key(
     schema: s_schema.Schema,
     o: QualifiedObject,
-) -> str:
+) -> sn.UnqualName:
     assert isinstance(o, QualifiedObject)
-    return o.get_shortname(schema).name
+    return sn.UnqualName(o.get_shortname(schema).name)
 
 
 class ObjectIndexByUnqualifiedName(
-    ObjectIndexBase[QualifiedObject_T],
-    Generic[QualifiedObject_T],
+    ObjectIndexBase[sn.UnqualName, QualifiedObject_T],
     key=_unqualified_object_key,
 ):
 
@@ -2558,11 +2594,8 @@ class ObjectIndexByUnqualifiedName(
         cls,
         schema: s_schema.Schema,
         name: sn.Name,
-    ) -> str:
-        return sn.shortname_from_fullname(name).name
-
-
-Key_T = TypeVar("Key_T")
+    ) -> sn.UnqualName:
+        return sn.UnqualName(sn.shortname_from_fullname(name).name)
 
 
 class ObjectDict(
@@ -2740,7 +2773,7 @@ class ObjectList(
 
 class SubclassableObject(Object):
 
-    is_abstract = SchemaField(
+    abstract = SchemaField(
         bool,
         default=False,
         inheritable=False,
@@ -2748,7 +2781,7 @@ class SubclassableObject(Object):
         compcoef=0.909,
     )
 
-    is_final = SchemaField(
+    final = SchemaField(
         bool,
         default=False,
         special_ddl_syntax=True,
@@ -2843,10 +2876,10 @@ class InheritingObject(SubclassableObject):
         """Get the topmost non-abstract base."""
         lineage = self.get_ancestors(schema).objects(schema)
         for ancestor in reversed(lineage):
-            if not ancestor.get_is_abstract(schema):
+            if not ancestor.get_abstract(schema):
                 return ancestor
 
-        if not self.get_is_abstract(schema):
+        if not self.get_abstract(schema):
             return self
 
         raise errors.SchemaError(
@@ -3014,7 +3047,7 @@ class InheritingObject(SubclassableObject):
         else:
             orig_is_computed = is_computed
 
-        delta.set_attribute_value(
+        cmd = delta.set_attribute_value(
             fname,
             value=value,
             orig_value=orig_value,
@@ -3024,6 +3057,14 @@ class InheritingObject(SubclassableObject):
             orig_computed=orig_is_computed,
             from_default=from_default,
         )
+
+        context.parent_ops.append(delta)
+        cmd.record_diff_annotations(
+            schema=schema,
+            orig_schema=orig_schema,
+            context=context,
+        )
+        context.parent_ops.pop()
 
     def get_field_create_delta(
         self: InheritingObjectT,

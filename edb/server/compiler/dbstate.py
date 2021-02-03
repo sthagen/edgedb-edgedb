@@ -69,6 +69,14 @@ class BaseQuery:
 
 
 @dataclasses.dataclass(frozen=True)
+class NullQuery(BaseQuery):
+
+    sql: Tuple[bytes, ...] = tuple()
+    is_transactional: bool = True
+    has_dml: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
 class Query(BaseQuery):
 
     sql_hash: bytes
@@ -240,6 +248,33 @@ class QueryUnit:
 #############################
 
 
+class ProposedMigrationStep(NamedTuple):
+
+    statements: Tuple[str, ...]
+    confidence: float
+    prompt: str
+    prompt_id: str
+    data_safe: bool
+    required_user_input: Tuple[Tuple[str, str]]
+
+    def to_json(self) -> Dict[str, Any]:
+        user_input_list = []
+        for var_name, var_desc in self.required_user_input:
+            user_input_list.append({
+                'placeholder': var_name,
+                'prompt': var_desc,
+            })
+
+        return {
+            'statements': [{'text': stmt} for stmt in self.statements],
+            'confidence': self.confidence,
+            'prompt': self.prompt,
+            'prompt_id': self.prompt_id,
+            'data_safe': self.data_safe,
+            'required_user_input': user_input_list,
+        }
+
+
 class MigrationState(NamedTuple):
 
     parent_migration: Optional[s_migrations.Migration]
@@ -247,7 +282,8 @@ class MigrationState(NamedTuple):
     initial_savepoint: Optional[str]
     target_schema: s_schema.Schema
     guidance: s_obj.DeltaGuidance
-    current_ddl: Tuple[qlast.DDLOperation, ...]
+    accepted_cmds: Tuple[qlast.Command, ...]
+    last_proposed: Tuple[ProposedMigrationStep, ...]
 
 
 class TransactionState(NamedTuple):

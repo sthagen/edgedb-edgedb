@@ -43,6 +43,7 @@ type Note {
     property note -> str;
     link subject -> Object;
 }
+type DerivedNote extending Note;
 
 type Person {
     required single property name -> std::str {
@@ -50,10 +51,17 @@ type Person {
         default := "Nemo";
     };
     optional single property tag -> std::str;
+    required single property tag2 -> std::str {
+        default := "<n/a>";
+    };
     optional multi link notes -> Note;
     optional multi property multi_prop -> std::str {
         constraint std::exclusive;
     };
+    optional single link note -> Note;
+    property case_name -> str {
+        constraint exclusive on (str_lower(__subject__));
+    }
 }
 
 type PersonWrapper {

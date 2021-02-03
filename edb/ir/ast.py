@@ -111,13 +111,15 @@ class ViewShapeMetadata(Base):
 
 
 class TypeRef(ImmutableBase):
+    # Hide ancestors and descendants from debug spew because they are
+    # incredibly noisy.
+    __ast_hidden__ = {'ancestors', 'descendants'}
+
     # The id of the referenced type
     id: uuid.UUID
-    # The module id of the referenced type
-    module_id: uuid.UUID
     # Full name of the type, not necessarily schema-addressable,
     # used for annotations only.
-    name_hint: sn.QualName
+    name_hint: sn.Name
     # The ref of the underlying material type, if this is a view type,
     # else None.
     material_type: typing.Optional[TypeRef]
@@ -127,6 +129,9 @@ class TypeRef(ImmutableBase):
     # A set of type descendant descriptors, if necessary for
     # this type description.
     descendants: typing.Optional[typing.FrozenSet[TypeRef]]
+    # A set of type ancestor descriptors, if necessary for
+    # this type description.
+    ancestors: typing.Optional[typing.FrozenSet[TypeRef]]
     # If this is a union type, this would be a set of
     # union elements.
     union: typing.FrozenSet[TypeRef]
@@ -158,6 +163,9 @@ class TypeRef(ImmutableBase):
     # True, if this describes an opaque union type
     is_opaque_union: bool = False
 
+    def __repr__(self) -> str:
+        return f'<ir.TypeRef \'{self.name_hint}\' at 0x{id(self):x}>'
+
 
 class AnyTypeRef(TypeRef):
     pass
@@ -176,23 +184,25 @@ class BasePointerRef(ImmutableBase):
     # cardinality fields need to be mutable for lazy cardinality inference.
     __ast_mutable_fields__ = frozenset(('dir_cardinality', 'out_cardinality'))
 
+    # The defaults set here are mostly to try to reduce debug spew output.
     name: sn.QualName
     shortname: sn.QualName
     path_id_name: typing.Optional[sn.QualName]
     std_parent_name: sn.QualName
     out_source: TypeRef
     out_target: TypeRef
-    direction: s_pointers.PointerDirection
-    source_ptr: PointerRef
+    direction: s_pointers.PointerDirection = (
+        s_pointers.PointerDirection.Outbound)
+    source_ptr: typing.Optional[PointerRef]
     base_ptr: typing.Optional[BasePointerRef]
-    material_ptr: BasePointerRef
+    material_ptr: typing.Optional[BasePointerRef]
     descendants: typing.FrozenSet[BasePointerRef]
     union_components: typing.Set[BasePointerRef]
     intersection_components: typing.Set[BasePointerRef]
-    union_is_concrete: bool
-    has_properties: bool
-    is_derived: bool
-    is_computable: bool
+    union_is_concrete: bool = False
+    has_properties: bool = False
+    is_derived: bool = False
+    is_computable: bool = False
     # Relation cardinality in the direction specified
     # by *direction*.
     dir_cardinality: qltypes.Cardinality
@@ -221,18 +231,17 @@ class BasePointerRef(ImmutableBase):
     def is_inbound(self) -> bool:
         return self.direction is self.direction.Inbound
 
+    def __repr__(self) -> str:
+        return f'<ir.{type(self).__name__} \'{self.name}\' at 0x{id(self):x}>'
+
 
 class PointerRef(BasePointerRef):
-
     id: uuid.UUID
-    module_id: uuid.UUID
 
 
 class ConstraintRef(ImmutableBase):
     # The id of the constraint
     id: uuid.UUID
-    # The module id of the constraint
-    module_id: uuid.UUID
 
 
 class TupleIndirectionLink(s_pointers.PseudoPointer):
@@ -417,8 +426,8 @@ class Set(Base):
     path_id: PathId
     path_scope_id: typing.Optional[int]
     typeref: TypeRef
-    expr: Expr
-    rptr: Pointer
+    expr: typing.Optional[Expr]
+    rptr: typing.Optional[Pointer]
     anchor: typing.Optional[str]
     show_as_anchor: typing.Optional[str]
     shape: typing.List[typing.Tuple[Set, qlast.ShapeOp]]
@@ -449,6 +458,15 @@ class Param:
     """IR type reference"""
 
 
+class ComputableInfo(typing.NamedTuple):
+
+    qlexpr: qlast.Expr
+    context: compiler.ContextLevel
+    path_id: PathId
+    path_id_ns: typing.Optional[WeakNamespace]
+    shape_op: qlast.ShapeOp
+
+
 class Statement(Command):
 
     expr: Set
@@ -466,11 +484,7 @@ class Statement(Command):
         typing.Dict[so.Object, typing.Set[qlast.Base]]]
     new_coll_types: typing.FrozenSet[s_types.Collection]
     scope_tree: ScopeTreeNode
-    source_map: typing.Dict[s_pointers.Pointer,
-                            typing.Tuple[qlast.Expr,
-                                         compiler.ContextLevel,
-                                         PathId,
-                                         typing.Optional[WeakNamespace]]]
+    source_map: typing.Dict[s_pointers.Pointer, ComputableInfo]
     dml_exprs: typing.List[qlast.Base]
     type_rewrites: typing.Dict[uuid.UUID, Set]
 
@@ -651,7 +665,7 @@ class FunctionCall(Call):
     sql_func_has_out_params: bool = False
 
     # backend_name for the underlying function
-    backend_name: typing.Optional[str] = None
+    backend_name: typing.Optional[uuid.UUID] = None
 
     # Error to raise if the underlying SQL function returns NULL.
     error_on_null_result: typing.Optional[str] = None
@@ -697,7 +711,7 @@ class TypeCast(ImmutableExpr):
 
     expr: Set
     cast_module_id: uuid.UUID
-    cast_name: str
+    cast_name: sn.QualName
     from_type: TypeRef
     to_type: TypeRef
     cardinality_mod: typing.Optional[qlast.CardinalityModifier]
@@ -745,14 +759,10 @@ class MutatingStmt(Stmt):
     subject: Set
 
 
-class OnConflictElse(typing.NamedTuple):
-    select: Set
-    body: Set
-
-
-class OnConflictClause(typing.NamedTuple):
+class OnConflictClause(Base):
     constraint: typing.Optional[ConstraintRef]
-    else_ir: typing.Optional[OnConflictElse]
+    select_ir: typing.Optional[Set]
+    else_ir: typing.Optional[Set]
 
 
 class InsertStmt(MutatingStmt):

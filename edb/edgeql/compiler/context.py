@@ -98,16 +98,6 @@ class ScopeInfo:
     pinned_path_id_ns: Optional[FrozenSet[str]] = None
 
 
-@dataclasses.dataclass
-class ComputableInfo:
-
-    qlexpr: qlast.Expr
-    context: ContextLevel
-    path_id: irast.PathId
-    path_id_ns: Optional[irast.WeakNamespace]
-    shape_op: qlast.ShapeOp
-
-
 class PointerRefCache(Dict[irtyputils.PtrRefCacheKey, irast.BasePointerRef]):
 
     _rcache: Dict[irast.BasePointerRef, s_pointers.PointerLike]
@@ -372,7 +362,7 @@ class ContextLevel(compiler.ContextLevel):
     stmt_metadata: Dict[qlast.Statement, StatementMetadata]
     """Extra statement metadata needed by the compiler, but not in AST."""
 
-    source_map: Dict[s_pointers.PointerLike, ComputableInfo]
+    source_map: Dict[s_pointers.PointerLike, irast.ComputableInfo]
     """A mapping of computable pointers to QL source AST and context."""
 
     view_nodes: Dict[s_name.Name, s_types.Type]
@@ -485,6 +475,9 @@ class ContextLevel(compiler.ContextLevel):
     defining_view: Optional[s_types.Type]
     """Whether a view is currently being defined (as opposed to be compiled)"""
 
+    recompiling_schema_alias: bool
+    """Whether we are currently recompiling a schema-level expression alias."""
+
     compiling_update_shape: bool
     """Whether an UPDATE shape is currently being compiled."""
 
@@ -562,6 +555,7 @@ class ContextLevel(compiler.ContextLevel):
             self.in_temp_scope = False
             self.disable_shadowing = set()
             self.path_log = None
+            self.recompiling_schema_alias = False
 
         else:
             self.env = prevlevel.env
@@ -609,6 +603,7 @@ class ContextLevel(compiler.ContextLevel):
             self.in_temp_scope = prevlevel.in_temp_scope
             self.disable_shadowing = prevlevel.disable_shadowing
             self.path_log = prevlevel.path_log
+            self.recompiling_schema_alias = prevlevel.recompiling_schema_alias
 
             if mode == ContextSwitchMode.SUBQUERY:
                 self.anchors = prevlevel.anchors.copy()
@@ -674,6 +669,7 @@ class ContextLevel(compiler.ContextLevel):
                 # scope tree parent pointers are weak pointers.
                 self._stash, self.path_scope = self.path_scope.copy_all()
                 self.in_temp_scope = True
+                self.view_sets = self.view_sets.copy()
 
             if mode in {ContextSwitchMode.NEWFENCE,
                         ContextSwitchMode.NEWFENCE_TEMP}:
