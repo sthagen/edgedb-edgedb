@@ -2285,6 +2285,22 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
 
         self._assert_migration_consistency(schema, multi_module=True)
 
+    def test_schema_get_migration_default_ptrs_01(self):
+        schema = r'''
+        type Foo {
+            property name {
+                using (1);
+                annotation title := "foo";
+            };
+            link everything {
+                using (Object);
+                annotation title := "bar";
+            };
+        }
+        '''
+
+        self._assert_migration_consistency(schema)
+
     def test_schema_migrations_equivalence_01(self):
         self._assert_migration_equivalence([r"""
             type Base;
@@ -5121,6 +5137,57 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                     property x -> str;
                 }
             }
+        """])
+
+    def test_schema_migrations_computed_optionality_01(self):
+        self._assert_migration_equivalence([r"""
+            abstract type Removable {
+                optional single property removed := EXISTS(
+                    .<element[IS Tombstone]
+                );
+            };
+            type Topic extending Removable {
+                multi link defs := .<topic[IS Definition];
+            };
+            alias VisibleTopic := (
+                SELECT Topic {
+                    defs := (
+                        SELECT .<topic[IS Definition] FILTER NOT .removed
+                    ),
+                }
+                FILTER NOT .removed
+            );
+            type Definition extending Removable {
+                required link topic -> Topic;
+            };
+            type Tombstone {
+                required link element -> Removable {
+                    constraint exclusive;
+                }
+            };
+        """, r"""
+            abstract type Removable {
+                property removed := EXISTS(.<element[IS Tombstone]);
+            };
+            type Topic extending Removable {
+                multi link defs := .<topic[IS Definition];
+            };
+            alias VisibleTopic := (
+                SELECT Topic {
+                    defs := (
+                        SELECT .<topic[IS Definition] FILTER NOT .removed
+                    ),
+                }
+                FILTER NOT .removed
+            );
+            type Definition extending Removable {
+                required link topic -> Topic;
+            };
+            type Tombstone {
+                required link element -> Removable {
+                    constraint exclusive;
+                }
+            };
         """])
 
 
