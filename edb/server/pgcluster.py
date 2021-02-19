@@ -152,6 +152,9 @@ class BaseCluster:
                 f'SET ROLE {self._default_session_auth};'
             )
 
+        await conn.execute(
+            "SET IntervalStyle = 'sql_standard';"
+        )
         return conn
 
     def get_runtime_params(self) -> BackendRuntimeParams:
@@ -164,10 +167,6 @@ class BaseCluster:
         )
 
     def get_connection_addr(self):
-        status = self.get_status()
-        if status != 'running':
-            raise ClusterError('cluster is not running')
-
         return self._get_connection_addr()
 
     def set_default_session_authorization(self, rolename: str) -> None:

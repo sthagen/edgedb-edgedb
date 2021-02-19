@@ -169,7 +169,7 @@ def get_test_items(**flags):
 
 class TestExpressionsWithoutConstantFolding(tb.QueryTestCase):
 
-    SETUP = """
+    SETUP_METHOD = """
         CONFIGURE SESSION SET __internal_no_const_folding := true;
     """
 
@@ -2823,6 +2823,16 @@ class TestExpressions(tb.QueryTestCase):
 
             await self.con.query_json("""
                 SELECT [];
+            """)
+
+    async def test_edgeql_expr_array_05(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r"index indirection cannot be applied to "
+                r"scalar type 'std::int64'"):
+
+            await self.con.query_json("""
+                SELECT [0, 1, 2][[1][0] [2][0]];
             """)
 
     async def test_edgeql_expr_array_concat_01(self):

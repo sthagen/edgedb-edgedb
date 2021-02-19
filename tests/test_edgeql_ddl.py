@@ -18,6 +18,7 @@
 
 import decimal
 import re
+import textwrap
 import uuid
 
 import edgedb
@@ -6087,6 +6088,172 @@ type test::Foo {
                 DROP MODULE test_other;
             """)
 
+    async def test_edgeql_ddl_extension_package_01(self):
+        await self.con.execute(r"""
+            CREATE EXTENSION PACKAGE foo_01 VERSION '1.0' {
+                CREATE MODULE foo_ext;;
+            };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT sys::ExtensionPackage {
+                    name,
+                    script,
+                    ver := (.version.major, .version.minor),
+                }
+                FILTER .name LIKE 'foo_%'
+                ORDER BY .name
+            """,
+            [{
+                'name': 'foo_01',
+                'script': (
+                    "CREATE MODULE foo_ext;;"
+                ),
+                'ver': [1, 0],
+            }]
+        )
+
+        await self.con.execute(r"""
+            CREATE EXTENSION PACKAGE foo_01 VERSION '2.0-beta.1' {
+                SELECT 1/0;
+            };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT sys::ExtensionPackage {
+                    name,
+                    script,
+                    ver := (.version.major, .version.minor, .version.stage),
+                }
+                FILTER .name LIKE 'foo_%'
+                ORDER BY .name THEN .version
+            """,
+            [{
+                'name': 'foo_01',
+                'script': (
+                    "CREATE MODULE foo_ext;;"
+                ),
+                'ver': [1, 0, 'final'],
+            }, {
+                'name': 'foo_01',
+                'script': (
+                    "SELECT 1/0;"
+                ),
+                'ver': [2, 0, 'beta'],
+            }]
+        )
+
+        await self.con.execute(r"""
+            DROP EXTENSION PACKAGE foo_01 VERSION '1.0';
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT sys::ExtensionPackage {
+                    name,
+                    script,
+                }
+                FILTER .name LIKE 'foo_%'
+                ORDER BY .name
+            """,
+            [{
+                'name': 'foo_01',
+                'script': (
+                    "SELECT 1/0;"
+                ),
+            }]
+        )
+
+    async def test_edgeql_ddl_extension_01(self):
+        await self.con.execute(r"""
+            CREATE EXTENSION PACKAGE MyExtension VERSION '1.0';
+            CREATE EXTENSION PACKAGE MyExtension VERSION '2.0';
+        """)
+
+        await self.con.execute(r"""
+            CREATE EXTENSION MyExtension;
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT schema::Extension {
+                    name,
+                    package: {
+                        ver := (.version.major, .version.minor)
+                    }
+                }
+                FILTER .name = 'MyExtension'
+            """,
+            [{
+                'name': 'MyExtension',
+                'package': {
+                    'ver': [2, 0],
+                }
+            }]
+        )
+
+        await self.con.execute(r"""
+            DROP EXTENSION MyExtension;
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT schema::Extension {
+                    name,
+                    package: {
+                        ver := (.version.major, .version.minor)
+                    }
+                }
+                FILTER .name = 'MyExtension'
+            """,
+            [],
+        )
+
+        await self.con.execute(r"""
+            CREATE EXTENSION MyExtension VERSION '1.0';
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT schema::Extension {
+                    name,
+                    package: {
+                        ver := (.version.major, .version.minor)
+                    }
+                }
+                FILTER .name = 'MyExtension'
+            """,
+            [{
+                'name': 'MyExtension',
+                'package': {
+                    'ver': [1, 0],
+                }
+            }]
+        )
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaError,
+            "extension 'MyExtension' is already present in the schema",
+        ):
+            await self.con.execute(r"""
+                CREATE EXTENSION MyExtension VERSION '2.0';
+            """)
+
+        await self.con.execute(r"""
+            DROP EXTENSION MyExtension;
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaError,
+            "cannot create extension 'MyExtension': extension"
+            " package 'MyExtension' version '3.0' does not exist",
+        ):
+            await self.con.execute(r"""
+                CREATE EXTENSION MyExtension VERSION '3.0';
+            """)
+
     async def test_edgeql_ddl_role_01(self):
         await self.con.execute(r"""
             CREATE ROLE foo_01;
@@ -7847,7 +8014,7 @@ type test::Foo {
             };
         """)
 
-        await self.con.execute('DECLARE SAVEPOINT t0;')
+        await self.con.query('DECLARE SAVEPOINT t0')
 
         with self.assertRaisesRegex(
                 edgedb.InvalidPropertyTargetError,
@@ -7860,7 +8027,7 @@ type test::Foo {
             """)
 
         # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+        await self.con.query('ROLLBACK TO SAVEPOINT t0;')
 
     async def test_edgeql_ddl_enum_01(self):
         await self.con.execute('''
@@ -7885,7 +8052,7 @@ type test::Foo {
             }
         ''')
 
-        await self.con.execute('DECLARE SAVEPOINT t0;')
+        await self.con.query('DECLARE SAVEPOINT t0')
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -7896,14 +8063,14 @@ type test::Foo {
                     std::int32;
             ''')
 
-        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+        await self.con.query('ROLLBACK TO SAVEPOINT t0;')
 
         await self.con.execute('''
             CREATE SCALAR TYPE test::my_enum_2
                 EXTENDING enum<'foo', 'bar'>;
         ''')
 
-        await self.con.execute('DECLARE SAVEPOINT t1;')
+        await self.con.query('DECLARE SAVEPOINT t1')
 
         with self.assertRaisesRegex(
                 edgedb.UnsupportedFeatureError,
@@ -7916,7 +8083,7 @@ type test::Foo {
             ''')
 
         # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t1;')
+        await self.con.query('ROLLBACK TO SAVEPOINT t1;')
 
         await self.con.execute('''
             ALTER SCALAR TYPE test::my_enum_2
@@ -7972,7 +8139,7 @@ type test::Foo {
                 EXTENDING enum<Red, Green, Blue>;
         ''')
 
-        await self.con.execute('DECLARE SAVEPOINT t0;')
+        await self.con.query('DECLARE SAVEPOINT t0')
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -7983,7 +8150,7 @@ type test::Foo {
             ''')
 
         # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+        await self.con.query('ROLLBACK TO SAVEPOINT t0;')
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -7993,7 +8160,7 @@ type test::Foo {
             ''')
 
         # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+        await self.con.query('ROLLBACK TO SAVEPOINT t0;')
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -8005,7 +8172,7 @@ type test::Foo {
             ''')
 
         # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+        await self.con.query('ROLLBACK TO SAVEPOINT t0;')
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -8016,7 +8183,7 @@ type test::Foo {
             ''')
 
         # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+        await self.con.query('ROLLBACK TO SAVEPOINT t0;')
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -8027,7 +8194,7 @@ type test::Foo {
             ''')
 
         # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+        await self.con.query('ROLLBACK TO SAVEPOINT t0;')
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -8038,7 +8205,7 @@ type test::Foo {
             ''')
 
         # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+        await self.con.query('ROLLBACK TO SAVEPOINT t0;')
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -8049,7 +8216,7 @@ type test::Foo {
             ''')
 
         # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+        await self.con.query('ROLLBACK TO SAVEPOINT t0;')
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -8060,16 +8227,15 @@ type test::Foo {
             ''')
 
         # Recover.
-        await self.con.execute('ROLLBACK TO SAVEPOINT t0;')
+        await self.con.query('ROLLBACK TO SAVEPOINT t0;')
 
         await self.con.execute(r'''
             ALTER SCALAR TYPE test::Color
                 EXTENDING enum<Red, Green, Blue, Magic>;
-
-            # Commit the changes and start a new transaction for more testing.
-            COMMIT;
-            START TRANSACTION;
         ''')
+        # Commit the changes and start a new transaction for more testing.
+        await self.con.query("COMMIT")
+        await self.con.query("START TRANSACTION")
         await self.assert_query_result(
             r"""
                 SELECT <test::Color>'Magic' >
@@ -9701,6 +9867,8 @@ type test::Foo {
     async def test_edgeql_ddl_collection_cleanup_03(self):
         count_query = "SELECT count(schema::CollectionType);"
         orig_count = await self.con.query_one(count_query)
+        elem_count_query = "SELECT count(schema::TupleElement);"
+        orig_elem_count = await self.con.query_one(elem_count_query)
 
         await self.con.execute(r"""
             SET MODULE test;
@@ -9722,6 +9890,8 @@ type test::Foo {
         """)
 
         self.assertEqual(await self.con.query_one(count_query), orig_count)
+        self.assertEqual(
+            await self.con.query_one(elem_count_query), orig_elem_count)
 
     async def test_edgeql_ddl_collection_cleanup_04(self):
         count_query = "SELECT count(schema::CollectionType);"
@@ -10068,3 +10238,398 @@ type test::Foo {
             """,
             [{"required": True, "has_required": False}]
         )
+
+    async def test_edgeql_ddl_captured_as_migration_01(self):
+
+        await self.con.execute(r"""
+            CREATE TYPE test::Foo {
+                CREATE PROPERTY foo := 1;
+            };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                WITH
+                    MODULE schema,
+                    LM := (
+                        SELECT Migration
+                        FILTER NOT EXISTS(.<parents[IS Migration])
+                    )
+                    SELECT LM {
+                        script
+                    }
+            """,
+            [{
+                'script': textwrap.dedent(
+                    '''\
+                    CREATE TYPE test::Foo {
+                        CREATE PROPERTY foo := (1);
+                    };'''
+                )
+            }]
+        )
+
+    async def test_edgeql_ddl_link_policy_01(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt;
+            CREATE TYPE Foo { CREATE MULTI LINK tgt -> Tgt; };
+            CREATE TYPE Bar EXTENDING Foo;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Bar { tgt := (INSERT Tgt) };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'prohibited by link target policy',
+        ):
+            await self.con.execute("""
+                DELETE Tgt;
+            """)
+
+    async def test_edgeql_ddl_link_policy_02(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt;
+            CREATE TYPE Base { CREATE MULTI LINK tgt -> Tgt; };
+            CREATE TYPE Foo;
+            ALTER TYPE Foo EXTENDING Base;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { tgt := (INSERT Tgt) };
+        """)
+
+        await self.con.execute(r"""
+            DELETE Foo;
+        """)
+
+        await self.con.execute(r"""
+            DELETE Tgt;
+        """)
+
+    async def test_edgeql_ddl_link_policy_03(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt;
+            CREATE TYPE Base;
+            CREATE TYPE Foo EXTENDING Base { CREATE MULTI LINK tgt -> Tgt; };
+            ALTER TYPE Base CREATE MULTI LINK foo -> Tgt;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { tgt := (INSERT Tgt) };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'prohibited by link target policy',
+        ):
+            await self.con.execute("""
+                WITH D := Foo,
+                SELECT {(DELETE D.tgt), (DELETE D)};
+            """)
+
+        await self.con.execute(r"""
+            WITH D := Foo,
+            SELECT {(DELETE D), (DELETE D.tgt)};
+        """)
+
+    async def test_edgeql_ddl_link_policy_04(self):
+        # Make sure that a newly created subtype gets the appropriate
+        # target link policies
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt;
+            CREATE TYPE Foo { CREATE MULTI LINK tgt -> Tgt; };
+            CREATE TYPE Tgt2 EXTENDING Tgt;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { tgt := (INSERT Tgt2) };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'prohibited by link target policy',
+        ):
+            await self.con.execute("""
+                DELETE Tgt2;
+            """)
+
+    async def test_edgeql_ddl_link_policy_05(self):
+        # Make sure that a subtype with newly added bases gets the appropriate
+        # target link policies
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt;
+            CREATE TYPE Foo { CREATE MULTI LINK tgt -> Tgt; };
+            CREATE TYPE Tgt2;
+            ALTER TYPE Tgt2 EXTENDING Tgt;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { tgt := (INSERT Tgt2) };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'prohibited by link target policy',
+        ):
+            await self.con.execute("""
+                DELETE Tgt2;
+            """)
+
+        await self.con.execute(r"""
+            DELETE Foo;
+            ALTER TYPE Tgt2 DROP EXTENDING Tgt;
+            DROP TYPE Foo;
+        """)
+
+        # Make sure that if we drop the base type, everything works right still
+        await self.con.execute("""
+            DELETE Tgt2;
+        """)
+
+    async def test_edgeql_ddl_link_policy_06(self):
+        # Make sure that links coming into base types don't
+        # interfere with link policies
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt;
+            CREATE TYPE Tgt2 EXTENDING Tgt;
+            CREATE TYPE Foo { CREATE MULTI LINK tgt -> Tgt2; };
+            CREATE TYPE Bar { CREATE MULTI LINK tgt -> Tgt; };
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { tgt := (INSERT Tgt2) };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'prohibited by link target policy',
+        ):
+            await self.con.execute("""
+                DELETE Tgt2;
+            """)
+
+    async def test_edgeql_ddl_link_policy_07(self):
+        # Make sure that swapping between deferred and not works
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt;
+            CREATE TYPE Foo {
+                CREATE MULTI LINK tgt -> Tgt;
+            };
+        """)
+
+        await self.con.execute(r"""
+            ALTER TYPE Foo ALTER LINK tgt ON TARGET DELETE DEFERRED RESTRICT;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { tgt := (INSERT Tgt) };
+        """)
+
+        await self.con.execute("""
+            DELETE Tgt;
+            DELETE Foo;
+        """)
+
+    async def test_edgeql_ddl_link_policy_08(self):
+        # Make sure that swapping between deferred and not works
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt;
+            CREATE TYPE Foo {
+                CREATE LINK tgt -> Tgt;
+            };
+            ALTER TYPE Foo ALTER LINK tgt SET MULTI;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { tgt := (INSERT Tgt) };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'prohibited by link target policy',
+        ):
+            await self.con.execute("""
+                DELETE Tgt;
+            """)
+
+        await self.con.execute("""
+            DELETE Foo;
+            DELETE Tgt;
+        """)
+
+    async def test_edgeql_ddl_link_policy_09(self):
+        # Make sure that it still works after we rebase a link
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt;
+            CREATE TYPE Foo {
+                CREATE LINK tgt -> Tgt;
+            };
+            CREATE TYPE Bar EXTENDING Foo {
+                ALTER LINK tgt SET OWNED;
+            };
+            ALTER TYPE Bar DROP EXTENDING Foo;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Bar { tgt := (INSERT Tgt) };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'prohibited by link target policy',
+        ):
+            await self.con.execute("""
+                DELETE Tgt;
+            """)
+
+        await self.con.execute("""
+            DELETE Bar;
+            DELETE Tgt;
+        """)
+
+    async def test_edgeql_ddl_link_policy_10(self):
+        # Make sure we NULL out the pointer on the delete, which will
+        # trigger the constraint
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt;
+            CREATE TYPE Foo {
+                CREATE LINK tgt -> Tgt {
+                    ON TARGET DELETE ALLOW;
+                };
+                CREATE CONSTRAINT expression on (EXISTS .tgt);
+
+            };
+            CREATE TYPE Bar EXTENDING Foo;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Bar { tgt := (INSERT Tgt) };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'invalid Bar',
+        ):
+            await self.con.execute("""
+                DELETE Tgt;
+            """)
+
+        await self.con.execute("""
+            DELETE Bar;
+            DELETE Tgt;
+        """)
+
+    async def test_edgeql_ddl_link_policy_11(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt { CREATE PROPERTY name -> str };
+            CREATE TYPE Foo {
+                CREATE REQUIRED MULTI LINK tgt -> Tgt {
+                    ON TARGET DELETE ALLOW;
+                };
+            };
+            CREATE TYPE Bar EXTENDING Foo;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Bar { tgt := {(INSERT Tgt { name := "foo" }),
+                                 (INSERT Tgt { name := "bar" })} };
+            INSERT Bar { tgt := (INSERT Tgt { name := "foo" }) };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.MissingRequiredError,
+            "missing value for required link 'tgt'",
+        ):
+            await self.con.execute("""
+                DELETE Tgt FILTER .name = "foo";
+            """)
+
+        await self.con.execute("""
+            DELETE Tgt FILTER .name = "bar";
+            DELETE Bar;
+            DELETE Tgt;
+        """)
+
+    @test.xfail('''
+        We can't properly compile the constraint here in the basic case,
+        let alone combined with DELETE ALLOW.
+
+        We probably should be rejecting the constraint.
+    ''')
+    async def test_edgeql_ddl_link_policy_12(self):
+        # Should we even be allowing (EXISTS .tgt) as a constraint?
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Tgt;
+            CREATE TYPE Foo {
+                CREATE MULTI LINK tgt -> Tgt {
+                    ON TARGET DELETE ALLOW;
+                };
+                CREATE CONSTRAINT expression on (EXISTS .tgt);
+
+            };
+            CREATE TYPE Bar EXTENDING Foo;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Bar { tgt := (INSERT Tgt) };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            'invalid Bar',
+        ):
+            await self.con.execute("""
+                DELETE Tgt;
+            """)
+
+        await self.con.execute("""
+            DELETE Bar;
+            DELETE Tgt;
+        """)
+
+
+class TestConsecutiveMigrations(tb.DDLTestCase):
+    TRANSACTION_ISOLATION = False
+
+    async def test_edgeql_ddl_consecutive_create_migration_01(self):
+        # A regression test for https://github.com/edgedb/edgedb/issues/2085.
+        await self.con.execute('''
+        CREATE MIGRATION m1arqp5cg4dqgdqx7tb4vv2lui6wlksysbplyc5kqrdkpcvcv4em6q
+            ONTO m1a2l6lbzimqokzygdzbkyjrhbmjh3iljg7i2m6r2ias2z2de4x4cq
+        {
+            CREATE TYPE default::A;
+        };
+        ''')
+        await self.con.query('''
+        CREATE MIGRATION m1jd2aedby6pksanlucebgb6tfkcs4si2zdcyoisupckq46dteorpq
+            ONTO m1arqp5cg4dqgdqx7tb4vv2lui6wlksysbplyc5kqrdkpcvcv4em6q
+        {
+            CREATE TYPE default::B;
+        };
+        ''')

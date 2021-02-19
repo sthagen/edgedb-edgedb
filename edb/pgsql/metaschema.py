@@ -25,6 +25,8 @@ from typing import *
 import re
 import textwrap
 
+from edb import _edgeql_rust
+
 from edb.common import context as parser_context
 from edb.common import debug
 from edb.common import exceptions
@@ -40,6 +42,7 @@ from edb.schema import name as s_name
 from edb.schema import objects as s_obj
 from edb.schema import objtypes as s_objtypes
 from edb.schema import pointers as s_pointers
+from edb.schema import lproperties as s_props
 from edb.schema import scalars as s_scalars
 from edb.schema import schema as s_schema
 from edb.schema import sources as s_sources
@@ -517,6 +520,51 @@ class RaiseExceptionOnNullFunction(dbops.Function):
     def __init__(self) -> None:
         super().__init__(
             name=('edgedb', 'raise_on_null'),
+            args=[
+                ('val', ('anyelement',)),
+                ('exc', ('text',)),
+                ('msg', ('text',)),
+                ('detail', ('text',), "''"),
+                ('hint', ('text',), "''"),
+                ('column', ('text',), "''"),
+                ('constraint', ('text',), "''"),
+                ('datatype', ('text',), "''"),
+                ('table', ('text',), "''"),
+                ('schema', ('text',), "''"),
+            ],
+            returns=('anyelement',),
+            # Same volatility as raise()
+            volatility='stable',
+            text=self.text,
+        )
+
+
+class RaiseExceptionOnNotNullFunction(dbops.Function):
+    """Return the passed value or raise an exception if it's NOT NULL."""
+    text = '''
+        SELECT
+            CASE
+            WHEN val IS NULL THEN
+                val
+            ELSE
+                edgedb.raise(
+                    val,
+                    exc,
+                    msg => msg,
+                    detail => detail,
+                    hint => hint,
+                    "column" => "column",
+                    "constraint" => "constraint",
+                    "datatype" => "datatype",
+                    "table" => "table",
+                    "schema" => "schema"
+                )
+            END
+    '''
+
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', 'raise_on_not_null'),
             args=[
                 ('val', ('anyelement',)),
                 ('exc', ('text',)),
@@ -2033,18 +2081,6 @@ class DescribeRolesAsDDLFunction(dbops.Function):
             text=text)
 
 
-class SysConfigValueType(dbops.CompositeType):
-    """Type of values returned by _read_sys_config."""
-    def __init__(self) -> None:
-        super().__init__(name=('edgedb', '_sys_config_val_t'))
-
-        self.add_columns([
-            dbops.Column(name='name', type='text'),
-            dbops.Column(name='value', type='jsonb'),
-            dbops.Column(name='source', type='text'),
-        ])
-
-
 class SysConfigSourceType(dbops.Enum):
     def __init__(self) -> None:
         super().__init__(
@@ -2065,6 +2101,31 @@ class SysConfigSourceType(dbops.Enum):
                 'session',
             ]
         )
+
+
+class SysConfigScopeType(dbops.Enum):
+    def __init__(self) -> None:
+        super().__init__(
+            name=('edgedb', '_sys_config_scope_t'),
+            values=[
+                'SYSTEM',
+                'DATABASE',
+                'SESSION',
+            ]
+        )
+
+
+class SysConfigValueType(dbops.CompositeType):
+    """Type of values returned by _read_sys_config."""
+    def __init__(self) -> None:
+        super().__init__(name=('edgedb', '_sys_config_val_t'))
+
+        self.add_columns([
+            dbops.Column(name='name', type='text'),
+            dbops.Column(name='value', type='jsonb'),
+            dbops.Column(name='source', type='edgedb._sys_config_source_t'),
+            dbops.Column(name='scope', type='edgedb._sys_config_scope_t'),
+        ])
 
 
 class SysConfigFullFunction(dbops.Function):
@@ -2111,9 +2172,9 @@ class SysConfigFullFunction(dbops.Function):
             'system override' AS source
         FROM
             jsonb_each(
-                shobj_metadata(
+                edgedb.shobj_metadata(
                     (SELECT oid FROM pg_database
-                    WHERE datname = {ql(defines.EDGEDB_TEMPLATE_DB)}),
+                    WHERE datname = {ql(defines.EDGEDB_SYSTEM_DB)}),
                     'pg_database'
                 ) -> 'sysconfig'
             ) s
@@ -2131,7 +2192,7 @@ class SysConfigFullFunction(dbops.Function):
     config_sess AS (
         SELECT
             s.name AS name,
-            s.value::jsonb AS value,
+            s.value AS value,
             'session' AS source
         FROM
             _edgecon_state s
@@ -2262,12 +2323,20 @@ class SysConfigFullFunction(dbops.Function):
     SELECT
         q.name,
         q.value,
-        q.source
+        q.source,
+        (CASE
+            WHEN q.source < 'database'::edgedb._sys_config_source_t THEN
+                'SYSTEM'
+            WHEN q.source = 'database'::edgedb._sys_config_source_t THEN
+                'DATABASE'
+            ELSE
+                'SESSION'
+        END)::edgedb._sys_config_scope_t AS scope
     FROM
         (SELECT
             u.name,
             u.value,
-            u.source,
+            u.source::edgedb._sys_config_source_t,
             row_number() OVER (
                 PARTITION BY u.name
                 ORDER BY u.source::edgedb._sys_config_source_t DESC
@@ -2361,9 +2430,9 @@ class SysConfigNoFileAccessFunction(dbops.Function):
             'system override' AS source
         FROM
             jsonb_each(
-                shobj_metadata(
+                edgedb.shobj_metadata(
                     (SELECT oid FROM pg_database
-                    WHERE datname = {ql(defines.EDGEDB_TEMPLATE_DB)}),
+                    WHERE datname = {ql(defines.EDGEDB_SYSTEM_DB)}),
                     'pg_database'
                 ) -> 'sysconfig'
             ) s
@@ -2381,7 +2450,7 @@ class SysConfigNoFileAccessFunction(dbops.Function):
     config_sess AS (
         SELECT
             s.name AS name,
-            s.value::jsonb AS value,
+            s.value AS value,
             'session' AS source
         FROM
             _edgecon_state s
@@ -2595,7 +2664,7 @@ class SysVersionFunction(dbops.Function):
     text = f'''
         BEGIN
         RETURN (
-            SELECT value::jsonb
+            SELECT value
             FROM _edgecon_state
             WHERE name = 'server_version' AND type = 'R'
         );
@@ -2713,6 +2782,7 @@ async def bootstrap(conn: asyncpg.Connection) -> None:
         dbops.CreateFunction(GetSharedObjectMetadata()),
         dbops.CreateFunction(RaiseExceptionFunction()),
         dbops.CreateFunction(RaiseExceptionOnNullFunction()),
+        dbops.CreateFunction(RaiseExceptionOnNotNullFunction()),
         dbops.CreateFunction(RaiseExceptionOnEmptyStringFunction()),
         dbops.CreateFunction(AssertJSONTypeFunction()),
         dbops.CreateFunction(ExtractJSONScalarFunction()),
@@ -2757,6 +2827,7 @@ async def bootstrap(conn: asyncpg.Connection) -> None:
         dbops.CreateFunction(StrToBool()),
         dbops.CreateFunction(BytesIndexWithBoundsFunction()),
         dbops.CreateEnum(SysConfigSourceType()),
+        dbops.CreateEnum(SysConfigScopeType()),
         dbops.CreateCompositeType(SysConfigValueType()),
         dbops.CreateFunction(GetBackendCapabilitiesFunction()),
         dbops.CreateFunction(SysConfigFullFunction()),
@@ -2910,6 +2981,119 @@ def _generate_database_views(schema: s_schema.Schema) -> List[dbops.View]:
 
     objects = {
         Database: view_query,
+        annos: annos_link_query,
+        int_annos: int_annos_link_query,
+    }
+
+    views = []
+    for obj, query in objects.items():
+        tabview = dbops.View(name=tabname(schema, obj), query=query)
+        inhview = dbops.View(name=inhviewname(schema, obj), query=query)
+        views.append(tabview)
+        views.append(inhview)
+
+    return views
+
+
+def _generate_extension_views(schema: s_schema.Schema) -> List[dbops.View]:
+    ExtPkg = schema.get('sys::ExtensionPackage', type=s_objtypes.ObjectType)
+    annos = ExtPkg.getptr(
+        schema, s_name.UnqualName('annotations'), type=s_links.Link)
+    int_annos = ExtPkg.getptr(
+        schema, s_name.UnqualName('annotations__internal'), type=s_links.Link)
+    ver = ExtPkg.getptr(
+        schema, s_name.UnqualName('version'), type=s_props.Property)
+    ver_t = common.get_backend_name(
+        schema,
+        ver.get_target(schema),
+        catenate=False,
+    )
+
+    view_query = f'''
+        SELECT
+            (e.value->>'id')::uuid
+                AS {qi(ptr_col_name(schema, ExtPkg, 'id'))},
+            (SELECT id FROM edgedb."_SchemaObjectType"
+                 WHERE name = 'sys::ExtensionPackage')
+                AS {qi(ptr_col_name(schema, ExtPkg, '__type__'))},
+            (e.value->>'name')
+                AS {qi(ptr_col_name(schema, ExtPkg, 'name'))},
+            (e.value->>'name__internal')
+                AS {qi(ptr_col_name(schema, ExtPkg, 'name__internal'))},
+            (
+                (e.value->'version'->>'major')::int,
+                (e.value->'version'->>'minor')::int,
+                (e.value->'version'->>'stage')::text,
+                (e.value->'version'->>'stage_no')::int,
+                COALESCE(
+                    (SELECT array_agg(q.v::text)
+                    FROM jsonb_array_elements(
+                        e.value->'version'->'local'
+                    ) AS q(v)),
+                    ARRAY[]::text[]
+                )
+            )::{qt(ver_t)}
+                AS {qi(ptr_col_name(schema, ExtPkg, 'version'))},
+            (e.value->>'script')
+                AS {qi(ptr_col_name(schema, ExtPkg, 'script'))},
+            ARRAY[]::text[]
+                AS {qi(ptr_col_name(schema, ExtPkg, 'computed_fields'))},
+            (e.value->>'builtin')::bool
+                AS {qi(ptr_col_name(schema, ExtPkg, 'builtin'))},
+            (e.value->>'internal')::bool
+                AS {qi(ptr_col_name(schema, ExtPkg, 'internal'))}
+        FROM
+            jsonb_each(edgedb.shobj_metadata(
+                (SELECT oid FROM pg_database
+                WHERE datname = {ql(defines.EDGEDB_TEMPLATE_DB)}),
+                'pg_database'
+            ) -> 'ExtensionPackage') AS e
+    '''
+
+    annos_link_query = f'''
+        SELECT
+            (e.value->>'id')::uuid
+                AS {qi(ptr_col_name(schema, annos, 'source'))},
+            (annotations->>'id')::uuid
+                AS {qi(ptr_col_name(schema, annos, 'target'))},
+            (annotations->>'value')::text
+                AS {qi(ptr_col_name(schema, annos, 'value'))},
+            (annotations->>'is_owned')::bool
+                AS {qi(ptr_col_name(schema, annos, 'owned'))}
+        FROM
+            jsonb_each(edgedb.shobj_metadata(
+                (SELECT oid FROM pg_database
+                WHERE datname = {ql(defines.EDGEDB_TEMPLATE_DB)}),
+                'pg_database'
+            ) -> 'ExtensionPackage') AS e
+            CROSS JOIN LATERAL
+                ROWS FROM (
+                    jsonb_array_elements(e.value->'annotations')
+                ) AS annotations
+    '''
+
+    int_annos_link_query = f'''
+        SELECT
+            (e.value->>'id')::uuid
+                AS {qi(ptr_col_name(schema, int_annos, 'source'))},
+            (annotations->>'id')::uuid
+                AS {qi(ptr_col_name(schema, int_annos, 'target'))},
+            (annotations->>'is_owned')::bool
+                AS {qi(ptr_col_name(schema, int_annos, 'owned'))}
+        FROM
+            jsonb_each(edgedb.shobj_metadata(
+                (SELECT oid FROM pg_database
+                WHERE datname = {ql(defines.EDGEDB_TEMPLATE_DB)}),
+                'pg_database'
+            ) -> 'ExtensionPackage') AS e
+            CROSS JOIN LATERAL
+                ROWS FROM (
+                    jsonb_array_elements(e.value->'annotations__internal')
+                ) AS annotations
+    '''
+
+    objects = {
+        ExtPkg: view_query,
         annos: annos_link_query,
         int_annos: int_annos_link_query,
     }
@@ -3124,6 +3308,55 @@ def _generate_role_views(schema: s_schema.Schema) -> List[dbops.View]:
     return views
 
 
+def _generate_schema_ver_views(schema: s_schema.Schema) -> List[dbops.View]:
+    Ver = schema.get(
+        'sys::GlobalSchemaVersion',
+        type=s_objtypes.ObjectType,
+    )
+
+    view_query = f'''
+        SELECT
+            (v.value->>'id')::uuid
+                AS {qi(ptr_col_name(schema, Ver, 'id'))},
+            (SELECT id FROM edgedb."_SchemaObjectType"
+                 WHERE name = 'sys::GlobalSchemaVersion')
+                AS {qi(ptr_col_name(schema, Ver, '__type__'))},
+            (v.value->>'name')
+                AS {qi(ptr_col_name(schema, Ver, 'name'))},
+            (v.value->>'name')
+                AS {qi(ptr_col_name(schema, Ver, 'name__internal'))},
+            (v.value->>'version')::uuid
+                AS {qi(ptr_col_name(schema, Ver, 'version'))},
+            (v.value->>'builtin')::bool
+                AS {qi(ptr_col_name(schema, Ver, 'builtin'))},
+            (v.value->>'internal')::bool
+                AS {qi(ptr_col_name(schema, Ver, 'internal'))},
+            ARRAY[]::text[]
+                AS {qi(ptr_col_name(schema, Ver, 'computed_fields'))}
+        FROM
+            jsonb_each(
+                edgedb.shobj_metadata(
+                    (SELECT oid FROM pg_database
+                    WHERE datname = {ql(defines.EDGEDB_TEMPLATE_DB)}),
+                    'pg_database'
+                ) -> 'GlobalSchemaVersion'
+            ) AS v
+    '''
+
+    objects = {
+        Ver: view_query
+    }
+
+    views = []
+    for obj, query in objects.items():
+        tabview = dbops.View(name=tabname(schema, obj), query=query)
+        inhview = dbops.View(name=inhviewname(schema, obj), query=query)
+        views.append(tabview)
+        views.append(inhview)
+
+    return views
+
+
 def _make_json_caster(
     schema: s_schema.Schema,
     json_casts: Mapping[s_types.Type, s_casts.Cast],
@@ -3158,15 +3391,15 @@ def _make_json_caster(
     return _cast
 
 
-async def generate_support_views(
-    conn: asyncpg.Connection,
+def _generate_schema_aliases(
     schema: s_schema.Schema,
-) -> None:
-    commands = dbops.CommandGroup()
+    module: s_name.UnqualName,
+) -> List[dbops.View]:
+    views = []
 
     schema_objs = schema.get_objects(
         type=s_objtypes.ObjectType,
-        included_modules=(s_name.UnqualName('schema'),),
+        included_modules=(module,),
     )
 
     for schema_obj in schema_objs:
@@ -3177,9 +3410,14 @@ async def generate_support_views(
             catenate=False,
         )
 
+        if module.name == 'sys' and not schema_obj.get_abstract(schema):
+            bn = ('edgedbss', bn[1])
+
         targets = []
 
         for ptr in schema_obj.get_pointers(schema).objects(schema):
+            if ptr.is_pure_computable(schema):
+                continue
             psi = types.get_pointer_storage_info(ptr, schema=schema)
             if psi.table_type == 'ObjectType':
                 ptr_name = ptr.get_shortname(schema).name
@@ -3188,10 +3426,25 @@ async def generate_support_views(
                     targets.append(f'{qi(col_name)} AS {qi(ptr_name)}')
                 targets.append(f'{qi(col_name)} AS {qi(col_name)}')
 
+        prefix = module.name.capitalize()
         alias_view = dbops.View(
-            name=('edgedb', f'_Schema{schema_obj.get_name(schema).name}'),
+            name=('edgedb', f'_{prefix}{schema_obj.get_name(schema).name}'),
             query=(f'SELECT {", ".join(targets)} FROM {q(*bn)}')
         )
+        views.append(alias_view)
+
+    return views
+
+
+async def generate_support_views(
+    conn: asyncpg.Connection,
+    schema: s_schema.Schema,
+) -> None:
+    commands = dbops.CommandGroup()
+
+    schema_alias_views = _generate_schema_aliases(
+        schema, s_name.UnqualName('schema'))
+    for alias_view in schema_alias_views:
         commands.add_command(dbops.CreateView(alias_view, or_replace=True))
 
     InhObject = schema.get(
@@ -3240,8 +3493,19 @@ async def generate_support_views(
     for dbview in _generate_database_views(schema):
         commands.add_command(dbops.CreateView(dbview, or_replace=True))
 
+    for extview in _generate_extension_views(schema):
+        commands.add_command(dbops.CreateView(extview, or_replace=True))
+
     for roleview in _generate_role_views(schema):
         commands.add_command(dbops.CreateView(roleview, or_replace=True))
+
+    for verview in _generate_schema_ver_views(schema):
+        commands.add_command(dbops.CreateView(verview, or_replace=True))
+
+    sys_alias_views = _generate_schema_aliases(
+        schema, s_name.UnqualName('sys'))
+    for alias_view in sys_alias_views:
+        commands.add_command(dbops.CreateView(alias_view, or_replace=True))
 
     block = dbops.PLTopBlock()
     commands.generate(block)
@@ -4084,24 +4348,18 @@ async def _execute_sql_script(
         point = None
 
         if position is not None:
-            position = int(position)
-            point = parser_context.SourcePoint(
-                None, None, position)
+            point = int(position)
             text = getattr(e, 'query', None)
             if text is None:
                 # Parse errors
                 text = sql_text
 
         elif internal_position is not None:
-            internal_position = int(internal_position)
-            point = parser_context.SourcePoint(
-                None, None, internal_position)
+            point = int(internal_position)
             text = getattr(e, 'internal_query', None)
 
         elif pl_func_line:
-            point = parser_context.SourcePoint(
-                pl_func_line, None, None
-            )
+            point = _edgeql_rust.offset_of_line(sql_text, pl_func_line)
             text = sql_text
 
         if point is not None:

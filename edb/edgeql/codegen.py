@@ -221,9 +221,9 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 self.write(' ON ')
                 self.visit(on_expr)
 
-            if else_expr:
-                self.write(' ELSE ')
-                self.visit(else_expr)
+                if else_expr:
+                    self.write(' ELSE ')
+                    self.visit(else_expr)
 
         if parenthesise:
             self.write(')')
@@ -779,8 +779,8 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
 
     def _ddl_clean_up_commands(
         self,
-        commands: Sequence[qlast.DDLOperation],
-    ) -> Sequence[qlast.DDLOperation]:
+        commands: Sequence[qlast.Base],
+    ) -> Sequence[qlast.Base]:
         # Always omit orig_expr fields from output since we are
         # using the original expression in TEXT output
         # already.
@@ -794,7 +794,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
 
     def _ddl_visit_body(
         self,
-        commands: Sequence[qlast.DDLOperation],
+        commands: Sequence[qlast.Base],
         group_by_system_comment: bool = False,
         *,
         allow_short: bool = False
@@ -993,6 +993,56 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
     def visit_DropRole(self, node: qlast.DropRole) -> None:
         self._visit_DropObject(node, 'ROLE')
 
+    def visit_CreateExtensionPackage(
+        self,
+        node: qlast.CreateExtensionPackage,
+    ) -> None:
+        self.write('CREATE EXTENSION PACKAGE')
+        self.write(' ')
+        self.write(ident_to_str(node.name.name))
+        self.write(' VERSION ')
+        self.visit(node.version)
+        if node.body.text:
+            self.write(' {')
+            self._block_ws(1)
+            self.write(self.indent_text(node.body.text))
+            self._block_ws(-1)
+            self.write('}')
+        elif node.body.commands:
+            self._ddl_visit_body(node.body.commands)
+
+    def visit_DropExtensionPackage(
+        self,
+        node: qlast.DropExtensionPackage,
+    ) -> None:
+        def after_name() -> None:
+            self.write(' VERSION ')
+            self.visit(node.version)
+        self._visit_DropObject(
+            node, 'EXTENSION PACKAGE', after_name=after_name)
+
+    def visit_CreateExtension(
+        self,
+        node: qlast.CreateExtensionPackage,
+    ) -> None:
+        if self.sdlmode or self.descmode:
+            self.write('using extension')
+        else:
+            self.write('CREATE EXTENSION')
+        self.write(' ')
+        self.write(ident_to_str(node.name.name))
+        if node.version is not None:
+            self.write(' VERSION ')
+            self.visit(node.version)
+        if node.commands:
+            self._ddl_visit_body(node.commands)
+
+    def visit_DropExtension(
+        self,
+        node: qlast.DropExtension,
+    ) -> None:
+        self._visit_DropObject(node, 'EXTENSION')
+
     def visit_CreateMigration(self, node: qlast.CreateMigration) -> None:
         self.write('CREATE')
         if node.metadata_only:
@@ -1006,10 +1056,10 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 self.write(ident_to_str(node.parent.name))
             else:
                 self.write('initial')
-        if node.script is not None:
+        if node.body.text:
             self.write(' {')
             self._block_ws(1)
-            self.write(self.indent_text(node.script))
+            self.write(self.indent_text(node.body.text))
             self._block_ws(-1)
             self.write('}')
         elif node.body.commands:
@@ -1327,6 +1377,12 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
 
     def visit_DropScalarType(self, node: qlast.DropScalarType) -> None:
         self._visit_DropObject(node, 'SCALAR TYPE')
+
+    def visit_CreatePseudoType(self, node: qlast.CreatePseudoType) -> None:
+        keywords = []
+        keywords.append('PSEUDO')
+        keywords.append('TYPE')
+        self._visit_CreateObject(node, *keywords)
 
     def visit_CreateProperty(self, node: qlast.CreateProperty) -> None:
         after_name = lambda: self._ddl_visit_bases(node)
@@ -1695,6 +1751,30 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         self._visit_CreateObject(node, *op_type, after_name=after_name,
                                  render_commands=False)
 
+    def visit_AlterOperator(self, node: qlast.AlterOperator) -> None:
+        def after_name() -> None:
+            self.write('(')
+            self.visit_list(node.params, newlines=False)
+            self.write(')')
+
+        op_type = []
+        if node.kind:
+            op_type.append(node.kind.upper())
+        op_type.append('OPERATOR')
+        self._visit_AlterObject(node, *op_type, after_name=after_name)
+
+    def visit_DropOperator(self, node: qlast.DropOperator) -> None:
+        def after_name() -> None:
+            self.write('(')
+            self.visit_list(node.params, newlines=False)
+            self.write(')')
+
+        op_type = []
+        if node.kind:
+            op_type.append(node.kind.upper())
+        op_type.append('OPERATOR')
+        self._visit_DropObject(node, *op_type, after_name=after_name)
+
     def visit_CreateFunction(self, node: qlast.CreateFunction) -> None:
         def after_name() -> None:
             self.write('(')
@@ -1831,6 +1911,32 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         self._visit_CreateObject(
             node, 'CAST', 'FROM',
             named=False, after_name=after_name, render_commands=False
+        )
+
+    def visit_AlterCast(self, node: qlast.AlterCast) -> None:
+        def after_name() -> None:
+            self.write('FROM ')
+            self.visit(node.from_type)
+            self.write(' TO ')
+            self.visit(node.to_type)
+        self._visit_AlterObject(
+            node,
+            'CAST',
+            named=False,
+            after_name=after_name,
+        )
+
+    def visit_DropCast(self, node: qlast.DropCast) -> None:
+        def after_name() -> None:
+            self.write('FROM ')
+            self.visit(node.from_type)
+            self.write(' TO ')
+            self.visit(node.to_type)
+        self._visit_DropObject(
+            node,
+            'CAST',
+            named=False,
+            after_name=after_name,
         )
 
     def visit_ConfigSet(self, node: qlast.ConfigSet) -> None:

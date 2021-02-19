@@ -37,7 +37,6 @@ from edb.schema import ddl as s_ddl
 from edb.schema import functions as s_func
 from edb.schema import links as s_links
 from edb.schema import lproperties as s_lprops
-from edb.schema import modules as s_mod
 from edb.schema import name as s_name
 from edb.schema import objects as s_obj
 from edb.schema import objtypes as s_objtypes
@@ -354,30 +353,9 @@ def compile_insert_unless_conflict_select(
     return select_ir
 
 
-def compile_insert_unless_conflict_else(
-    stmt: irast.InsertStmt,
-    else_branch: Optional[qlast.Expr],
-    *, ctx: context.ContextLevel,
-) -> Optional[irast.Set]:
-    # Compile an UNLESS CONFLICT ELSE branch
-    if else_branch:
-        # The ELSE needs to be able to reference the subject in an
-        # UPDATE, even though that would normally be prohibited.
-        ctx.path_scope.factoring_allowlist.add(stmt.subject.path_id)
-
-        # Compile else
-        else_ir = dispatch.compile(
-            astutils.ensure_qlstmt(else_branch), ctx=ctx)
-        assert isinstance(else_ir, irast.Set)
-        return else_ir
-    else:
-        return None
-
-
 def compile_insert_unless_conflict(
     stmt: irast.InsertStmt,
     insert_subject: qlast.Path,
-    else_branch: Optional[qlast.Expr],
     *, ctx: context.ContextLevel,
 ) -> irast.OnConflictClause:
     """Compile an UNLESS CONFLICT clause with no ON
@@ -413,10 +391,8 @@ def compile_insert_unless_conflict(
         obj_constrs=obj_constrs,
         parser_context=stmt.context, ctx=ctx)
 
-    else_ir = compile_insert_unless_conflict_else(stmt, else_branch, ctx=ctx)
-
     return irast.OnConflictClause(
-        constraint=None, select_ir=select_ir, else_ir=else_ir)
+        constraint=None, select_ir=select_ir, else_ir=None)
 
 
 def compile_insert_unless_conflict_on(
@@ -480,20 +456,26 @@ def compile_insert_unless_conflict_on(
             context=constraint_spec.context,
         )
 
-    module_id = schema.get_global(
-        s_mod.Module, ptr.get_name(schema).module).id
-
     field_name = cspec_res.rptr.ptrref.shortname
     ds = {field_name.name: (ptr, ex_cnstrs)}
     select_ir = compile_insert_unless_conflict_select(
         stmt, insert_subject, real_typ, constrs=ds, obj_constrs=[],
         parser_context=stmt.context, ctx=ctx)
 
-    else_ir = compile_insert_unless_conflict_else(stmt, else_branch, ctx=ctx)
+    # Compile an else branch
+    else_ir = None
+    if else_branch:
+        # The ELSE needs to be able to reference the subject in an
+        # UPDATE, even though that would normally be prohibited.
+        ctx.path_scope.factoring_allowlist.add(stmt.subject.path_id)
+
+        # Compile else
+        else_ir = dispatch.compile(
+            astutils.ensure_qlstmt(else_branch), ctx=ctx)
+        assert isinstance(else_ir, irast.Set)
 
     return irast.OnConflictClause(
-        constraint=irast.ConstraintRef(
-            id=ex_cnstrs[0].id, module_id=module_id),
+        constraint=irast.ConstraintRef(id=ex_cnstrs[0].id),
         select_ir=select_ir,
         else_ir=else_ir
     )
@@ -562,7 +544,7 @@ def compile_InsertQuery(
                     stmt, expr.subject, constraint_spec, else_branch, ctx=ictx)
             else:
                 stmt.on_conflict = compile_insert_unless_conflict(
-                    stmt, expr.subject, else_branch, ctx=ictx)
+                    stmt, expr.subject, ctx=ictx)
 
         stmt_subject_stype = setgen.get_set_type(subject, ctx=ictx)
 
@@ -585,6 +567,24 @@ def compile_InsertQuery(
             )
 
         result = fini_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
+
+        # If we have an ELSE clause, we need to compile_query_subject
+        # *again* on the outer query, in order to produce a view for
+        # the joined output, which we need to have to generate the
+        # proper type descriptor.
+        # This feels like somewhat of a hack; I think it might be
+        # possible to do something more general elsewhere.
+        if expr.unless_conflict and expr.unless_conflict[1]:
+            with ictx.new() as resultctx:
+                if ictx.stmt is ctx.toplevel_stmt:
+                    resultctx.expr_exposed = True
+
+                result = compile_query_subject(
+                    result,
+                    view_name=ctx.toplevel_result_view_name,
+                    compile_views=ictx.stmt is ctx.toplevel_stmt,
+                    ctx=resultctx,
+                    parser_context=result.context)
 
     return result
 
@@ -1219,39 +1219,16 @@ def compile_result_clause(
                 steps=[qlast.ObjectRef(name=result_alias)]
             )
 
-        if (view_rptr is not None and
-                (view_rptr.is_insert or view_rptr.is_update) and
-                view_rptr.ptrcls is not None) and False:
-            # If we have an empty set assigned to a pointer in an INSERT
-            # or UPDATE, there's no need to explicitly specify the
-            # empty set type and it can be assumed to match the pointer
-            # target type.
-            target_t = view_rptr.ptrcls.get_target(ctx.env.schema)
-
-            if astutils.is_ql_empty_set(result_expr):
-                expr = setgen.new_empty_set(
-                    stype=target_t,
-                    alias=ctx.aliases.get('e'),
-                    ctx=sctx,
-                    srcctx=result_expr.context,
-                )
-            else:
-                with sctx.new() as exprctx:
-                    exprctx.empty_result_type_hint = target_t
-                    expr = setgen.ensure_set(
-                        dispatch.compile(result_expr, ctx=exprctx),
-                        ctx=exprctx)
+        if astutils.is_ql_empty_set(result_expr):
+            expr = setgen.new_empty_set(
+                stype=sctx.empty_result_type_hint,
+                alias=ctx.aliases.get('e'),
+                ctx=sctx,
+                srcctx=result_expr.context,
+            )
         else:
-            if astutils.is_ql_empty_set(result_expr):
-                expr = setgen.new_empty_set(
-                    stype=sctx.empty_result_type_hint,
-                    alias=ctx.aliases.get('e'),
-                    ctx=sctx,
-                    srcctx=result_expr.context,
-                )
-            else:
-                expr = setgen.ensure_set(
-                    dispatch.compile(result_expr, ctx=sctx), ctx=sctx)
+            expr = setgen.ensure_set(
+                dispatch.compile(result_expr, ctx=sctx), ctx=sctx)
 
         ctx.partial_path_prefix = expr
 

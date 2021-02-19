@@ -1192,7 +1192,7 @@ class Function(
         expr.Expression, default=None, compcoef=0.4, coerce=True)
 
     has_dml = so.SchemaField(
-        bool, default=False, allow_ddl_set=True)
+        bool, default=False)
 
     def has_inlined_defaults(self, schema: s_schema.Schema) -> bool:
         # This can be relaxed to just `language is EdgeQL` when we
@@ -1388,9 +1388,16 @@ class FunctionCommand(
         schema = ir.schema
 
         if ir.dml_exprs:
-            # DML inside function body detected. Right now is a good
-            # opportunity to raise exceptions or give warnings.
-            self.set_attribute_value('has_dml', True)
+            if context.allow_dml_in_functions:
+                # DML inside function body detected. Right now is a good
+                # opportunity to raise exceptions or give warnings.
+                self.set_attribute_value('has_dml', True)
+            else:
+                raise errors.InvalidFunctionDefinitionError(
+                    'data-modifying statements are not allowed in function'
+                    ' bodies',
+                    context=ir.dml_exprs[0].context,
+                )
 
         spec_volatility: Optional[ft.Volatility] = (
             self.get_specified_attribute_value('volatility', schema, context))

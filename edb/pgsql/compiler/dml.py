@@ -150,7 +150,6 @@ def init_dml_stmt(
         dml_rvar = relctx.rvar_for_rel(dml_cte, ctx=ctx)
         else_cte = (dml_cte, dml_rvar)
 
-    pathctx.put_path_bond(ctx.rel, ir_stmt.subject.path_id)
     if ctx.enclosing_cte_iterator:
         pathctx.put_path_bond(ctx.rel, ctx.enclosing_cte_iterator.path_id)
 
@@ -719,6 +718,16 @@ def insert_needs_conflict_cte(
     *,
     ctx: context.CompilerContextLevel,
 ) -> bool:
+    # We need to generate a conflict CTE if it is possible that
+    # the query might generate two conflicting objects.
+    # For now, we calculate that conservatively and generate a conflict
+    # CTE if there are iterators or other DML statements that we have
+    # seen already.
+    # A more fine-grained scheme would check if there are enclosing
+    # iterators or INSERT/UPDATEs to types that could conflict.
+    if ctx.dml_stmts:
+        return True
+
     for shape_el, _ in ir_stmt.subject.shape:
         assert shape_el.rptr is not None
         ptrref = shape_el.rptr.ptrref
@@ -745,27 +754,40 @@ def compile_insert_else_body(
         *,
         ctx: context.CompilerContextLevel) -> Optional[pgast.IteratorCTE]:
 
-    infer = None
-    if on_conflict.constraint:
-        constraint_name = f'"{on_conflict.constraint.id};schemaconstr"'
-        infer = pgast.InferClause(conname=constraint_name)
-
-    insert_stmt.on_conflict = pgast.OnConflictClause(
-        action='nothing',
-        infer=infer,
-    )
-
+    # We need to generate a "conflict CTE" that filters out
+    # objects-to-insert that would conflict with existing objects in
+    # two scenarios:
+    #  1) When there is a nested DML operation as part of the value
+    #     of a pointer that is stored inline with the object.
+    #     This is because we need to prevent that DML from executing
+    #     before we have a chance to see what ON CONFLICT does.
+    #  2) When there could be a conflict with an object INSERT/UPDATEd
+    #     in this same query. (Either because of FOR or other DML statements.)
+    #     This is because we need that to raise a ConstraintError,
+    #     which means we can't use ON CONFLICT, and so we need to prevent
+    #     the insertion of objects that conflict with existing ones ourselves.
+    #
+    # When we need a conflict CTE, we don't use SQL ON CONFLICT. In
+    # case 2, that is the whole point, while in case 1 it would just
+    # be superfluous to do so.
+    #
+    # When neither case obtains, we use ON CONFLICT because it ought
+    # to be more performant.
     needs_conflict_cte = insert_needs_conflict_cte(ir_stmt, ctx=ctx)
+    if not needs_conflict_cte:
+        infer = None
+        if on_conflict.constraint:
+            constraint_name = f'"{on_conflict.constraint.id};schemaconstr"'
+            infer = pgast.InferClause(conname=constraint_name)
+
+        insert_stmt.on_conflict = pgast.OnConflictClause(
+            action='nothing',
+            infer=infer,
+        )
 
     else_select = on_conflict.select_ir
     else_branch = on_conflict.else_ir
 
-    assert not (needs_conflict_cte and not else_select), (
-        "Nested DML into single pointers with UNLESS CONFLICT doesn't support "
-        "object constraints yet")
-
-    if not else_select:
-        return None
     if not else_branch and not needs_conflict_cte:
         return None
 
@@ -780,7 +802,6 @@ def compile_insert_else_body(
         clauses.setup_iterator_volatility(ctx.enclosing_cte_iterator,
                                           is_cte=True, ctx=ictx)
 
-        pathctx.put_path_bond(ictx.rel, subject_id)
         dispatch.compile(else_select, ctx=ictx)
         pathctx.put_path_id_map(ictx.rel, subject_id, else_select.path_id)
 
@@ -798,7 +819,7 @@ def compile_insert_else_body(
             ictx.path_scope[subject_id] = ictx.rel
 
             relctx.include_rvar(ictx.rel, else_select_rvar,
-                                path_id=subject_id, ctx=ictx)
+                                path_id=else_select.path_id, ctx=ictx)
 
             ictx.enclosing_cte_iterator = pgast.IteratorCTE(
                 path_id=else_select.path_id, cte=else_select_cte,
@@ -1222,6 +1243,11 @@ def process_link_update(
             #
             # The actual work is done via raise_on_null injection performed
             # by "process_link_values()" below (hence "enforce_cardinality").
+            #
+            # The other part of this enforcement is in doing it when a
+            # target is deleted and the link policy is ALLOW. This is
+            # handled in _get_outline_link_trigger_proc_text in
+            # pgsql/delta.py.
 
             # Turn `foo := <expr>` into just `foo`.
             ptr_ref_set = irast.Set(

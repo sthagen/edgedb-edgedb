@@ -31,7 +31,7 @@ class TestHttpNotebook(tb.BaseHttpTest, tb.server.QueryTestCase):
     TRANSACTION_ISOLATION = False
 
     @classmethod
-    def get_port_proto(cls):
+    def get_extension_name(cls):
         return 'notebook'
 
     def run_queries(self, queries: List[str]):
@@ -112,6 +112,12 @@ class TestHttpNotebook(tb.BaseHttpTest, tb.server.QueryTestCase):
                                 '65524': '8',
                                 '65521': '7',
                                 '65522': '17',
+                                '65525': '7',
+                                '65526': '1',
+                                '65527': '18',
+                                '65528': '17',
+                                '65529': '7',
+                                '65530': '17',
                                 '1': 'Consider using an explicit type '
                                      'cast or a conversion function.'
                             }

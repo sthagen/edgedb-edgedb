@@ -32,6 +32,7 @@ import immutables
 from edb import errors
 
 from edb import edgeql
+from edb import _edgeql_rust
 from edb.edgeql import ast as qlast
 
 from edb.common import context as parser_context
@@ -40,7 +41,6 @@ from edb.common import devmode
 from edb.common import exceptions
 from edb.common import uuidgen
 
-from edb.schema import database as s_db
 from edb.schema import ddl as s_ddl
 from edb.schema import delta as sd
 from edb.schema import modules as s_mod
@@ -61,6 +61,7 @@ from edb.pgsql import dbops
 from edb.pgsql import delta as delta_cmds
 from edb.pgsql import metaschema
 from edb.pgsql.common import quote_ident as qi
+from edb.pgsql.common import quote_literal as ql
 
 from edgedb import scram
 
@@ -94,10 +95,10 @@ async def _execute_block(conn, block: dbops.SQLBlock) -> None:
 
 
 async def _execute_edgeql_ddl(
-    schema: s_schema.Schema,
+    schema: s_schema.Schema_T,
     ddltext: str,
     stdmode: bool = True,
-) -> s_schema.Schema:
+) -> s_schema.Schema_T:
     context = sd.CommandContext(stdmode=stdmode)
 
     for ddl_cmd in edgeql.parse_block(ddltext):
@@ -105,7 +106,7 @@ async def _execute_edgeql_ddl(
         delta_command = s_ddl.delta_from_ddl(
             ddl_cmd, modaliases={}, schema=schema, stdmode=stdmode)
 
-        schema = delta_command.apply(schema, context)
+        schema = delta_command.apply(schema, context)  # type: ignore
 
     return schema
 
@@ -318,12 +319,17 @@ def _process_delta(delta, schema):
         debug.header('Delta Plan')
         debug.dump(delta, schema=schema)
 
-    delta = delta_cmds.CommandMeta.adapt(delta)
-
     context = sd.CommandContext()
     context.stdmode = True
 
-    schema = delta.apply(schema, context)
+    if not delta.canonical:
+        # Canonicalize
+        sd.apply(delta, schema=schema)
+
+    delta = delta_cmds.CommandMeta.adapt(delta)
+    context = sd.CommandContext()
+    context.stdmode = True
+    schema = sd.apply(delta, schema=schema, context=context)
 
     if debug.flags.delta_pgsql_plan:
         debug.header('PgSQL Delta Plan')
@@ -343,7 +349,7 @@ def compile_bootstrap_script(
 ) -> Tuple[s_schema.Schema, str]:
 
     ctx = edbcompiler.new_compiler_context(
-        schema=schema,
+        user_schema=schema,
         single_statement=single_statement,
         expected_cardinality_one=expected_cardinality_one,
         json_parameters=True,
@@ -371,6 +377,8 @@ class StdlibBits(NamedTuple):
     stdschema: s_schema.Schema
     #: Shadow extended schema for reflection..
     reflschema: s_schema.Schema
+    #: Standard portion of the global schema
+    global_schema: s_schema.Schema
     #: SQL text of the procedure to initialize `std` in Postgres.
     sqltext: str
     #: A set of ids of all types in std.
@@ -384,7 +392,11 @@ class StdlibBits(NamedTuple):
 
 
 async def _make_stdlib(testmode: bool, global_ids) -> StdlibBits:
-    schema: s_schema.Schema = s_schema.FlatSchema()
+    schema = s_schema.ChainedSchema(
+        s_schema.FlatSchema(),
+        s_schema.FlatSchema(),
+        s_schema.FlatSchema(),
+    )
     schema, _ = s_mod.Module.create_in_schema(
         schema,
         name=sn.UnqualName('__derived__'),
@@ -393,7 +405,7 @@ async def _make_stdlib(testmode: bool, global_ids) -> StdlibBits:
     current_block = dbops.PLTopBlock()
 
     std_texts = []
-    for modname in s_schema.STD_LIB + (sn.UnqualName('stdgraphql'),):
+    for modname in s_schema.STD_SOURCES:
         std_texts.append(s_std.get_std_module_text(modname))
 
     if testmode:
@@ -420,17 +432,23 @@ async def _make_stdlib(testmode: bool, global_ids) -> StdlibBits:
         types.update(plan.new_types)
         plan.generate(current_block)
 
+    _, schema_version = s_std.make_schema_version(schema)
+    schema, plan = _process_delta(schema_version, schema)
+    std_plans.append(schema_version)
+    plan.generate(current_block)
+
     stdglobals = '\n'.join([
         f'''CREATE SUPERUSER ROLE {edbdef.EDGEDB_SUPERUSER} {{
             SET id := <uuid>'{global_ids[edbdef.EDGEDB_SUPERUSER]}'
         }};''',
-        f'''CREATE DATABASE {edbdef.EDGEDB_TEMPLATE_DB} {{
-            SET id := <uuid>'{global_ids[edbdef.EDGEDB_TEMPLATE_DB]}'
-        }};''',
-        f'''CREATE DATABASE {edbdef.EDGEDB_SYSTEM_DB};'''
     ])
 
     schema = await _execute_edgeql_ddl(schema, stdglobals)
+
+    _, global_schema_version = s_std.make_global_schema_version(schema)
+    schema, plan = _process_delta(global_schema_version, schema)
+    std_plans.append(global_schema_version)
+    plan.generate(current_block)
 
     reflection = s_refl.generate_structure(schema)
     reflschema, reflplan = _process_delta(
@@ -441,13 +459,14 @@ async def _make_stdlib(testmode: bool, global_ids) -> StdlibBits:
     subblock = current_block.add_block()
 
     compiler = edbcompiler.new_compiler(
-        std_schema=schema,
-        reflection_schema=reflschema,
-        schema_class_layout=reflection.class_layout,
+        std_schema=schema.get_top_schema(),
+        reflection_schema=reflschema.get_top_schema(),
+        schema_class_layout=reflection.class_layout,  # type: ignore
     )
 
     compilerctx = edbcompiler.new_compiler_context(
-        reflschema,
+        user_schema=reflschema.get_top_schema(),
+        global_schema=schema.get_global_schema(),
         bootstrap_mode=True,
     )
 
@@ -459,11 +478,11 @@ async def _make_stdlib(testmode: bool, global_ids) -> StdlibBits:
         )
 
     compilerctx = edbcompiler.new_compiler_context(
-        reflschema,
+        user_schema=reflschema.get_top_schema(),
+        global_schema=schema.get_global_schema(),
         bootstrap_mode=True,
         internal_schema_mode=True,
     )
-
     compiler._compile_schema_storage_in_delta(
         ctx=compilerctx,
         delta=reflection.intro_schema_delta,
@@ -473,7 +492,8 @@ async def _make_stdlib(testmode: bool, global_ids) -> StdlibBits:
     sqltext = current_block.to_string()
 
     compilerctx = edbcompiler.new_compiler_context(
-        reflschema,
+        user_schema=reflschema.get_top_schema(),
+        global_schema=schema.get_global_schema(),
         schema_reflection_mode=True,
         output_format=edbcompiler.IoFormat.JSON_ELEMENTS,
     )
@@ -503,11 +523,21 @@ async def _make_stdlib(testmode: bool, global_ids) -> StdlibBits:
         )
 
     local_intro_sql = ' UNION ALL '.join(sql_intro_local_parts)
+    local_intro_sql = f'''
+        WITH intro(c) AS ({local_intro_sql})
+        SELECT json_agg(intro.c) FROM intro
+    '''
+
     global_intro_sql = ' UNION ALL '.join(sql_intro_global_parts)
+    global_intro_sql = f'''
+        WITH intro(c) AS ({global_intro_sql})
+        SELECT json_agg(intro.c) FROM intro
+    '''
 
     return StdlibBits(
-        stdschema=schema,
-        reflschema=reflschema,
+        stdschema=schema.get_top_schema(),
+        reflschema=reflschema.get_top_schema(),
+        global_schema=schema.get_global_schema(),
         sqltext=sqltext,
         types=types,
         classlayout=reflection.class_layout,
@@ -548,16 +578,12 @@ async def _amend_stdlib(
     compiler = edbcompiler.new_compiler(
         std_schema=schema,
         reflection_schema=reflschema,
-        schema_class_layout=stdlib.classlayout,
+        schema_class_layout=stdlib.classlayout,  # type: ignore
     )
 
     compilerctx = edbcompiler.new_compiler_context(
-        schema,
-        bootstrap_mode=True,
+        user_schema=schema
     )
-
-    compilerctx = edbcompiler.new_compiler_context(schema)
-
     for plan in plans:
         compiler._compile_schema_storage_in_delta(
             ctx=compilerctx,
@@ -589,10 +615,8 @@ async def _init_stdlib(cluster, conn, testmode, global_ids):
         src_hash, tpldbdump_cache, source_dir=cache_dir, pickled=False)
 
     if stdlib is None:
+        logger.info('Compiling the standard library...')
         stdlib = await _make_stdlib(in_dev_mode or testmode, global_ids)
-        cache_hit = False
-    else:
-        cache_hit = True
 
     logger.info('Creating the necessary PostgreSQL extensions...')
     await metaschema.create_pg_extensions(conn)
@@ -600,7 +624,7 @@ async def _init_stdlib(cluster, conn, testmode, global_ids):
     if tpldbdump is None:
         logger.info('Populating internal SQL structures...')
         await metaschema.bootstrap(conn)
-        logger.info('Building the standard library...')
+        logger.info('Executing the standard library...')
         await _execute_ddl(conn, stdlib.sqltext)
 
         if in_dev_mode or specified_cache_dir:
@@ -620,11 +644,36 @@ async def _init_stdlib(cluster, conn, testmode, global_ids):
                 flags=re.MULTILINE,
             )
 
+            global_metadata = await conn.fetchval(
+                f'''\
+                SELECT edgedb.shobj_metadata(
+                    (SELECT oid FROM pg_database
+                     WHERE datname = {ql(edbdef.EDGEDB_TEMPLATE_DB)}),
+                    'pg_database'
+                )'''
+            )
+
+            pl_block = dbops.PLTopBlock()
+
+            dbops.SetMetadata(
+                dbops.Database(name=edbdef.EDGEDB_TEMPLATE_DB),
+                json.loads(global_metadata),
+            ).generate(pl_block)
+
+            tpldbdump += b'\n' + pl_block.to_string().encode('utf-8')
+
             buildmeta.write_data_cache(
                 tpldbdump,
                 src_hash,
                 tpldbdump_cache,
                 pickled=False,
+                target_dir=cache_dir,
+            )
+
+            buildmeta.write_data_cache(
+                stdlib,
+                src_hash,
+                stdlib_cache,
                 target_dir=cache_dir,
             )
     else:
@@ -702,14 +751,6 @@ async def _init_stdlib(cluster, conn, testmode, global_ids):
 
     stdlib = stdlib._replace(stdschema=schema)
 
-    if not cache_hit and (in_dev_mode or specified_cache_dir):
-        buildmeta.write_data_cache(
-            stdlib,
-            src_hash,
-            stdlib_cache,
-            target_dir=cache_dir,
-        )
-
     await _store_static_bin_cache(
         cluster,
         'stdschema',
@@ -720,6 +761,12 @@ async def _init_stdlib(cluster, conn, testmode, global_ids):
         cluster,
         'reflschema',
         pickle.dumps(stdlib.reflschema, protocol=pickle.HIGHEST_PROTOCOL),
+    )
+
+    await _store_static_bin_cache(
+        cluster,
+        'global_schema',
+        pickle.dumps(stdlib.global_schema, protocol=pickle.HIGHEST_PROTOCOL),
     )
 
     await _store_static_bin_cache(
@@ -752,7 +799,7 @@ async def _init_stdlib(cluster, conn, testmode, global_ids):
     await metaschema.generate_more_support_functions(
         conn, compiler, stdlib.reflschema, testmode)
 
-    return schema, stdlib.reflschema, compiler
+    return stdlib, compiler
 
 
 async def _execute_ddl(conn, sql_text):
@@ -779,24 +826,18 @@ async def _execute_ddl(conn, sql_text):
         point = None
 
         if position is not None:
-            position = int(position)
-            point = parser_context.SourcePoint(
-                None, None, position)
+            point = int(position)
             text = e.query
             if text is None:
                 # Parse errors
                 text = sql_text
 
         elif internal_position is not None:
-            internal_position = int(internal_position)
-            point = parser_context.SourcePoint(
-                None, None, internal_position)
+            point = int(internal_position)
             text = e.internal_query
 
         elif pl_func_line:
-            point = parser_context.SourcePoint(
-                pl_func_line, None, None
-            )
+            point = _edgeql_rust.offset_of_line(sql_text, pl_func_line)
             text = sql_text
 
         if point is not None:
@@ -832,7 +873,6 @@ async def _configure(
     schema: s_schema.Schema,
     compiler: edbcompiler.Compiler,
     conn: asyncpg_con.Connection,
-    cluster: pgcluster.BaseCluster,
     *,
     insecure: bool = False,
 ) -> None:
@@ -869,7 +909,7 @@ async def _configure(
     config_json = config.to_json(config_spec, settings, include_source=False)
     block = dbops.PLTopBlock()
     dbops.UpdateMetadata(
-        dbops.Database(name=edbdef.EDGEDB_TEMPLATE_DB),
+        dbops.Database(name=edbdef.EDGEDB_SYSTEM_DB),
         {'sysconfig': json.loads(config_json)},
     ).generate(block)
 
@@ -879,7 +919,7 @@ async def _configure(
 async def _compile_sys_queries(schema, compiler, cluster):
     queries = {}
 
-    schema, sql = compile_bootstrap_script(
+    _, sql = compile_bootstrap_script(
         compiler,
         schema,
         'SELECT cfg::get_config_json()',
@@ -889,6 +929,36 @@ async def _compile_sys_queries(schema, compiler, cluster):
 
     queries['config'] = sql
 
+    _, sql = compile_bootstrap_script(
+        compiler,
+        schema,
+        "SELECT cfg::get_config_json(sources := ['database'])",
+        expected_cardinality_one=True,
+        single_statement=True,
+    )
+
+    queries['dbconfig'] = sql
+
+    _, sql = compile_bootstrap_script(
+        compiler,
+        schema,
+        "SELECT cfg::get_config_json(max_source := 'system override')",
+        expected_cardinality_one=True,
+        single_statement=True,
+    )
+
+    queries['sysconfig'] = sql
+
+    _, sql = compile_bootstrap_script(
+        compiler,
+        schema,
+        'SELECT (SELECT sys::Database FILTER NOT .builtin).name',
+        expected_cardinality_one=False,
+        single_statement=True,
+    )
+
+    queries['listdbs'] = sql
+
     role_query = '''
         SELECT sys::Role {
             name,
@@ -896,7 +966,7 @@ async def _compile_sys_queries(schema, compiler, cluster):
             password,
         };
     '''
-    schema, sql = compile_bootstrap_script(
+    _, sql = compile_bootstrap_script(
         compiler,
         schema,
         role_query,
@@ -911,7 +981,7 @@ async def _compile_sys_queries(schema, compiler, cluster):
             backend_id,
         } FILTER .id IN <uuid>json_array_unpack(<json>$ids);
     '''
-    schema, sql = compile_bootstrap_script(
+    _, sql = compile_bootstrap_script(
         compiler,
         schema,
         tids_query,
@@ -994,7 +1064,6 @@ async def _create_edgedb_database(
     database,
     owner,
     *,
-    cluster,
     builtin: bool = False,
     objid: Optional[uuid.UUID] = None,
 ) -> uuid.UUID:
@@ -1089,8 +1158,8 @@ async def _init_config(cluster: pgcluster.BaseCluster) -> None:
     conn = await cluster.connect(database=edbdef.EDGEDB_TEMPLATE_DB)
     try:
         await _check_data_dir_compatibility(conn)
-        compiler = edbcompiler.Compiler({})
-        await compiler.ensure_initialized(conn)
+        compiler = edbcompiler.Compiler()
+        await compiler.initialize_from_pg(conn)
         std_schema = compiler.get_std_schema()
         config_spec = config.load_spec_from_schema(std_schema)
 
@@ -1130,14 +1199,13 @@ async def _bootstrap(
         cluster, pgconn)
 
     conn = await cluster.connect(database=edbdef.EDGEDB_TEMPLATE_DB)
-    conn.add_log_listener(_pg_log_listener)
 
     try:
         conn.add_log_listener(_pg_log_listener)
 
         await _populate_misc_instance_data(cluster, conn)
 
-        std_schema, refl_schema, compiler = await _init_stdlib(
+        stdlib, compiler = await _init_stdlib(
             cluster,
             conn,
             testmode=args['testmode'],
@@ -1146,30 +1214,34 @@ async def _bootstrap(
                 edbdef.EDGEDB_TEMPLATE_DB: new_template_db_id,
             }
         )
-        await _bootstrap_config_spec(std_schema, cluster)
-        await _compile_sys_queries(refl_schema, compiler, cluster)
-        schema = await _init_defaults(std_schema, compiler, conn)
-        schema = await _populate_data(std_schema, compiler, conn)
-        await _configure(schema, compiler, conn, cluster,
-                         insecure=args['insecure'])
+        await _bootstrap_config_spec(stdlib.stdschema, cluster)
+        await _compile_sys_queries(stdlib.reflschema, compiler, cluster)
+
+        schema = s_schema.FlatSchema()
+        schema = await _init_defaults(schema, compiler, conn)
+        schema = await _populate_data(schema, compiler, conn)
     finally:
         await conn.close()
 
-    system_db = schema.get_global(s_db.Database, edbdef.EDGEDB_SYSTEM_DB)
     await _create_edgedb_database(
         pgconn,
         edbdef.EDGEDB_SYSTEM_DB,
         edbdef.EDGEDB_SUPERUSER,
-        cluster=cluster,
         builtin=True,
-        objid=system_db.id,
     )
+
+    conn = await cluster.connect(database=edbdef.EDGEDB_SYSTEM_DB)
+
+    try:
+        conn.add_log_listener(_pg_log_listener)
+        await _configure(schema, compiler, conn, insecure=args['insecure'])
+    finally:
+        await conn.close()
 
     await _create_edgedb_database(
         pgconn,
         edbdef.EDGEDB_SUPERUSER_DB,
         edbdef.EDGEDB_SUPERUSER,
-        cluster=cluster,
     )
 
     if (
@@ -1196,7 +1268,6 @@ async def _bootstrap(
             pgconn,
             args['default_database'],
             args['default_database_user'] or edbdef.EDGEDB_SUPERUSER,
-            cluster=cluster,
         )
 
 

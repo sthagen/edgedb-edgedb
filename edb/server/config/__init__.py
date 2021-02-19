@@ -20,11 +20,13 @@
 from __future__ import annotations
 from typing import *
 
+import immutables
+
 from edb import errors
 from edb.edgeql.qltypes import ConfigScope
 
 from .ops import OpCode, Operation, SettingValue
-from .ops import spec_to_json, to_json, from_json, from_dict, set_value
+from .ops import spec_to_json, to_json, from_json, set_value, to_edgeql
 from .ops import value_from_json, value_to_json_value
 from .spec import Spec, Setting, load_spec_from_schema
 from .types import ConfigType
@@ -34,11 +36,12 @@ __all__ = (
     'get_settings', 'set_settings',
     'lookup',
     'Spec', 'Setting', 'SettingValue',
-    'spec_to_json', 'to_json', 'from_json', 'from_dict', 'set_value',
+    'spec_to_json', 'to_json', 'to_edgeql', 'from_json', 'set_value',
     'value_from_json', 'value_to_json_value',
     'ConfigScope', 'OpCode', 'Operation',
     'ConfigType',
     'load_spec_from_schema',
+    'get_compilation_config',
 )
 
 
@@ -82,3 +85,14 @@ def lookup(
             return setting_value.value
     else:
         return setting.default
+
+
+def get_compilation_config(
+    config: Mapping[str, SettingValue],
+) -> immutables.Map[str, SettingValue]:
+    spec = get_settings()
+    return immutables.Map((
+        (k, v)
+        for k, v in config.items()
+        if spec[k].affects_compilation
+    ))

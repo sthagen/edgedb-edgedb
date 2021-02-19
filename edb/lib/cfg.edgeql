@@ -23,6 +23,7 @@ CREATE ABSTRACT INHERITABLE ANNOTATION cfg::backend_setting;
 CREATE ABSTRACT INHERITABLE ANNOTATION cfg::internal;
 CREATE ABSTRACT INHERITABLE ANNOTATION cfg::requires_restart;
 CREATE ABSTRACT INHERITABLE ANNOTATION cfg::system;
+CREATE ABSTRACT INHERITABLE ANNOTATION cfg::affects_compilation;
 
 CREATE ABSTRACT TYPE cfg::ConfigObject EXTENDING std::BaseObject;
 
@@ -99,6 +100,12 @@ CREATE ABSTRACT TYPE cfg::AbstractConfig extending cfg::ConfigObject {
         CREATE ANNOTATION cfg::system := 'true';
     };
 
+    CREATE PROPERTY allow_dml_in_functions -> std::bool {
+        SET default := false;
+        CREATE ANNOTATION cfg::affects_compilation := 'true';
+        CREATE ANNOTATION cfg::internal := 'true';
+    };
+
     # Exposed backend settings follow.
     # When exposing a new setting, remember to modify
     # the _read_sys_config function to select the value
@@ -144,16 +151,16 @@ CREATE TYPE cfg::DatabaseConfig EXTENDING cfg::AbstractConfig;
 CREATE FUNCTION
 cfg::get_config_json(
     NAMED ONLY sources: OPTIONAL array<std::str> = {},
-    NAMED ONLY min_source: OPTIONAL std::str = {}
+    NAMED ONLY max_source: OPTIONAL std::str = {}
 ) -> std::json
 {
     USING SQL $$
     SELECT
-        jsonb_object_agg(cfg.name, cfg)
+        coalesce(jsonb_object_agg(cfg.name, cfg), '{}'::jsonb)
     FROM
         edgedb._read_sys_config(
             sources::edgedb._sys_config_source_t[],
-            min_source::edgedb._sys_config_source_t
+            max_source::edgedb._sys_config_source_t
         ) AS cfg
     $$;
 };

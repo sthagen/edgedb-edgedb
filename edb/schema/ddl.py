@@ -21,8 +21,10 @@ from __future__ import annotations
 from typing import *
 
 from collections import defaultdict
+import itertools
 
 from edb import edgeql
+from edb.common import uuidgen
 from edb.edgeql import ast as qlast
 from edb.edgeql import declarative as s_decl
 from edb.server import defines
@@ -38,6 +40,7 @@ from . import objtypes as s_objtypes
 from . import ordering as s_ordering
 from . import pseudo as s_pseudo
 from . import schema as s_schema
+from . import version as s_ver
 
 
 if TYPE_CHECKING:
@@ -456,15 +459,19 @@ def apply_sdl(
     current_schema: s_schema.Schema,
     stdmode: bool = False,
     testmode: bool = False,
+    allow_dml_in_functions: bool=False,
 ) -> s_schema.Schema:
     # group declarations by module
     documents: Dict[str, List[qlast.DDL]] = defaultdict(list)
     # initialize the "default" module
     documents[defines.DEFAULT_MODULE_ALIAS] = []
+    extensions = {}
     for decl in sdl_document.declarations:
         # declarations are either in a module block or fully-qualified
         if isinstance(decl, qlast.ModuleDeclaration):
             documents[decl.name.name].extend(decl.declarations)
+        elif isinstance(decl, qlast.CreateExtension):
+            extensions[decl.name.name] = decl
         else:
             assert decl.name.module is not None
             documents[decl.name.module].append(decl)
@@ -476,10 +483,11 @@ def apply_sdl(
         stdmode=stdmode,
         testmode=testmode,
         declarative=True,
+        allow_dml_in_functions=allow_dml_in_functions,
     )
 
     target_schema = base_schema
-    for ddl_stmt in ddl_stmts:
+    for ddl_stmt in itertools.chain(extensions.values(), ddl_stmts):
         delta = sd.DeltaRoot()
         with context(sd.DeltaRootContext(schema=target_schema, op=delta)):
             cmd = cmd_from_ddl(
@@ -565,6 +573,7 @@ def delta_from_ddl(
     modaliases: Mapping[Optional[str], str],
     stdmode: bool=False,
     testmode: bool=False,
+    allow_dml_in_functions: bool=False,
     schema_object_ids: Optional[
         Mapping[Tuple[sn.Name, Optional[str]], uuid.UUID]
     ]=None,
@@ -576,6 +585,7 @@ def delta_from_ddl(
         modaliases=modaliases,
         stdmode=stdmode,
         testmode=testmode,
+        allow_dml_in_functions=allow_dml_in_functions,
         schema_object_ids=schema_object_ids,
         compat_ver=compat_ver,
     )
@@ -590,6 +600,7 @@ def _delta_from_ddl(
     stdmode: bool=False,
     internal_schema_mode: bool=False,
     testmode: bool=False,
+    allow_dml_in_functions: bool=False,
     schema_object_ids: Optional[
         Mapping[Tuple[sn.Name, Optional[str]], uuid.UUID]
     ]=None,
@@ -602,6 +613,7 @@ def _delta_from_ddl(
         stdmode=stdmode,
         internal_schema_mode=internal_schema_mode,
         testmode=testmode,
+        allow_dml_in_functions=allow_dml_in_functions,
         schema_object_ids=schema_object_ids,
         compat_ver=compat_ver,
     )
@@ -615,6 +627,26 @@ def _delta_from_ddl(
             testmode=testmode,
         )
         schema = cmd.apply(schema, context)
+
+        if not stdmode:
+            if not isinstance(
+                cmd,
+                (sd.GlobalObjectCommand, sd.ExternalObjectCommand),
+            ):
+                ver = schema.get_global(
+                    s_ver.SchemaVersion, '__schema_version__')
+                ver_cmd = ver.init_delta_command(schema, sd.AlterObject)
+                ver_cmd.set_attribute_value('version', uuidgen.uuid1mc())
+                schema = ver_cmd.apply(schema, context)
+                delta.add(ver_cmd)
+            elif not isinstance(cmd, sd.ExternalObjectCommand):
+                gver = schema.get_global(
+                    s_ver.GlobalSchemaVersion, '__global_schema_version__')
+                g_ver_cmd = gver.init_delta_command(schema, sd.AlterObject)
+                g_ver_cmd.set_attribute_value('version', uuidgen.uuid1mc())
+                schema = g_ver_cmd.apply(schema, context)
+                delta.add(g_ver_cmd)
+
         delta.add(cmd)
 
     delta.canonical = True

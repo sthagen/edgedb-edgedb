@@ -908,11 +908,6 @@ class ObjectMeta(type):
     def get_reflection_link(cls) -> Optional[str]:
         return cls._reflection_link
 
-    def is_abstract(cls) -> bool:
-        """Return True if this type does NOT represent a concrete schema class.
-        """
-        return cls.get_ql_class() is None
-
 
 class FieldValueNotFoundError(Exception):
     pass
@@ -1034,6 +1029,12 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         else:
             return f"{clsname} '{dname}'"
 
+    @classmethod
+    def is_abstract(cls) -> bool:
+        """Return True if this type does NOT represent a concrete schema class.
+        """
+        return cls.get_ql_class() is None
+
     def get_shortname(self, schema: s_schema.Schema) -> sn.Name:
         return type(self).get_shortname_static(self.get_name(schema))
 
@@ -1092,11 +1093,11 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
     @classmethod
     def create_in_schema(
         cls: Type[Object_T],
-        schema: s_schema.Schema,
+        schema: s_schema.Schema_T,
         *,
         id: Optional[uuid.UUID] = None,
         **data: Any,
-    ) -> Tuple[s_schema.Schema, Object_T]:
+    ) -> Tuple[s_schema.Schema_T, Object_T]:
 
         if not cls.is_schema_object:
             raise TypeError(f'{cls.__name__} type cannot be created in schema')
@@ -1936,6 +1937,19 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
         return f'<{type(self).__name__} {self.id} at 0x{id(self):#x}>'
 
 
+class InternalObject(Object):
+    """A schema object that is used by the system internally.
+
+    Instances of InternalObject should not appear in schema dumps.
+    """
+
+    @classmethod
+    def is_abstract(cls) -> bool:
+        """Return True if this type does NOT represent a concrete schema class.
+        """
+        return cls is InternalObject
+
+
 class QualifiedObject(Object):
 
     name = SchemaField(
@@ -1968,6 +1982,14 @@ class GlobalObject(Object):
 
 
 GlobalObject_T = TypeVar('GlobalObject_T', bound='GlobalObject')
+
+
+class ExternalObject(GlobalObject):
+    """An object that is not tracked in a schema, but some external state."""
+    pass
+
+
+ExternalObject_T = TypeVar('ExternalObject_T', bound='ExternalObject')
 
 
 class DerivableObject(QualifiedObject):

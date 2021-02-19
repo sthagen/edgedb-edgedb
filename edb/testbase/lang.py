@@ -242,8 +242,10 @@ def _load_std_schema():
 
         if schema is None:
             schema = s_schema.FlatSchema()
-            for modname in s_schema.STD_LIB + ('stdgraphql',):
+            for modname in s_schema.STD_SOURCES:
                 schema = s_std.load_std_module(schema, modname)
+            schema, _ = s_std.make_schema_version(schema)
+            schema, _ = s_std.make_global_schema_version(schema)
 
         if devmode.is_in_dev_mode():
             buildmeta.write_data_cache(
@@ -393,7 +395,7 @@ class BaseSchemaTest(BaseDocTest):
                     last_migration_ref = None
 
                 create_migration = qlast.CreateMigration(
-                    body=qlast.MigrationBody(commands=tuple(migration_script)),
+                    body=qlast.NestedQLBlock(commands=migration_script),
                     parent=last_migration_ref,
                 )
 

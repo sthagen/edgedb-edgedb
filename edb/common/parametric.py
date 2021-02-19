@@ -23,7 +23,7 @@ import functools
 import types
 import sys
 
-import typing_inspect
+from edb.common import typing_inspect
 
 
 __all__ = [
@@ -35,6 +35,12 @@ __all__ = [
 
 T = TypeVar("T")
 V = TypeVar("V")
+
+
+try:
+    from types import GenericAlias  # type: ignore
+except ImportError:
+    from typing import _GenericAlias as GenericAlias  # type: ignore
 
 
 class ParametricType:
@@ -121,6 +127,7 @@ class ParametricType:
         for b in ob:
             if (
                 isinstance(b, type)
+                and not isinstance(b, GenericAlias)
                 and issubclass(b, ParametricType)
                 and b is not ParametricType
             ):
@@ -288,7 +295,7 @@ class ParametricType:
 
         for ut, (idx, attr) in cls._forward_refs.items():
             t = eval(ut, globalns, {})
-            if isinstance(t, type):
+            if isinstance(t, type) and not isinstance(t, GenericAlias):
                 types[idx] = t
                 setattr(cls, attr, t)
             else:

@@ -74,14 +74,16 @@ class TestServerAuth(tb.ConnectedTestCase):
                 }
             ''')
 
-            # bad password is bad again
             with self.assertRaisesRegex(
-                    edgedb.AuthenticationError,
-                    'authentication failed'):
+                edgedb.AuthenticationError,
+                'authentication failed',
+            ):
+                # bad password is bad again
                 await self.connect(
                     user='foo',
                     password='wrong',
                 )
+
         finally:
             await self.con.query('''
                 CONFIGURE SYSTEM RESET Auth FILTER .comment = 'test'

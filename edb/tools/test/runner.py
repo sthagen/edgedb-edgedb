@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import *
 
 import collections.abc
+import csv
 import enum
 import io
 import itertools
@@ -46,7 +47,6 @@ import click
 import edgedb
 
 from edb.common import devmode
-from edb.common import debug
 from edb.testbase import server as tb
 
 from . import mproc_fixes
@@ -106,6 +106,14 @@ class StreamingTestSuite(unittest.TestSuite):
         with warnings.catch_warnings(record=True) as ww:
             warnings.resetwarnings()
             warnings.simplefilter('default')
+
+            # This is temporary, until we implement `subtransaction`
+            # functionality of RFC1004
+            warnings.filterwarnings(
+                'ignore',
+                message=r'The "transaction\(\)" method is deprecated'
+                        r' and is scheduled to be removed',
+                category=DeprecationWarning)
 
             self._run(test, result)
 
@@ -624,13 +632,13 @@ class ParallelTextTestResult(unittest.result.TestResult):
             self.ren = SimpleRenderer(tests=tests, stream=stream)
 
     def report_progress(self, test, marker, description=None):
+        self.currently_running.pop(test, None)
         self.ren.report(
             test,
             marker,
             description,
             currently_running=list(self.currently_running),
         )
-        self.currently_running.pop(test, None)
 
     def record_test_stats(self, test, stats):
         self.test_stats.append((test, stats))
@@ -723,17 +731,28 @@ class ParallelTextTestRunner:
 
     def __init__(self, *, stream=None, num_workers=1, verbosity=1,
                  output_format=OutputFormat.auto, warnings=True,
-                 failfast=False):
+                 failfast=False, shuffle=False):
         self.stream = stream if stream is not None else sys.stderr
         self.num_workers = num_workers
         self.verbosity = verbosity
         self.warnings = warnings
         self.failfast = failfast
+        self.shuffle = shuffle
         self.output_format = output_format
 
-    def run(self, test):
+    def run(self, test, current_shard, total_shards, running_times_log_file):
         session_start = time.monotonic()
         cases = tb.get_test_cases([test])
+        stats = {}
+        if running_times_log_file:
+            running_times_log_file.seek(0)
+            stats = {
+                k: (float(v), int(c))
+                for k, v, c in csv.reader(running_times_log_file)
+            }
+        cases = tb.get_cases_by_shard(
+            cases, current_shard, total_shards, self.verbosity, stats,
+        )
         setup = tb.get_test_cases_setup(cases)
         bootstrap_time_taken = 0
         tests_time_taken = 0
@@ -805,6 +824,17 @@ class ParallelTextTestRunner:
             self._echo()
             suite.run(result)
 
+            if running_times_log_file:
+                for test, stat in result.test_stats:
+                    name = str(test)
+                    t = stat['running-time']
+                    at, c = stats.get(name, (0, 0))
+                    stats[name] = (at + (t - at) / (c + 1), c + 1)
+                running_times_log_file.seek(0)
+                running_times_log_file.truncate()
+                writer = csv.writer(running_times_log_file)
+                for k, v in stats.items():
+                    writer.writerow((k, ) + v)
             tests_time_taken = time.monotonic() - start
 
         except KeyboardInterrupt:
@@ -926,29 +956,37 @@ class ParallelTextTestRunner:
         return result
 
     def _sort_tests(self, cases):
-        if debug.flags.parallelize_tests_better:
-            non_parallelizable = ('system',)
-        else:
-            non_parallelizable = ('system', 'database',)
+        serialized_suites = {}
+        exclusive_suites = set()
+        exclusive_tests = []
 
-        serialized_suites = {
-            casecls: unittest.TestSuite(tests)
-            for casecls, tests in cases.items()
-            if (
-                (gg := getattr(casecls, 'get_parallelism_granularity', None))
-                and gg() in non_parallelizable
-            )
-        }
+        for casecls, tests in cases.items():
+            gg = getattr(casecls, 'get_parallelism_granularity', None)
+            granularity = gg() if gg is not None else 'default'
+
+            if granularity == 'suite':
+                serialized_suites[casecls] = unittest.TestSuite(tests)
+            elif granularity == 'system':
+                exclusive_tests.extend(tests)
+                exclusive_suites.add(casecls)
 
         tests = itertools.chain(
             serialized_suites.values(),
             itertools.chain.from_iterable(
                 tests for casecls, tests in cases.items()
-                if casecls not in serialized_suites
-            )
+                if (
+                    casecls not in serialized_suites
+                    and casecls not in exclusive_suites
+                )
+            ),
+            [unittest.TestSuite(exclusive_tests)],
         )
 
-        return list(tests)
+        test_list = list(tests)
+        if self.shuffle:
+            random.shuffle(test_list)
+
+        return test_list
 
 
 # Disable pickling of traceback objects in multiprocessing.

@@ -52,16 +52,26 @@ if TYPE_CHECKING:
         ],
     ]
 
-STD_LIB = (
+STD_MODULES = (
     sn.UnqualName('std'),
     sn.UnqualName('schema'),
     sn.UnqualName('math'),
     sn.UnqualName('sys'),
     sn.UnqualName('cfg'),
     sn.UnqualName('cal'),
+    sn.UnqualName('stdgraphql'),
 )
-STD_MODULES = frozenset(STD_LIB + (sn.UnqualName('stdgraphql'),))
 
+# Specifies the order of processing of files and directories in lib/
+STD_SOURCES = (
+    sn.UnqualName('std'),
+    sn.UnqualName('schema'),
+    sn.UnqualName('math'),
+    sn.UnqualName('sys'),
+    sn.UnqualName('cfg'),
+    sn.UnqualName('cal'),
+    sn.UnqualName('ext'),
+)
 
 Schema_T = TypeVar('Schema_T', bound='Schema')
 
@@ -421,6 +431,8 @@ class Schema(abc.ABC):
         self,
         *,
         exclude_stdlib: bool = False,
+        exclude_global: bool = False,
+        exclude_internal: bool = True,
         included_modules: Optional[Iterable[sn.Name]] = None,
         excluded_modules: Optional[Iterable[sn.Name]] = None,
         included_items: Optional[Iterable[sn.Name]] = None,
@@ -1274,9 +1286,7 @@ class FlatSchema(Schema):
         elif default is not so.NoDefault:
             return default
         else:
-            desc = objtype.get_schema_class_displayname()
-            raise errors.InvalidReferenceError(
-                f'{desc} {name!r} does not exist')
+            self._raise_bad_reference(name, type=objtype)
 
     def get_generic(
         self,
@@ -1334,16 +1344,20 @@ class FlatSchema(Schema):
                 label = 'schema item'
 
         if type is not None:
-            if not sn.is_qualified(refname):
-                if module_aliases is not None:
-                    default_module = module_aliases.get(None)
-                    if default_module is not None:
-                        refname = type.get_displayname_static(
-                            sn.QualName(default_module, refname),
-                        )
+            if issubclass(type, so.QualifiedObject):
+                if not sn.is_qualified(refname):
+                    if module_aliases is not None:
+                        default_module = module_aliases.get(None)
+                        if default_module is not None:
+                            refname = type.get_displayname_static(
+                                sn.QualName(default_module, refname),
+                            )
+                else:
+                    refname = type.get_displayname_static(
+                        sn.QualName.from_string(refname))
             else:
                 refname = type.get_displayname_static(
-                    sn.QualName.from_string(refname))
+                    sn.UnqualName.from_string(refname))
 
         raise errors.InvalidReferenceError(
             f'{label} {refname!r} does not exist',
@@ -1361,6 +1375,7 @@ class FlatSchema(Schema):
         *,
         exclude_stdlib: bool = False,
         exclude_global: bool = False,
+        exclude_internal: bool = True,
         included_modules: Optional[Iterable[sn.Name]] = None,
         excluded_modules: Optional[Iterable[sn.Name]] = None,
         included_items: Optional[Iterable[sn.Name]] = None,
@@ -1373,6 +1388,7 @@ class FlatSchema(Schema):
             self._id_to_type,
             exclude_stdlib=exclude_stdlib,
             exclude_global=exclude_global,
+            exclude_internal=exclude_internal,
             included_modules=included_modules,
             excluded_modules=excluded_modules,
             included_items=included_items,
@@ -1404,6 +1420,7 @@ class SchemaIterator(Generic[so.Object_T]):
         *,
         exclude_stdlib: bool = False,
         exclude_global: bool = False,
+        exclude_internal: bool = True,
         included_modules: Optional[Iterable[sn.Name]],
         excluded_modules: Optional[Iterable[sn.Name]],
         included_items: Optional[Iterable[sn.Name]] = None,
@@ -1458,6 +1475,11 @@ class SchemaIterator(Generic[so.Object_T]):
                 lambda schema, obj: not isinstance(obj, so.GlobalObject)
             )
 
+        if exclude_internal:
+            filters.append(
+                lambda schema, obj: not isinstance(obj, so.InternalObject)
+            )
+
         # Extra filters are last, because they might depend on type.
         filters.extend(extra_filters)
 
@@ -1488,6 +1510,12 @@ class ChainedSchema(Schema):
         self._base_schema = base_schema
         self._top_schema = top_schema
         self._global_schema = global_schema
+
+    def get_top_schema(self) -> FlatSchema:
+        return self._top_schema
+
+    def get_global_schema(self) -> FlatSchema:
+        return self._global_schema
 
     def add_raw(
         self,
@@ -1899,6 +1927,7 @@ class ChainedSchema(Schema):
         *,
         exclude_stdlib: bool = False,
         exclude_global: bool = False,
+        exclude_internal: bool = True,
         included_modules: Optional[Iterable[sn.Name]] = None,
         excluded_modules: Optional[Iterable[sn.Name]] = None,
         included_items: Optional[Iterable[sn.Name]] = None,
@@ -1915,6 +1944,7 @@ class ChainedSchema(Schema):
             ),
             exclude_global=exclude_global,
             exclude_stdlib=exclude_stdlib,
+            exclude_internal=exclude_internal,
             included_modules=included_modules,
             excluded_modules=excluded_modules,
             included_items=included_items,

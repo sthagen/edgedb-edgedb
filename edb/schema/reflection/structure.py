@@ -26,6 +26,7 @@ import uuid
 from edb.common import adapter
 from edb.common import checked
 from edb.common import enum
+from edb.common import verutils
 
 from edb.edgeql import qltypes
 
@@ -182,6 +183,17 @@ def _classify_object_field(field: s_obj.Field[Any]) -> FieldStorage:
         ptr_kind = 'property'
         ptr_type = 'uuid'
 
+    elif issubclass(ftype, verutils.Version):
+        ptr_kind = 'property'
+        ptr_type = '''
+            tuple<
+                major: std::int64,
+                minor: std::int64,
+                stage: sys::VersionStage,
+                stage_no: std::int64,
+                local: array<std::str>,
+            >
+        '''
     else:
         raise RuntimeError(
             f'no metaschema reflection for field {field.name} of type {ftype}'
@@ -337,6 +349,10 @@ def generate_structure(schema: s_schema.Schema) -> SchemaReflectionParts:
             as_abstract = (
                 reflection is s_obj.ReflectionMethod.REGULAR
                 and not is_simple_wrapper
+                and (
+                    py_cls is s_obj.InternalObject
+                    or not issubclass(py_cls, s_obj.InternalObject)
+                )
             )
 
             schema = _run_ddl(
@@ -566,17 +582,6 @@ def generate_structure(schema: s_schema.Schema) -> SchemaReflectionParts:
 
                 ref_ptr = schema_cls.getptr(
                     schema, sn.UnqualName(refdict.attr))
-            else:
-                schema = _run_ddl(
-                    f'''
-                        ALTER TYPE {rschema_name} {{
-                            ALTER LINK {refdict.attr}
-                            ON TARGET DELETE ALLOW;
-                        }}
-                    ''',
-                    schema=schema,
-                    delta=delta,
-                )
 
             assert isinstance(ref_ptr, s_links.Link)
 

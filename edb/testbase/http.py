@@ -28,7 +28,6 @@ import urllib.request
 import edgedb
 
 from edb.errors import base as base_errors
-from edb.server import cluster
 
 from . import server
 
@@ -51,42 +50,37 @@ class BaseHttpTest:
     # compiler processes and at a high number of parallel test
     # workers this ends up with test consuming too much system resources
     # for no particular speedup.
-    PARALLELISM_GRANULARITY = 'system'
+    PARALLELISM_GRANULARITY = 'suite'
 
     @classmethod
-    def get_port_proto(cls):
+    def get_extension_name(cls):
         raise NotImplementedError
+
+    @classmethod
+    def get_extension_path(cls):
+        return cls.get_extension_name()
 
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
 
-        cls.http_host = '127.0.0.1'
-        cls.http_port = cluster.find_available_port()
+        extpath = cls.get_extension_path()
+
+        cls.http_host, cls.http_port = cls.con.connected_addr()
         dbname = cls.get_database_name()
+        cls.http_addr = \
+            f'http://{cls.http_host}:{cls.http_port}/db/{dbname}/{extpath}'
 
+        extname = cls.get_extension_name()
         cls.loop.run_until_complete(
-            cls.con.execute(
-                f'''
-                    CONFIGURE SYSTEM INSERT Port {{
-                        protocol := "{cls.get_port_proto()}",
-                        database := "{dbname}",
-                        address := "{cls.http_host}",
-                        port := {cls.http_port},
-                        user := "http",
-                        concurrency := 4,
-                    }};
-                '''))
-
-        cls.http_addr = f'http://127.0.0.1:{cls.http_port}'
+            cls.con.execute(f'CREATE EXTENSION {extname};')
+        )
 
     @classmethod
     def tearDownClass(cls):
-        dbname = cls.get_database_name()
+        extname = cls.get_extension_name()
         cls.loop.run_until_complete(
-            cls.con.execute(
-                f'CONFIGURE SYSTEM RESET Port FILTER .database = "{dbname}";',
-            ),
+            cls.con.execute(f'DROP EXTENSION {extname};')
         )
         super().tearDownClass()
 
@@ -119,8 +113,12 @@ class BaseHttpTest:
 class EdgeQLTestCase(BaseHttpTest, server.QueryTestCase):
 
     @classmethod
-    def get_port_proto(cls):
-        return 'edgeql+http'
+    def get_extension_name(cls):
+        return 'edgeql_http'
+
+    @classmethod
+    def get_extension_path(cls):
+        return 'edgeql'
 
     def edgeql_query(self, query, *, use_http_post=True, variables=None):
         req_data = {
@@ -174,8 +172,8 @@ class EdgeQLTestCase(BaseHttpTest, server.QueryTestCase):
 class GraphQLTestCase(BaseHttpTest, server.QueryTestCase):
 
     @classmethod
-    def get_port_proto(cls):
-        return 'graphql+http'
+    def get_extension_name(cls):
+        return 'graphql'
 
     def graphql_query(self, query, *, operation_name=None,
                       use_http_post=True,
@@ -221,9 +219,9 @@ class GraphQLTestCase(BaseHttpTest, server.QueryTestCase):
 
         if 'locations' in err:
             # XXX Fix this when LSP "location" objects are implemented
-            ex._attrs[base_errors.FIELD_LINE] = str(
+            ex._attrs[base_errors.FIELD_LINE_START] = str(
                 err['locations'][0]['line']).encode()
-            ex._attrs[base_errors.FIELD_COLUMN] = str(
+            ex._attrs[base_errors.FIELD_COLUMN_START] = str(
                 err['locations'][0]['column']).encode()
 
         raise ex

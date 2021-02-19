@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import collections
 import re
+import textwrap
 import typing
 
 from edb import errors
@@ -52,19 +53,14 @@ _new_nonterm = sdl_nontem_helper._new_nonterm
 
 
 class DDLStmt(Nonterm):
-    def reduce_CreateDatabaseStmt(self, *kids):
+
+    def reduce_DatabaseStmt(self, *kids):
         self.val = kids[0].val
 
-    def reduce_DropDatabaseStmt(self, *kids):
+    def reduce_RoleStmt(self, *kids):
         self.val = kids[0].val
 
-    def reduce_CreateRoleStmt(self, *kids):
-        self.val = kids[0].val
-
-    def reduce_AlterRoleStmt(self, *kids):
-        self.val = kids[0].val
-
-    def reduce_DropRoleStmt(self, *kids):
+    def reduce_ExtensionPackageStmt(self, *kids):
         self.val = kids[0].val
 
     def reduce_OptWithDDLStmt(self, *kids):
@@ -197,6 +193,9 @@ class InnerDDLStmt(Nonterm):
     def reduce_DropCastStmt(self, *kids):
         self.val = kids[0].val
 
+    def reduce_ExtensionStmt(self, *kids):
+        self.val = kids[0].val
+
 
 class InnerDDLStmtBlock(ListNonterm, element=InnerDDLStmt,
                         separator=Semicolons):
@@ -220,7 +219,7 @@ class UnqualifiedPointerName(Nonterm):
         self.val = kids[0].val
 
 
-class ProductionHelper:
+class ProductionTpl:
     def _passthrough(self, cmd):
         self.val = cmd.val
 
@@ -237,7 +236,7 @@ class ProductionHelper:
         self.val = cmdlist.val
 
 
-def commands_block(parent, *commands, opt=True):
+def commands_block(parent, *commands, opt=True, production_tpl=ProductionTpl):
     if parent is None:
         parent = ''
 
@@ -247,7 +246,7 @@ def commands_block(parent, *commands, opt=True):
     #
     for command in commands:
         clsdict['reduce_{}'.format(command.__name__)] = \
-            ProductionHelper._passthrough
+            production_tpl._passthrough
 
     cmd = _new_nonterm(parent + 'Command', clsdict=clsdict)
 
@@ -260,27 +259,123 @@ def commands_block(parent, *commands, opt=True):
     #   { [ ; ] CommandsList ; }
     clsdict = collections.OrderedDict()
     clsdict['reduce_LBRACE_' + cmdlist.__name__ + '_OptSemicolons_RBRACE'] = \
-        ProductionHelper._block
+        production_tpl._block
     clsdict['reduce_LBRACE_Semicolons_' + cmdlist.__name__ +
             '_OptSemicolons_RBRACE'] = \
-        ProductionHelper._block2
+        production_tpl._block2
     clsdict['reduce_LBRACE_OptSemicolons_RBRACE'] = \
-        ProductionHelper._empty
+        production_tpl._empty
     if not opt:
         #
         #   | Command
         clsdict['reduce_{}'.format(cmd.__name__)] = \
-            ProductionHelper._singleton_list
-    cmdblock = _new_nonterm(parent + 'CommandsBlock', clsdict=clsdict)
+            production_tpl._singleton_list
+    cmdblock = _new_nonterm(
+        parent + 'CommandsBlock',
+        clsdict=clsdict,
+        clsbases=(Nonterm, production_tpl),
+    )
 
     # OptCommandsBlock := CommandsBlock | <e>
     clsdict = collections.OrderedDict()
     clsdict['reduce_{}'.format(cmdblock.__name__)] = \
-        ProductionHelper._passthrough
-    clsdict['reduce_empty'] = ProductionHelper._empty
+        production_tpl._passthrough
+    clsdict['reduce_empty'] = production_tpl._empty
 
     if opt:
-        _new_nonterm('Opt' + parent + 'CommandsBlock', clsdict=clsdict)
+        _new_nonterm(
+            'Opt' + parent + 'CommandsBlock',
+            clsdict=clsdict,
+            clsbases=(Nonterm, production_tpl),
+        )
+
+
+class NestedQLBlockStmt(Nonterm):
+
+    def reduce_Stmt(self, *kids):
+        self.val = kids[0].val
+
+    def reduce_InnerDDLStmt(self, *kids):
+        self.val = kids[0].val
+
+    def reduce_SetFieldStmt(self, *kids):
+        self.val = kids[0].val
+
+
+class NestedQLBlock(ProductionTpl):
+
+    @property
+    def allowed_fields(self) -> typing.FrozenSet[str]:
+        raise NotImplementedError
+
+    @property
+    def result(self) -> typing.Any:
+        raise NotImplementedError
+
+    def _process_body(self, body):
+        fields = []
+        stmts = []
+        for stmt in body:
+            if isinstance(stmt, qlast.SetField):
+                if stmt.name in self.allowed_fields:
+                    fields.append(stmt)
+                else:
+                    raise errors.InvalidSyntaxError(
+                        f'unexpected field: {stmt.name!r}',
+                        context=stmt.context,
+                    )
+            else:
+                stmts.append(stmt)
+
+        return fields, stmts
+
+    def _get_text(self, body):
+        # XXX: Workaround the rust lexer issue of returning
+        # byte token offsets instead of character offsets.
+        src_start = body.context.start
+        src_end = body.context.end
+        buffer = body.context.buffer.encode('utf-8')
+        text = buffer[src_start:src_end].decode('utf-8').strip().strip('}{\n')
+        return textwrap.dedent(text).strip('\n')
+
+    def _block(self, lbrace, cmdlist, sc2, rbrace):
+        # LBRACE NestedQLBlock OptSemicolons RBRACE
+        fields, stmts = self._process_body(cmdlist.val)
+        body = qlast.NestedQLBlock(commands=stmts)
+        contexts = [lbrace.context, cmdlist.context]
+        if sc2.context is not None:
+            contexts.append(sc2.context)
+        contexts.append(rbrace.context)
+        body.context = pctx.merge_context(contexts)
+        body.text = self._get_text(body)
+        self.val = self.result(body=body, fields=fields)
+
+    def _block2(self, lbrace, sc1, cmdlist, sc2, rbrace):
+        # LBRACE Semicolons NestedQLBlock OptSemicolons RBRACE
+        fields, stmts = self._process_body(cmdlist.val)
+        body = qlast.NestedQLBlock(commands=stmts)
+        body.context = pctx.merge_context(
+            [sc1.context, cmdlist.context, sc2.context])
+        body.text = self._get_text(body)
+        self.val = self.result(body=body, fields=fields)
+
+    def _empty(self, *kids):
+        # LBRACE OptSemicolons RBRACE | <e>
+        self.val = []
+        body = qlast.NestedQLBlock(commands=[])
+        if len(kids) > 1:
+            body.context = kids[1].context
+        if body.context is None:
+            body.context = pctx.empty_context()
+        body.text = self._get_text(body)
+        self.val = self.result(body=body, fields=[])
+
+
+def nested_ql_block(parent, *commands, opt=True, production_tpl):
+    if not commands:
+        commands = (NestedQLBlockStmt,)
+
+    commands_block(parent, *commands, opt=opt, production_tpl=production_tpl)
 
 
 class UsingStmt(Nonterm):
@@ -495,10 +590,9 @@ class AlterOwnedStmt(Nonterm):
         )
 
 
-commands_block(
-    'CreateDatabase',
-    SetFieldStmt,
-)
+#
+# DATABASE
+#
 
 
 class DatabaseName(Nonterm):
@@ -530,9 +624,26 @@ class DatabaseName(Nonterm):
         )
 
 
+class DatabaseStmt(Nonterm):
+
+    def reduce_CreateDatabaseStmt(self, *kids):
+        self.val = kids[0].val
+
+    def reduce_DropDatabaseStmt(self, *kids):
+        self.val = kids[0].val
+
+
 #
 # CREATE DATABASE
 #
+
+
+commands_block(
+    'CreateDatabase',
+    SetFieldStmt,
+)
+
+
 class CreateDatabaseStmt(Nonterm):
     def reduce_CREATE_DATABASE_regular(self, *kids):
         """%reduce CREATE DATABASE DatabaseName OptCreateDatabaseCommandsBlock
@@ -557,6 +668,140 @@ class CreateDatabaseStmt(Nonterm):
 class DropDatabaseStmt(Nonterm):
     def reduce_DROP_DATABASE_DatabaseName(self, *kids):
         self.val = qlast.DropDatabase(name=kids[2].val)
+
+
+#
+# EXTENSION PACKAGE
+#
+
+class ExtensionPackageStmt(Nonterm):
+
+    def reduce_CreateExtensionPackageStmt(self, *kids):
+        self.val = kids[0].val
+
+    def reduce_DropExtensionPackageStmt(self, *kids):
+        self.val = kids[0].val
+
+
+#
+# CREATE EXTENSION PACKAGE
+#
+class ExtensionPackageBody(typing.NamedTuple):
+
+    body: qlast.NestedQLBlock
+    fields: typing.List[qlast.SetField]
+
+
+class CreateExtensionPackageBodyBlock(NestedQLBlock):
+
+    @property
+    def allowed_fields(self) -> typing.FrozenSet[str]:
+        return frozenset({'internal'})
+
+    @property
+    def result(self) -> typing.Any:
+        return ExtensionPackageBody
+
+
+nested_ql_block(
+    'CreateExtensionPackage',
+    production_tpl=CreateExtensionPackageBodyBlock,
+)
+
+
+class CreateExtensionPackageStmt(Nonterm):
+
+    def reduce_CreateExtensionPackageStmt(self, *kids):
+        r"""%reduce CREATE EXTENSIONPACKAGE ShortNodeName
+                    ExtensionVersion
+                    OptCreateExtensionPackageCommandsBlock
+        """
+        self.val = qlast.CreateExtensionPackage(
+            name=kids[2].val,
+            version=kids[3].val,
+            body=kids[4].val.body,
+            commands=kids[4].val.fields,
+        )
+
+
+#
+# DROP EXTENSION PACKAGE
+#
+class DropExtensionPackageStmt(Nonterm):
+
+    def reduce_DropExtensionPackageStmt(self, *kids):
+        r"""%reduce DROP EXTENSIONPACKAGE ShortNodeName ExtensionVersion"""
+        self.val = qlast.DropExtensionPackage(
+            name=kids[2].val,
+            version=kids[3].val,
+        )
+
+
+#
+# EXTENSIONS
+#
+
+
+class ExtensionStmt(Nonterm):
+
+    def reduce_CreateExtensionStmt(self, *kids):
+        self.val = kids[0].val
+
+    def reduce_DropExtensionStmt(self, *kids):
+        self.val = kids[0].val
+
+
+#
+# CREATE EXTENSION
+#
+
+
+commands_block(
+    'CreateExtension',
+    SetFieldStmt,
+)
+
+
+class CreateExtensionStmt(Nonterm):
+
+    def reduce_CreateExtensionStmt(self, *kids):
+        r"""%reduce CREATE EXTENSION ShortNodeName OptExtensionVersion
+                    OptCreateExtensionCommandsBlock
+        """
+        self.val = qlast.CreateExtension(
+            name=kids[2].val,
+            version=kids[3].val,
+            commands=kids[4].val,
+        )
+
+
+#
+# DROP EXTENSION
+#
+class DropExtensionStmt(Nonterm):
+
+    def reduce_DropExtensionPackageStmt(self, *kids):
+        r"""%reduce DROP EXTENSION ShortNodeName OptExtensionVersion"""
+        self.val = qlast.DropExtension(
+            name=kids[2].val,
+            version=kids[3].val,
+        )
+
+
+#
+# ROLE
+#
+
+class RoleStmt(Nonterm):
+
+    def reduce_CreateRoleStmt(self, *kids):
+        self.val = kids[0].val
+
+    def reduce_AlterRoleStmt(self, *kids):
+        self.val = kids[0].val
+
+    def reduce_DropRoleStmt(self, *kids):
+        self.val = kids[0].val
 
 
 #
@@ -2281,88 +2526,27 @@ class MigrationStmt(Nonterm):
         self.val = kids[0].val
 
 
-class CreateMigrationBlockStmt(Nonterm):
-
-    def reduce_Stmt(self, *kids):
-        self.val = kids[0].val
-
-    def reduce_InnerDDLStmt(self, *kids):
-        self.val = kids[0].val
-
-    def reduce_SetFieldStmt(self, *kids):
-        self.val = kids[0].val
-
-
-class CreateMigrationBody(
-    ListNonterm,
-    element=CreateMigrationBlockStmt,
-    separator=Semicolons,
-):
-    pass
-
-
 class MigrationBody(typing.NamedTuple):
 
-    body: qlast.MigrationBody
-    message: typing.Optional[str]
+    body: qlast.NestedQLBlock
+    fields: typing.List[qlast.SetField]
 
 
-class OptCreateMigrationBody(Nonterm):
+class CreateMigrationBodyBlock(NestedQLBlock):
 
-    def _process_body(self, body):
-        message = None
-        stmts = []
-        for stmt in body:
-            if isinstance(stmt, qlast.SetField):
-                if stmt.name == 'message':
-                    message = stmt.value
-                else:
-                    raise errors.InvalidSyntaxError(
-                        f'unexpected field: {stmt.name!r}',
-                        context=stmt.context,
-                    )
-            else:
-                stmts.append(stmt)
+    @property
+    def allowed_fields(self) -> typing.FrozenSet[str]:
+        return frozenset({'message'})
 
-        return message, stmts
+    @property
+    def result(self) -> typing.Any:
+        return MigrationBody
 
-    def reduce_1(self, *kids):
-        """%reduce
-            LBRACE CreateMigrationBody OptSemicolons RBRACE
-        """
-        message, stmts = self._process_body(kids[1].val)
-        body = qlast.MigrationBody(commands=tuple(stmts))
-        contexts = [kids[1].context]
-        if kids[2].context is not None:
-            contexts.append(kids[2].context)
-        body.context = pctx.merge_context(contexts)
-        self.val = MigrationBody(body=body, message=message)
 
-    def reduce_2(self, *kids):
-        """%reduce
-            LBRACE Semicolons CreateMigrationBody OptSemicolons RBRACE
-        """
-        message, stmts = self._process_body(kids[2].val)
-        body = qlast.MigrationBody(commands=tuple(stmts))
-        body.context = pctx.merge_context(
-            [kids[1].context, kids[2].context, kids[3].context])
-        self.val = MigrationBody(body=body, message=message)
-
-    def reduce_3(self, *kids):
-        """%reduce
-            LBRACE OptSemicolons RBRACE
-        """
-        self.val = []
-        body = qlast.MigrationBody(commands=tuple())
-        body.context = kids[1].context
-        if body.context is None:
-            body.context = pctx.empty_context()
-        self.val = MigrationBody(body=body, message=None)
-
-    def reduce_empty(self):
-        body = qlast.MigrationBody(commands=tuple())
-        body.context = pctx.empty_context()
-        self.val = MigrationBody(body=body, message=None)
+nested_ql_block(
+    'CreateMigration',
+    production_tpl=CreateMigrationBodyBlock,
+)
 
 
 class MigrationNameAndParent(typing.NamedTuple):
@@ -2396,24 +2580,23 @@ class CreateMigrationStmt(Nonterm):
 
     def reduce_CreateMigration(self, *kids):
         r"""%reduce
-            CREATE MIGRATION OptMigrationNameParentName OptCreateMigrationBody
+            CREATE MIGRATION OptMigrationNameParentName
+            OptCreateMigrationCommandsBlock
         """
         self.val = qlast.CreateMigration(
             name=kids[2].val.name,
             parent=kids[2].val.parent,
-            message=kids[3].val.message,
             body=kids[3].val.body,
         )
 
     def reduce_CreateAppliedMigration(self, *kids):
         r"""%reduce
-            CREATE APPLIED MIGRATION
-            OptMigrationNameParentName OptCreateMigrationBody
+            CREATE APPLIED MIGRATION OptMigrationNameParentName
+            OptCreateMigrationCommandsBlock
         """
         self.val = qlast.CreateMigration(
             name=kids[3].val.name,
             parent=kids[3].val.parent,
-            message=kids[4].val.message,
             body=kids[4].val.body,
             metadata_only=True,
         )
