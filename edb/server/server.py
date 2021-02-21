@@ -295,6 +295,9 @@ class Server:
         return self._dbindex.new_view(
             dbname, user=user, query_cache=query_cache)
 
+    def remove_dbview(self, dbview):
+        return self._dbindex.remove_view(dbview)
+
     def get_global_schema(self):
         return self._dbindex.get_global_schema()
 
@@ -667,6 +670,12 @@ class Server:
             return result[0][0] == b't'
         finally:
             self._release_sys_pgcon()
+
+    async def _cancel_and_discard_pgcon(self, pgcon, dbname) -> None:
+        try:
+            await self._cancel_pgcon_operation(pgcon)
+        finally:
+            self.release_pgcon(dbname, pgcon, discard=True)
 
     async def _signal_sysevent(self, event, **kwargs):
         pgcon = await self._acquire_sys_pgcon()
