@@ -4707,6 +4707,56 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         """)
         await self.migrate(r"")
 
+    async def test_edgeql_migration_index_01(self):
+        await self.migrate('''
+            type Message {
+                required property text -> str;
+                index on (.text);
+            };
+        ''')
+
+        await self.migrate('''
+            type Message {
+                required property text -> str;
+                required property ts -> datetime;
+                index on (.text);
+                index on (.ts);
+            };
+        ''')
+
+        await self.assert_query_result(
+            r"""
+                SELECT count((SELECT schema::ObjectType
+                              FILTER .name = 'test::Message').indexes)
+            """,
+            [2],
+        )
+
+    async def test_edgeql_migration_rebase_01(self):
+        await self.migrate(r"""
+            abstract type C;
+            abstract type P {
+                property p -> str;
+                property p2 -> str;
+                index on (.p);
+            };
+            type Foo extending C {
+                property foo -> str;
+            }
+        """)
+
+        await self.migrate(r"""
+            abstract type C;
+            abstract type P {
+                property p -> str;
+                property p2 -> str;
+                index on (.p);
+            };
+            type Foo extending C, P {
+                property foo -> str;
+            }
+        """)
+
     async def test_edgeql_migration_eq_function_01(self):
         await self.migrate(r"""
             function hello01(a: int64) -> str

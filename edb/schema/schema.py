@@ -878,6 +878,11 @@ class FlatSchema(Schema):
                 f'{sclass.__name__} {name!r} is already present '
                 f'in the schema {self!r}')
 
+        if id in self._id_to_data:
+            raise errors.SchemaError(
+                f'{sclass.__name__} ({str(id)!r}) is already present '
+                f'in the schema {self!r}')
+
         object_ref_fields = sclass.get_object_reference_fields()
         if not object_ref_fields:
             refs_to = None
@@ -1687,12 +1692,12 @@ class ChainedSchema(Schema):
         *,
         module_aliases: Optional[Mapping[Optional[str], str]] = None,
     ) -> Tuple[s_func.Function, ...]:
-        try:
-            return self._top_schema.get_functions(
-                name, module_aliases=module_aliases)
-        except errors.InvalidReferenceError:
-            return self._base_schema.get_functions(
+        objs = self._top_schema.get_functions(
+            name, module_aliases=module_aliases, default=())
+        if not objs:
+            objs = self._base_schema.get_functions(
                 name, default=default, module_aliases=module_aliases)
+        return objs
 
     def get_operators(
         self,
@@ -1703,12 +1708,12 @@ class ChainedSchema(Schema):
         *,
         module_aliases: Optional[Mapping[Optional[str], str]] = None,
     ) -> Tuple[s_oper.Operator, ...]:
-        try:
-            return self._top_schema.get_operators(
-                name, module_aliases=module_aliases)
-        except errors.InvalidReferenceError:
-            return self._base_schema.get_operators(
+        objs = self._top_schema.get_operators(
+            name, module_aliases=module_aliases, default=())
+        if not objs:
+            objs = self._base_schema.get_operators(
                 name, default=default, module_aliases=module_aliases)
+        return objs
 
     def get_casts_to_type(
         self,
@@ -1870,11 +1875,11 @@ class ChainedSchema(Schema):
             return self._global_schema.get_global(  # type: ignore
                 objtype, name, default=default)
         else:
-            try:
-                return self._top_schema.get_global(objtype, name)
-            except errors.InvalidReferenceError:
-                return self._base_schema.get_global(
+            obj = self._top_schema.get_global(objtype, name, default=None)
+            if obj is None:
+                obj = self._base_schema.get_global(
                     objtype, name, default=default)
+            return obj
 
     def get_generic(  # NoQA: F811
         self,
