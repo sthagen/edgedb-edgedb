@@ -532,7 +532,10 @@ def _trace_op(
     elif isinstance(op, sd.DeleteObject):
         tag = 'delete'
     elif isinstance(op, referencing.AlterOwned):
-        tag = 'alterowned'
+        if op.get_attribute_value('owned'):
+            tag = 'setowned'
+        else:
+            tag = 'dropowned'
     elif isinstance(op, (sd.AlterObjectProperty, sd.AlterSpecialObjectField)):
         tag = 'field'
     else:
@@ -554,7 +557,7 @@ def _trace_op(
             ):
                 # If the referrer is enclosing the object
                 # (i.e. the reference is a refdict reference),
-                # we sort the referrer operation first.
+                # we sort the enclosed operation first.
                 ref_item = get_deps(('delete', ref_name_str))
                 ref_item.deps.add((tag, str(op.classname)))
 
@@ -592,6 +595,15 @@ def _trace_op(
                 deps.add(('delete', ref_name_str))
                 deps.add(('rebase', ref_name_str))
 
+                # The deletion of any implicit ancestors needs to come after
+                # the deletion of any referrers also.
+                if isinstance(obj, referencing.ReferencedInheritingObject):
+                    for ancestor in obj.get_implicit_ancestors(old_schema):
+                        ancestor_name = ancestor.get_name(old_schema)
+
+                        anc_item = get_deps(('delete', str(ancestor_name)))
+                        anc_item.deps.add(('delete', ref_name_str))
+
         if isinstance(obj, referencing.ReferencedObject):
             referrer = obj.get_referrer(old_schema)
             if referrer is not None:
@@ -600,17 +612,19 @@ def _trace_op(
                 if referrer_name in renames_r:
                     referrer_name = renames_r[referrer_name]
 
+                # A drop needs to come *before* drop owned on the referrer
+                # which will do it itself.
+                if tag == 'delete':
+                    ref_item = get_deps(('dropowned', str(referrer_name)))
+                    ref_item.deps.add(('delete', str(op.classname)))
+
                 # For SET OWNED, we need any rebase of the enclosing
                 # object to come *after*, because otherwise obj could
                 # get dropped before the SET OWNED takes effect.
                 # For DROP OWNED and DROP we want it after the rebase.
-                is_set_owned = (
-                    isinstance(op, referencing.AlterOwned)
-                    and op.get_attribute_value('owned')
-                )
-                if is_set_owned:
+                if tag == 'setowned':
                     ref_item = get_deps(('rebase', str(referrer_name)))
-                    ref_item.deps.add(('alterowned', str(op.classname)))
+                    ref_item.deps.add(('setowned', str(op.classname)))
                 else:
                     deps.add(('rebase', str(referrer_name)))
 
@@ -624,14 +638,15 @@ def _trace_op(
                     for ancestor in obj.get_implicit_ancestors(old_schema):
                         ancestor_name = ancestor.get_name(old_schema)
                         implicit_ancestors.append(ancestor_name)
-                        anc_item = get_deps(('delete', str(ancestor_name)))
-                        anc_item.deps.add(('alterowned', str(op.classname)))
 
-                        if is_set_owned:
+                        if isinstance(op, referencing.AlterOwned):
+                            anc_item = get_deps(('delete', str(ancestor_name)))
+                            anc_item.deps.add((tag, str(op.classname)))
+
+                        if tag == 'setowned':
                             # SET OWNED must come before ancestor rebases too
                             anc_item = get_deps(('rebase', str(ancestor_name)))
-                            anc_item.deps.add(
-                                ('alterowned', str(op.classname)))
+                            anc_item.deps.add(('setowned', str(op.classname)))
 
         graph_key = str(op.classname)
 

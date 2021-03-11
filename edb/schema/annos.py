@@ -158,10 +158,9 @@ class RenameAnnotation(AnnotationCommand, sd.RenameObject[Annotation]):
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
-        scls: so.Object,
+        scls: Annotation,
     ) -> None:
         super()._canonicalize(schema, context, scls)
-        assert isinstance(scls, Annotation)
 
         # AnnotationValues have names derived from the abstract
         # annotations. We unfortunately need to go update their names.
@@ -330,6 +329,15 @@ class CreateAnnotationValue(
             super()._apply_field_ast(schema, context, node, op)
 
 
+class AlterAnnotationValueOwned(
+    referencing.AlterOwned[AnnotationValue],
+    AnnotationValueCommand,
+    field='owned',
+    referrer_context_class=AnnotationSubjectCommandContext,
+):
+    pass
+
+
 class AlterAnnotationValue(
     AnnotationValueCommand,
     referencing.AlterReferencedInheritingObject[AnnotationValue],
@@ -352,17 +360,18 @@ class AlterAnnotationValue(
         cmd = super()._cmd_tree_from_ast(schema, astnode, context)
         assert isinstance(cmd, AlterAnnotationValue)
 
-        value = qlcompiler.evaluate_ast_to_python_val(
-            astnode.value, schema=schema)
+        if astnode.value is not None:
+            value = qlcompiler.evaluate_ast_to_python_val(
+                astnode.value, schema=schema)
 
-        if not isinstance(value, str):
-            raise ValueError(
-                f'unexpected value type in AnnotationValue: {value!r}')
+            if not isinstance(value, str):
+                raise ValueError(
+                    f'unexpected value type in AnnotationValue: {value!r}')
 
-        cmd.set_attribute_value(
-            'value',
-            value,
-        )
+            cmd.set_attribute_value(
+                'value',
+                value,
+            )
 
         annoname = sn.shortname_from_fullname(cmd.classname)
         anno = utils.ast_objref_to_object_shell(
@@ -382,7 +391,10 @@ class AlterAnnotationValue(
         *,
         parent_node: Optional[qlast.DDLOperation] = None,
     ) -> Optional[qlast.DDLOperation]:
-        if not self.has_attribute_value('value'):
+        if (
+            not self.has_attribute_value('value')
+            and not self.has_attribute_value('owned')
+        ):
             return None
         # Skip AlterObject's _get_ast, because we *don't* want to
         # filter out things without subcommands!

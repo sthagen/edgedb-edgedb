@@ -1373,6 +1373,10 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         # Compare 2 schemas obtained by multiple-step migration to a
         # single-step migration.
 
+        # Always finish up by migrating to an empty schema
+        if migrations[-1].strip():
+            migrations = migrations + ['']
+
         # Generate a base schema with 'test' module already created to
         # avoid having two different instances of 'test' module in
         # different evolution branches.
@@ -1406,10 +1410,13 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
 
             diff = s_ddl.delta_schemas(multi_migration, cur_state)
 
+            note = ('' if i + 1 < len(migration)
+                    else '( migrating to empty schema)')
+
             if list(diff.get_subcommands()):
                 self.fail(
                     f'unexpected difference in schema produced by '
-                    f'incremental migration on step {i + 1}:\n'
+                    f'incremental migration on step {i + 1}{note}:\n'
                     f'{markup.dumps(diff)}\n'
                 )
 
@@ -3125,6 +3132,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 # change a link from a computable to regular
                 multi link foo -> Child;
             }
+        """, r"""
         """])
 
     def test_schema_migrations_equivalence_36(self):
@@ -3546,6 +3554,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 link l1 -> (Type11 | Type2 | TypeS);  # Expand union
                 link l2 := (SELECT .l1);
             };
+        """, r"""
         """])
 
     def test_schema_migrations_equivalence_function_01(self):
@@ -3907,6 +3916,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                     property foo -> str
                 }
             };
+        """, r"""
         """])
 
     def test_schema_migrations_equivalence_linkprops_09(self):
@@ -3963,6 +3973,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                     property foo -> str
                 }
             };
+        """, r"""
         """])
 
     def test_schema_migrations_equivalence_linkprops_11(self):
@@ -4022,6 +4033,32 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             type Owner extending Base;
 
             type Renter extending Base;
+        """])
+
+    def test_schema_migrations_equivalence_linkprops_13(self):
+        self._assert_migration_equivalence([r"""
+            type Child;
+
+            type Base {
+                link child -> Child
+            };
+
+            type Derived extending Base {
+                overloaded link child -> Child {
+                    property foo -> str
+                }
+            };
+        """, r"""
+            type Child;
+
+            type Base {
+                link child -> Child {
+                    property foo -> str
+                }
+            };
+
+            type Derived extending Base;
+        """, r"""
         """])
 
     def test_schema_migrations_equivalence_annotation_01(self):
@@ -4150,6 +4187,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                     annotation my_anno := 'Derived my_anno 05';
                 }
             }
+        """, r"""
         """])
 
     def test_schema_migrations_equivalence_annotation_06(self):
@@ -4182,6 +4220,35 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                     annotation my_anno := 'Derived my_anno 06';
                 }
             }
+        """, r"""
+        """])
+
+    def test_schema_migrations_equivalence_annotation_07(self):
+        self._assert_migration_equivalence([r"""
+            abstract inheritable annotation my_anno;
+
+            type Base {
+                link my_link -> Object {
+                    annotation my_anno := 'Base my_anno 06';
+                }
+            }
+
+            type Derived extending Base {
+                overloaded link my_link -> Object {
+                    annotation my_anno := 'Derived my_anno 06';
+                }
+            }
+        """, r"""
+            abstract inheritable annotation my_anno;
+
+            type Base {
+                link my_link -> Object {
+                    annotation my_anno := 'Base my_anno 06';
+                }
+            }
+
+            type Derived extending Base;
+        """, r"""
         """])
 
     def test_schema_migrations_equivalence_index_01(self):
@@ -4363,6 +4430,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                     constraint min_len_value(5);
                 }
             }
+        """, r"""
         """])
 
     # NOTE: array<str>, array<int16>, array<json> already exist in std
@@ -4578,6 +4646,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 bar := (Base.name, Base.number, [Base.foo])
             };
             alias CollAlias := (Base.name, Base.number, [Base.foo]);
+        """, r"""
         """])
 
     def test_schema_migrations_equivalence_collections_16(self):
@@ -4804,6 +4873,22 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                         d: tuple<array<MyScalar2Renamed>>,
                     >;
             };
+        """, r"""
+        """])
+
+    def test_schema_migrations_equivalence_collections_27(self):
+        self._assert_migration_equivalence([r"""
+        """, r"""
+            scalar type MyScalar2Renamed extending int64;
+
+            type User {
+                required property tup ->
+                    tuple<
+                        c: array<MyScalar2Renamed>,
+                        d: array<MyScalar2Renamed>,
+                    >;
+            };
+        """, r"""
         """])
 
     def test_schema_migrations_equivalence_rename_refs_01(self):
@@ -5360,6 +5445,35 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             scalar type foo extending enum<Foo, Bar>;
         """, r"""
             scalar type foo extending enum<Foo, Bar, Baz>;
+        """])
+
+    def test_schema_migrations_drop_depended_on_parent_01(self):
+        self._assert_migration_equivalence([r"""
+            type Person2 {
+                required single property first -> str;
+            }
+
+            type Person2a extending Person2 {
+                constraint exclusive on (__subject__.first);
+            }
+        """, r"""
+        """])
+
+    def test_schema_migrations_drop_depended_on_parent_02(self):
+        self._assert_migration_equivalence([r"""
+            type Person2;
+            type Person2a extending Person2;
+        """, r"""
+        """])
+
+    def test_schema_migrations_drop_depended_on_parent_03(self):
+        self._assert_migration_equivalence([r"""
+            type Person2 {
+                required single property first -> str;
+            };
+            type Person2a extending Person2;
+        """, r"""
+            type Person2a;
         """])
 
 

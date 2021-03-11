@@ -3163,7 +3163,7 @@ class RenameObject(AlterObjectFragment[so.Object_T]):
         self,
         schema: s_schema.Schema,
         context: CommandContext,
-        scls: so.Object,
+        scls: so.Object_T,
     ) -> None:
         mcls = self.get_schema_metaclass()
 
@@ -3331,11 +3331,6 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
     #: in the schema.
     if_unused = struct.Field(bool, default=False)
 
-    #: Potential references to this object that we know are being
-    #: deleted, which we use to resolve if_unused.
-    expiring_refs = struct.Field(AbstractSet[so.Object],
-                                 default=frozenset())
-
     def get_verb(self) -> str:
         return 'drop'
 
@@ -3370,10 +3365,10 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         self,
         schema: s_schema.Schema,
         context: CommandContext,
-        scls: so.Object,
-    ) -> Sequence[Command]:
+        scls: so.Object_T,
+    ) -> List[Command]:
         mcls = self.get_schema_metaclass()
-        commands = []
+        commands: List[Command] = []
 
         for refdict in mcls.get_refdicts():
             deleted_refs = set()
@@ -3432,7 +3427,6 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
             if refs:
                 for ref in refs:
                     if (not context.is_deleting(ref)
-                            and ref not in self.expiring_refs
                             and ref.is_blocking_ref(orig_schema, self.scls)):
                         ref_strs.append(
                             ref.get_verbosename(orig_schema, with_parent=True))
@@ -3461,8 +3455,9 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         # (e.g. source backref in pointers of an object type).
         refs = [
             ref
-            for ref in schema.get_referrers(self.scls) - self.expiring_refs
+            for ref in schema.get_referrers(self.scls)
             if not ref.is_parent_ref(schema, self.scls)
+            and not context.is_deleting(ref)
         ]
 
         return bool(refs)

@@ -257,6 +257,27 @@ class TestExpressions(tb.QueryTestCase):
             [2],
         )
 
+    async def test_edgeql_expr_emptyset_05(self):
+        await self.assert_query_result(
+            r'''SELECT {False, <bool>{}};''',
+            [False],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT {False, {False, <bool>{}}};''',
+            [False, False],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT {<bool>{}, <bool>{}};''',
+            [],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT {False, {<bool>{}, <bool>{}}};''',
+            [False],
+        )
+
     async def test_edgeql_expr_idempotent_01(self):
         await self.assert_query_result(
             r"""
@@ -2126,7 +2147,6 @@ class TestExpressions(tb.QueryTestCase):
             [True]
         )
 
-    @test.xfail('fails due to incorrect unnesting of tuples in rhs')
     async def test_edgeql_expr_valid_collection_15(self):
         await self.assert_query_result(
             r'''
@@ -2138,7 +2158,6 @@ class TestExpressions(tb.QueryTestCase):
             [True]
         )
 
-    @test.xfail('fails due to incorrect unnesting of tuples in rhs')
     async def test_edgeql_expr_valid_collection_16(self):
         await self.assert_query_result(
             r'''
@@ -4174,6 +4193,27 @@ aa \
         self.assertGreater(
             len(everything), len(distinct),
             'DISTINCT len(ObjectType.name) failed to filter out dupplicates')
+
+    async def test_edgeql_expr_setop_12(self):
+        await self.assert_query_result(
+            r'''SELECT DISTINCT {(), ()};''',
+            [[]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT DISTINCT (SELECT ({1,2,3}, ()) FILTER .0 > 1).1;''',
+            [[]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT DISTINCT (SELECT ({1,2,3}, ()) FILTER .0 > 3).1;''',
+            [],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT DISTINCT {(1,(2,3)), (1,(2,3))};''',
+            [[1, [2, 3]]],
+        )
 
     async def test_edgeql_expr_cardinality_01(self):
         with self.assertRaisesRegex(

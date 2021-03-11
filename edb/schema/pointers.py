@@ -1791,20 +1791,8 @@ class SetPointerType(
             )
 
             if orig_target is not None:
-                if isinstance(orig_target, s_types.Collection):
+                if cleanup_op := orig_target.as_type_delete_if_dead(schema):
                     parent_op = self.get_parent_op(context)
-                    cleanup_op = orig_target.as_colltype_delete_delta(
-                        schema, expiring_refs={scls})
-                    parent_op.add(cleanup_op)
-                    schema = cleanup_op.apply(schema, context)
-                elif orig_target.is_compound_type(schema):
-                    parent_op = self.get_parent_op(context)
-                    cleanup_op = orig_target.init_delta_command(
-                        schema,
-                        sd.DeleteObject,
-                        if_unused=True,
-                        expiring_refs={scls},
-                    )
                     parent_op.add(cleanup_op)
                     schema = cleanup_op.apply(schema, context)
 
