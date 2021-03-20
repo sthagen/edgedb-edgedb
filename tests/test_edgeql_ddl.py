@@ -1229,6 +1229,27 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             };
         """)
 
+    async def test_edgeql_ddl_sequence_01(self):
+        await self.con.execute("""
+            SET MODULE test;
+            CREATE TYPE Foo {
+                CREATE REQUIRED PROPERTY index -> std::int64;
+            };
+        """)
+
+        await self.con.execute("""
+            CREATE SCALAR TYPE ctr EXTENDING std::sequence;
+            ALTER TYPE Foo {
+                ALTER PROPERTY index {
+                    SET TYPE ctr;
+                };
+            };
+        """)
+
+        await self.con.execute("""
+            INSERT Foo;
+        """)
+
     async def test_edgeql_ddl_abstract_link_01(self):
         await self.con.execute("""
             CREATE ABSTRACT LINK test::test_link;
@@ -10672,6 +10693,56 @@ type test::Foo {
             DELETE Tgt FILTER .name = "bar";
             DELETE Bar;
             DELETE Tgt;
+        """)
+
+    async def test_edgeql_ddl_dupe_link_storage_01(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+
+            CREATE TYPE Foo {
+                CREATE PROPERTY name -> str;
+            };
+            CREATE TYPE Bar {
+                CREATE PROPERTY name -> str;
+                CREATE LINK foo -> Foo;
+                CREATE PROPERTY x -> int64;
+            };
+            CREATE TYPE Baz {
+                CREATE PROPERTY name -> str;
+                CREATE MULTI LINK foo -> Foo;
+                CREATE MULTI PROPERTY x -> int64
+            };
+            INSERT Foo { name := "foo" };
+            INSERT Bar { name := "bar", foo := (SELECT Foo LIMIT 1), x := 1 };
+            INSERT Baz { name := "baz", foo := (SELECT Foo), x := {2, 3} };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT Foo {bars := .<foo[IS Bar] {name}};
+            """,
+            [{"bars": [{"name": "bar"}]}],
+        )
+
+        await self.assert_query_result(
+            r"""
+                SELECT (Bar UNION Baz).foo { name };
+            """,
+            [{"name": "foo"}]
+        )
+
+        await self.assert_query_result(
+            r"""
+                WITH W := (Bar UNION Baz)
+                SELECT _ := (W { name }, W.foo) ORDER BY _.0.name;
+            """,
+            [
+                [{"name": "bar"}, {}], [{"name": "baz"}, {}]
+            ],
+        )
+
+        await self.con.execute(r"""
+            WITH W := (Bar UNION Baz), SELECT (W, W.foo.id);
         """)
 
 

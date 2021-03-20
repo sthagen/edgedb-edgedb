@@ -100,6 +100,11 @@ def is_builtin_scalar(schema, scalar):
     return scalar.id in base_type_name_map
 
 
+def type_has_stable_oid(typ):
+    pg_type = base_type_name_map.get(typ.id)
+    return pg_type is not None and len(pg_type) == 1
+
+
 def get_scalar_base(schema, scalar) -> Tuple[str, ...]:
     base = base_type_name_map.get(scalar.id)
     if base is not None:
@@ -384,16 +389,51 @@ def get_pointer_storage_info(
 
 class PointerStorageInfo(NamedTuple):
 
-    table_name: Tuple[str, str]
+    table_name: Optional[Tuple[str, str]]
     table_type: str
     column_name: str
     column_type: Tuple[str, str]
 
 
-@functools.lru_cache()
+@overload
 def get_ptrref_storage_info(
-        ptrref: irast.PointerRef, *,
-        source=None, resolve_type=True, link_bias=False):
+    ptrref: irast.BasePointerRef, *,
+    resolve_type: bool=...,
+    link_bias: Literal[False]=False,
+    allow_missing: Literal[False]=False,
+) -> PointerStorageInfo:
+    ...
+
+
+@overload
+def get_ptrref_storage_info(  # NoQA: F811
+    ptrref: irast.BasePointerRef, *,
+    resolve_type: bool=...,
+    link_bias: bool=...,
+    allow_missing: bool=...,
+) -> Optional[PointerStorageInfo]:
+    ...
+
+
+def get_ptrref_storage_info(  # NoQA: F811
+        ptrref: irast.BasePointerRef, *,
+        resolve_type=True, link_bias=False,
+        allow_missing=False) -> Optional[PointerStorageInfo]:
+    # We wrap the real version because of bad mypy interactions
+    # with lru_cache.
+    return _get_ptrref_storage_info(
+        ptrref,
+        resolve_type=resolve_type,
+        link_bias=link_bias,
+        allow_missing=allow_missing,
+    )
+
+
+@functools.lru_cache()
+def _get_ptrref_storage_info(
+        ptrref: irast.BasePointerRef, *,
+        resolve_type=True, link_bias=False,
+        allow_missing=False) -> Optional[PointerStorageInfo]:
 
     if ptrref.material_ptr:
         ptrref = ptrref.material_ptr
@@ -407,13 +447,12 @@ def get_ptrref_storage_info(
 
     is_lprop = ptrref.source_ptr is not None
 
-    if source is None:
-        if is_lprop:
-            source = ptrref.source_ptr
-        else:
-            source = ptrref.out_source
+    if is_lprop:
+        source = ptrref.source_ptr
+    else:
+        source = ptrref.out_source
 
-        target = ptrref.out_target
+    target = ptrref.out_target
 
     if is_lprop and str(ptrref.std_parent_name) == 'std::target':
         # Normalize link@target to link
@@ -426,7 +465,8 @@ def get_ptrref_storage_info(
         col_name = ptrref.shortname.name
 
     elif is_lprop:
-        table = common.get_pointer_backend_name(source.id, source.name.module)
+        table = common.get_pointer_backend_name(
+            source.id, source.name.module, catenate=False)
         table_type = 'link'
         if ptrref.shortname.name == 'source':
             col_name = 'source'
@@ -441,7 +481,7 @@ def get_ptrref_storage_info(
 
         elif _storable_in_source(ptrref) and not link_bias:
             table = common.get_objtype_backend_name(
-                source.id, source.name_hint.module)
+                source.id, source.name_hint.module, catenate=False)
             ptrname = ptrref.shortname.name
             if ptrname.startswith('__') or ptrname == 'id':
                 col_name = ptrname
@@ -451,11 +491,11 @@ def get_ptrref_storage_info(
 
         elif _storable_in_pointer(ptrref):
             table = common.get_pointer_backend_name(
-                ptrref.id, ptrref.name.module)
+                ptrref.id, ptrref.name.module, catenate=False)
             col_name = 'target'
             table_type = 'link'
 
-        elif not link_bias:
+        elif not link_bias and not allow_missing:
             raise RuntimeError(
                 f'cannot determine backend storage parameters for the '
                 f'{ptrref.name} pointer: unexpected characteristics')
