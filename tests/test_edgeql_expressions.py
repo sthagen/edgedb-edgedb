@@ -2170,6 +2170,26 @@ class TestExpressions(tb.QueryTestCase):
             [True]
         )
 
+    async def test_edgeql_expr_valid_minmax_01(self):
+        for val in get_test_values():
+            for fn in ['min', 'max']:
+                query = f"""SELECT {fn}({val}) = {val};"""
+                await self.assert_query_result(query, {True})
+
+    async def test_edgeql_expr_valid_minmax_02(self):
+        for val in get_test_values():
+            for fn in ['min', 'max']:
+                # same as the previous test, but for arrays
+                query = f"""SELECT {fn}([{val}]) = [{val}];"""
+                await self.assert_query_result(query, {True})
+
+    async def test_edgeql_expr_valid_minmax_03(self):
+        for val in get_test_values():
+            for fn in ['min', 'max']:
+                # same as the previous test, but for tuples
+                query = f"""SELECT {fn}(({val},)) = ({val},);"""
+                await self.assert_query_result(query, {True})
+
     async def test_edgeql_expr_bytes_op_01(self):
         await self.assert_query_result(
             r'''
@@ -4704,3 +4724,30 @@ aa \
             await self.con.query("""
                 SELECT Object ?? '';
             """)
+
+    async def test_edgeql_expr_static_eval_casts_01(self):
+        # The static evaluator produced some really silly results for
+        # these at one point.
+
+        await self.assert_query_result(
+            r'''
+                WITH x := {1, 2}, SELECT ("wtf" ++ <str>x);
+            ''',
+            ["wtf1", "wtf2"],
+            sort=True,
+        )
+
+        await self.assert_query_result(
+            r'''
+                FOR x in {1, 2} UNION (SELECT ("wtf" ++ <str>x));
+            ''',
+            ["wtf1", "wtf2"],
+            sort=True,
+        )
+
+        await self.assert_query_result(
+            r'''
+                WITH x := <int64>{}, SELECT ("wtf" ++ <str>x);
+            ''',
+            [],
+        )
