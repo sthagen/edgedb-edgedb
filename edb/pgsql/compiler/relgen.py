@@ -973,6 +973,7 @@ def process_set_as_path(
 
     source_rptr = ir_source.rptr
     if (irtyputils.is_id_ptrref(ptrref) and source_rptr is not None
+            and isinstance(source_rptr.ptrref, irast.PointerRef)
             and not irtyputils.is_inbound_ptrref(source_rptr.ptrref)
             and not irtyputils.is_computable_ptrref(source_rptr.ptrref)
             and not irutils.is_type_intersection_reference(ir_set)):
@@ -2523,12 +2524,11 @@ def process_set_as_agg_expr(
     expr = ir_set.expr
     assert isinstance(expr, irast.FunctionCall)
 
-    # If the func has an initial val, we need to create a wrapper to put
-    # the coalesces we insert in
+    # If the func has an initial val, we need to do the interesting
+    # work in subrels and provide a wrapper to put the coalesces in
     wrapper = None
     if expr.func_initial_value is not None:
-        with ctx.subrel() as subctx:
-            wrapper = subctx.rel
+        wrapper = stmt
 
     # When in a serialization context, we need to compute both a value
     # version and a serialized version of the aggregate function call,
@@ -2554,9 +2554,6 @@ def process_set_as_agg_expr(
             process_set_as_agg_expr_inner(
                 ir_set, xctx.rel, aspect='serialized', wrapper=wrapper,
                 ctx=xctx)
-
-    if wrapper:
-        stmt = wrapper
 
     return new_stmt_set_rvar(ir_set, stmt, ctx=ctx)
 
