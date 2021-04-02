@@ -36,8 +36,10 @@ from edb.common import parsing
 from edb.edgeql import qltypes
 
 from edb.schema import name as sn
+from edb.schema import types as s_types
 from edb.schema import objtypes as s_objtypes
 from edb.schema import pointers as s_pointers
+from edb.schema import constraints as s_constraints
 
 from edb.ir import ast as irast
 from edb.ir import utils as irutils
@@ -932,6 +934,44 @@ def extract_filters(
     return None
 
 
+def get_object_exclusive_constraints(
+    typ: s_types.Type,
+    ptr_set: Set[s_pointers.Pointer],
+    env: context.Environment,
+) -> Sequence[s_constraints.Constraint]:
+    """Collect any exclusive object constraints that apply.
+
+    An object constraint applies if all of the pointers referenced
+    in it are filtered on in the query.
+    """
+
+    if not isinstance(typ, s_objtypes.ObjectType):
+        return ()
+
+    schema = env.schema
+    exclusive = schema.get('std::exclusive', type=s_constraints.Constraint)
+
+    cnstrs = []
+    typ = typ.get_nearest_non_derived_parent(schema)
+    for constr in typ.get_constraints(schema).objects(schema):
+        if (
+            constr.issubclass(schema, exclusive)
+            and (subjectexpr := constr.get_subjectexpr(schema))
+        ):
+            if subjectexpr.refs is None:
+                continue
+            pointer_refs = {
+                x for x in subjectexpr.refs.objects(schema)
+                if isinstance(x, s_pointers.Pointer)
+            }
+            # If all of the referenced pointers are filtered on,
+            # we match.
+            if pointer_refs.issubset(ptr_set):
+                cnstrs.append(constr)
+
+    return cnstrs
+
+
 def _analyse_filter_clause(
     result_set: irast.Set,
     result_card: qltypes.Cardinality,
@@ -945,11 +985,23 @@ def _analyse_filter_clause(
         result_set, filter_clause, scope_tree, ctx)
 
     if filtered_ptrs:
+        ptr_set = set()
+        # First look at each referenced pointer and see if it has
+        # an exclusive constraint.
         for ptr, _ in filtered_ptrs:
+            ptr = ptr.get_nearest_non_derived_parent(schema)
+            ptr_set.add(ptr)
             if ptr.is_exclusive(schema):
                 # Bingo, got an equality filter on a link with a
                 # unique constraint
                 return AT_MOST_ONE
+
+        # Then look at all the object exclusive constraints
+        result_stype = ctx.env.set_types[result_set]
+        obj_exclusives = get_object_exclusive_constraints(
+            result_stype, ptr_set, ctx.env)
+        if obj_exclusives:
+            return AT_MOST_ONE
 
     return result_card
 
