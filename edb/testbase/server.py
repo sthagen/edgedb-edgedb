@@ -445,11 +445,13 @@ def _shutdown_cluster(cluster, *, destroy=True):
 class ClusterTestCase(TestCase):
 
     BASE_TEST_CLASS = True
+    postgres_dsn: Optional[str] = None
 
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         cls.cluster = _start_cluster(cleanup_atexit=True)
+        cls.postgres_dsn = os.environ.get('EDGEDB_TEST_POSTGRES_DSN')
 
     @classmethod
     def get_connect_args(cls, *,
@@ -955,14 +957,23 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
                 )
 
             base_db_name, _, _ = dbname.rpartition('_')
-            cls.loop.run_until_complete(
-                cls.admin_conn.execute(
-                    f'''
-                        CREATE DATABASE {qlquote.quote_ident(dbname)}
-                        FROM {qlquote.quote_ident(base_db_name)}
-                    ''',
-                ),
-            )
+
+            # The retry here allows the test to survive a concurrent testing
+            # EdgeDB server (e.g. async with tb.start_edgedb_server()) whose
+            # introspection holds a lock on the base_db here
+            async def create_db():
+                async for tr in cls.try_until_succeeds(
+                    ignore=edgedb.ExecutionError,
+                    timeout=30,
+                ):
+                    async with tr:
+                        await cls.admin_conn.execute(
+                            f'''
+                                CREATE DATABASE {qlquote.quote_ident(dbname)}
+                                FROM {qlquote.quote_ident(base_db_name)}
+                            ''',
+                        )
+            cls.loop.run_until_complete(create_db())
 
             if not orig_testmode:
                 cls.loop.run_until_complete(
@@ -1013,7 +1024,7 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
                     async def drop_db():
                         async for tr in cls.try_until_succeeds(
                             ignore=edgedb.ExecutionError,
-                            timeout=5
+                            timeout=30
                         ):
                             async with tr:
                                 await cls.admin_conn.execute(
