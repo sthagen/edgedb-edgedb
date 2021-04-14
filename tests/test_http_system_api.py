@@ -1,7 +1,7 @@
 #
 # This source file is part of the EdgeDB open source project.
 #
-# Copyright 2019-present MagicStack Inc. and the EdgeDB authors.
+# Copyright 2016-present MagicStack Inc. and the EdgeDB authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,19 +17,20 @@
 #
 
 
-MIN_PROTOCOL = (0, 7)
-CURRENT_PROTOCOL = (0, 10)
+from edb.testbase import http as tb
+from edb.testbase import server as tb_server
 
-DEF DUMP_BLOCK_SIZE = 1024 * 1024 * 10
 
-DEF DUMP_HEADER_BLOCK_TYPE = 101
-DEF DUMP_HEADER_BLOCK_TYPE_INFO = b'I'
-DEF DUMP_HEADER_BLOCK_TYPE_DATA = b'D'
+class TestHttpSystemAPI(tb.BaseHttpTest, tb_server.ConnectedTestCase):
 
-DEF DUMP_HEADER_SERVER_TIME = 102
-DEF DUMP_HEADER_SERVER_VER = 103
-DEF DUMP_HEADER_BLOCKS_INFO = 104
+    @classmethod
+    def get_api_path(cls) -> str:
+        return '/server'
 
-DEF DUMP_HEADER_BLOCK_ID = 110
-DEF DUMP_HEADER_BLOCK_NUM = 111
-DEF DUMP_HEADER_BLOCK_DATA = 112
+    def test_http_sys_api_status(self):
+        with self.http_con() as con:
+            data, _, status = self.http_con_request(
+                con, {}, path='status/ready')
+
+            self.assertEqual(status, 200)
+            self.assertIn(b'OK', data)
