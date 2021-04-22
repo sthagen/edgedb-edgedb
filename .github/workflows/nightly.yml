@@ -10,14 +10,30 @@ on:
       - nightly
 
 jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.whichver.outputs.branch }}
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Determine package version
+      shell: bash
+      run: |
+        branch=${GITHUB_REF#refs/heads/}
+        echo ::set-output name=branch::"${branch}"
+      id: whichver
+
 
   build-debian-stretch:
     runs-on: ubuntu-latest
+    needs: prep
 
     steps:
     - name: Build
       uses: edgedb/edgedb-pkg/integration/linux/build/debian-stretch@master
       env:
+        SRC_REF: "${{ needs.prep.outputs.branch }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "debian"
@@ -31,11 +47,13 @@ jobs:
 
   build-debian-buster:
     runs-on: ubuntu-latest
+    needs: prep
 
     steps:
     - name: Build
       uses: edgedb/edgedb-pkg/integration/linux/build/debian-buster@master
       env:
+        SRC_REF: "${{ needs.prep.outputs.branch }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "debian"
@@ -49,11 +67,13 @@ jobs:
 
   build-ubuntu-xenial:
     runs-on: ubuntu-latest
+    needs: prep
 
     steps:
     - name: Build
       uses: edgedb/edgedb-pkg/integration/linux/build/ubuntu-xenial@master
       env:
+        SRC_REF: "${{ needs.prep.outputs.branch }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "ubuntu"
@@ -67,11 +87,13 @@ jobs:
 
   build-ubuntu-bionic:
     runs-on: ubuntu-latest
+    needs: prep
 
     steps:
     - name: Build
       uses: edgedb/edgedb-pkg/integration/linux/build/ubuntu-bionic@master
       env:
+        SRC_REF: "${{ needs.prep.outputs.branch }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "ubuntu"
@@ -85,11 +107,13 @@ jobs:
 
   build-ubuntu-focal:
     runs-on: ubuntu-latest
+    needs: prep
 
     steps:
     - name: Build
       uses: edgedb/edgedb-pkg/integration/linux/build/ubuntu-focal@master
       env:
+        SRC_REF: "${{ needs.prep.outputs.branch }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "ubuntu"
@@ -103,11 +127,13 @@ jobs:
 
   build-centos-7:
     runs-on: ubuntu-latest
+    needs: prep
 
     steps:
     - name: Build
       uses: edgedb/edgedb-pkg/integration/linux/build/centos-7@master
       env:
+        SRC_REF: "${{ needs.prep.outputs.branch }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "centos"
@@ -121,11 +147,13 @@ jobs:
 
   build-centos-8:
     runs-on: ubuntu-latest
+    needs: prep
 
     steps:
     - name: Build
       uses: edgedb/edgedb-pkg/integration/linux/build/centos-8@master
       env:
+        SRC_REF: "${{ needs.prep.outputs.branch }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "centos"
@@ -140,6 +168,7 @@ jobs:
 
   build-macos-x86_64:
     runs-on: macos-latest
+    needs: prep
 
     steps:
     - uses: actions/checkout@v2
@@ -187,6 +216,7 @@ jobs:
 
     - name: Build
       env:
+        SRC_REF: "${{ needs.prep.outputs.branch }}"
         PKG_REVISION: "<current-date>"
         PKG_SUBDIST: "nightly"
         PKG_PLATFORM: "macos"
