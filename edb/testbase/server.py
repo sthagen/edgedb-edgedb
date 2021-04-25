@@ -47,11 +47,7 @@ import uuid
 
 from datetime import timedelta
 
-import click.testing
-
 import edgedb
-
-from edb import cli
 
 from edb.edgeql import quote as qlquote
 from edb.server import cluster as edgedb_cluster
@@ -505,7 +501,6 @@ class ConnectedTestCaseMixin:
         conargs = self.get_connect_args()
 
         cmd = [
-            # TODO: switch to 'edgedb' when it understands EDGEDB_PASSWORD
             'python', '-m', 'edb.cli',
             '--host', conargs['host'],
             '--port', str(conargs['port']),
@@ -755,30 +750,6 @@ class ConnectedTestCaseMixin:
 
         message = message or 'data shape differs'
         return _assert_generic_shape((), data, shape)
-
-
-class OldCLITestCaseMixin:
-
-    def run_cli(self, *args, input: Optional[str]=None):
-        conn_args = self.get_connect_args()
-
-        cmd_args = (
-            '--host', conn_args['host'],
-            '--port', conn_args['port'],
-            '--user', conn_args['user'],
-        ) + args
-
-        if conn_args['password']:
-            cmd_args = ('--password-from-stdin',) + cmd_args
-            if input is not None:
-                input = f"{conn_args['password']}\n{input}"
-            else:
-                input = f"{conn_args['password']}\n"
-
-        runner = click.testing.CliRunner()
-        return runner.invoke(
-            cli.cli, args=cmd_args, input=input,
-            catch_exceptions=False)
 
 
 class CLITestCaseMixin:
@@ -1453,6 +1424,7 @@ class _EdgeDBServer:
         postgres_dsn: Optional[str] = None,
         runstate_dir: Optional[str] = None,
         reset_auth: Optional[bool] = None,
+        tenant_id: Optional[str] = None,
     ) -> None:
         self.auto_shutdown = auto_shutdown
         self.bootstrap_command = bootstrap_command
@@ -1463,6 +1435,7 @@ class _EdgeDBServer:
         self.postgres_dsn = postgres_dsn
         self.runstate_dir = runstate_dir
         self.reset_auth = reset_auth
+        self.tenant_id = tenant_id
         self.proc = None
         self.data = None
 
@@ -1573,6 +1546,9 @@ class _EdgeDBServer:
         if self.runstate_dir:
             cmd += ['--runstate-dir', self.runstate_dir]
 
+        if self.tenant_id:
+            cmd += ['--postgres-tenant-id', self.tenant_id]
+
         if self.debug:
             print(f'Starting EdgeDB cluster with the following params: {cmd}')
 
@@ -1621,6 +1597,7 @@ def start_edgedb_server(
     postgres_dsn: Optional[str] = None,
     runstate_dir: Optional[str] = None,
     reset_auth: Optional[bool] = None,
+    tenant_id: Optional[str] = None,
 ):
     if not devmode.is_in_dev_mode() and not runstate_dir:
         if postgres_dsn or adjacent_to:
@@ -1637,6 +1614,7 @@ def start_edgedb_server(
         compiler_pool_size=compiler_pool_size,
         debug=debug,
         postgres_dsn=postgres_dsn,
+        tenant_id=tenant_id,
         runstate_dir=runstate_dir,
         reset_auth=reset_auth,
     )

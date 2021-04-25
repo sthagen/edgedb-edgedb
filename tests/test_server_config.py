@@ -360,7 +360,7 @@ class TestServerConfigUtils(unittest.TestCase):
         )
 
 
-class TestServerConfig(tb.QueryTestCase, tb.OldCLITestCaseMixin):
+class TestServerConfig(tb.QueryTestCase):
 
     PARALLELISM_GRANULARITY = 'system'
     TRANSACTION_ISOLATION = False
@@ -967,9 +967,9 @@ class TestServerConfig(tb.QueryTestCase, tb.OldCLITestCaseMixin):
 
         self.assertEqual(
             (ver.major, ver.minor, ver.stage.name.lower(),
-             ver.stage_no, ver.local),
+             ver.stage_no,),
             (srv_ver.major, srv_ver.minor, str(srv_ver.stage),
-             srv_ver.stage_no, tuple(srv_ver.local))
+             srv_ver.stage_no,)
         )
 
         srv_ver_string = await self.con.query_one(r"""
@@ -977,82 +977,6 @@ class TestServerConfig(tb.QueryTestCase, tb.OldCLITestCaseMixin):
         """)
 
         self.assertEqual(srv_ver_string, str(ver))
-
-    async def test_config_cli(self):
-        try:
-            self.run_cli(
-                'configure', 'set', '__internal_testvalue', '10',
-            )
-
-            await self.assert_query_result(
-                '''
-                SELECT cfg::Config.__internal_testvalue
-                ''',
-                [
-                    10,
-                ],
-            )
-
-            self.run_cli(
-                'configure', 'set', 'multiprop', 'a', 'b', 'c'
-            )
-
-            await self.assert_query_result(
-                '''
-                SELECT _ := cfg::Config.multiprop ORDER BY _
-                ''',
-                [
-                    'a', 'b', 'c'
-                ],
-            )
-
-            self.run_cli(
-                'configure', 'reset', 'multiprop'
-            )
-
-            await self.assert_query_result(
-                '''
-                SELECT _ := cfg::Config.multiprop ORDER BY _
-                ''',
-                [],
-            )
-
-            self.run_cli(
-                'configure', 'insert', 'testsystemconfig', '--name=cliconf'
-            )
-
-            await self.assert_query_result(
-                '''
-                SELECT cfg::Config.sysobj {
-                    name,
-                }
-                FILTER .name = 'cliconf'
-                ORDER BY .name;
-                ''',
-                [
-                    {
-                        'name': 'cliconf',
-                    },
-                ],
-            )
-
-            self.run_cli(
-                'configure', 'reset', 'testsystemconfig', '--name=cliconf'
-            )
-
-        finally:
-            await self.con.execute('''
-                CONFIGURE SYSTEM RESET __internal_testvalue;
-            ''')
-
-            await self.con.execute('''
-                CONFIGURE SYSTEM RESET multiprop;
-            ''')
-
-            await self.con.execute('''
-                CONFIGURE SYSTEM
-                RESET TestSystemConfig FILTER .name = 'cliconf';
-            ''')
 
     async def test_server_proto_configure_compilation(self):
         try:

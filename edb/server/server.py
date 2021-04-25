@@ -45,6 +45,7 @@ from edb.schema import schema as s_schema
 
 from edb.edgeql import parser as ql_parser
 
+from edb.server import args as srvargs
 from edb.server import cache
 from edb.server import config
 from edb.server import connpool
@@ -60,13 +61,6 @@ from . import dbview
 
 logger = logging.getLogger('edb.server')
 log_metrics = logging.getLogger('edb.server.metrics')
-
-
-class StartupScript(NamedTuple):
-
-    text: str
-    database: str
-    user: str
 
 
 class RoleDescriptor(TypedDict):
@@ -106,7 +100,7 @@ class Server:
         auto_shutdown: bool=False,
         echo_runtime_info: bool = False,
         status_sink: Optional[Callable[[str], None]] = None,
-        startup_script: Optional[StartupScript] = None,
+        startup_script: Optional[srvargs.StartupScript] = None,
     ):
 
         self._loop = loop
@@ -119,6 +113,8 @@ class Server:
 
         self._cluster = cluster
         self._pg_addr = self._get_pgaddr()
+        inst_params = cluster.get_runtime_params().instance_params
+        self._tenant_id = inst_params.tenant_id
 
         # 1 connection is reserved for the system DB
         pool_capacity = max_backend_connections - 1
@@ -194,6 +190,9 @@ class Server:
     def in_dev_mode(self):
         return self._devmode
 
+    def get_pg_dbname(self, dbname: str) -> str:
+        return self._cluster.get_db_name(dbname)
+
     def on_binary_client_connected(self) -> str:
         self._binary_proto_id_counter += 1
         return str(self._binary_proto_id_counter)
@@ -217,7 +216,9 @@ class Server:
         )
 
     async def _pg_connect(self, dbname):
-        return await pgcon.connect(self._get_pgaddr(), dbname)
+        pg_dbname = self.get_pg_dbname(dbname)
+        return await pgcon.connect(
+            self._get_pgaddr(), pg_dbname, self._tenant_id)
 
     async def _pg_disconnect(self, conn):
         conn.terminate()
@@ -579,11 +580,26 @@ class Server:
         dbname: str,
         current_dbname: str
     ) -> None:
-        assert self._dbindex is not None
-
         if current_dbname == dbname:
             raise errors.ExecutionError(
                 f'cannot drop the currently open database {dbname!r}')
+
+        await self._ensure_database_not_connected(dbname)
+
+    async def _on_before_create_db_from_template(
+        self,
+        dbname: str,
+        current_dbname: str
+    ):
+        if current_dbname == dbname:
+            raise errors.ExecutionError(
+                f'cannot create database using currently open database '
+                f'{dbname!r} as a template database')
+
+        await self._ensure_database_not_connected(dbname)
+
+    async def _ensure_database_not_connected(self, dbname: str):
+        assert self._dbindex is not None
 
         if self._dbindex.count_connections(dbname):
             # If there are open EdgeDB connections to the `dbname` DB
@@ -854,6 +870,7 @@ class Server:
                 "port": self._listen_port,
                 "socket_dir": str(self._runstate_dir),
                 "main_pid": os.getpid(),
+                "tenant_id": self._tenant_id,
             }
             self._status_sink(f'READY={json.dumps(status)}')
 
