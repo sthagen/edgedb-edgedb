@@ -764,9 +764,14 @@ class Compiler:
             schema = delta.apply(schema, context=context)
 
             if mstate.last_proposed:
-                if mstate.last_proposed[0].required_user_input:
+                if (
+                    mstate.last_proposed[0].required_user_input
+                    or mstate.last_proposed[0].prompt_id.startswith("Rename")
+                ):
                     # Cannot auto-apply the proposed DDL
                     # if user input is required.
+                    # Also skip auto-applying for renames, since
+                    # renames often force a bunch of rethinking.
                     mstate = mstate._replace(last_proposed=tuple())
                 else:
                     proposed_stmts = mstate.last_proposed[0].statements
@@ -2041,6 +2046,7 @@ class Compiler:
             exclude_global=True,
         )
         ids = []
+        sequences = []
         for obj in all_objects:
             if isinstance(obj, s_obj.QualifiedObject):
                 ql_class = ''
@@ -2053,6 +2059,9 @@ class Compiler:
                 obj.id.bytes,
             ))
 
+            if isinstance(obj, s_types.Type) and obj.is_sequence(schema):
+                sequences.append(obj.id)
+
         objtypes = schema.get_objects(
             type=s_objtypes.ObjectType,
             exclude_stdlib=True,
@@ -2064,8 +2073,19 @@ class Compiler:
                 continue
             descriptors.extend(self._describe_object(schema, objtype))
 
+        dynamic_ddl = []
+        if sequences:
+            seq_ids = ', '.join(
+                pg_common.quote_literal(str(seq_id))
+                for seq_id in sequences
+            )
+            dynamic_ddl.append(
+                f'SELECT edgedb._dump_sequences(ARRAY[{seq_ids}]::uuid[])'
+            )
+
         return DumpDescriptor(
             schema_ddl=config_ddl + '\n' + schema_ddl,
+            schema_dynamic_ddl=tuple(dynamic_ddl),
             schema_ids=ids,
             blocks=descriptors,
         )
@@ -2484,6 +2504,7 @@ class Compiler:
 class DumpDescriptor(NamedTuple):
 
     schema_ddl: str
+    schema_dynamic_ddl: Tuple[str]
     schema_ids: List[Tuple[str, str, bytes]]
     blocks: Sequence[DumpBlockDescriptor]
 

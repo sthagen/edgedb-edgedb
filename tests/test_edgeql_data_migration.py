@@ -205,8 +205,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 ans = "y"
                 user_input = None
             else:
-                prompt, ans = part[0:2]
-                user_input = part[2] if len(part) > 2 else None
+                prompt, ans, *user_input = part
 
             await self.assert_describe_migration({
                 'proposed': {'prompt': prompt}
@@ -2387,9 +2386,10 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         # Try altering the schema to a state inconsistent with current
         # data.
         with self.assertRaisesRegex(
-            edgedb.MissingRequiredError,
-            r"missing value for required property 'name' "
-            r"of object type 'test::Base'"
+            AssertionError,
+            r"Please specify an expression to populate existing objects "
+            r"in order to make property 'name' of object type 'test::Base' "
+            r"required"
         ):
             await self.migrate("""
                 type Base {
@@ -4790,7 +4790,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         await self.migrate('''
             type Message {
                 required property text -> str;
-                required property ts -> datetime;
+                property ts -> datetime;
                 index on (.text);
                 index on (.ts);
             };
@@ -4927,10 +4927,8 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             "did you rename object type 'test::OrgUniquelyNamed' to "
             "'test::OrgUniquelyNamedResource'?",
 
-            "did you alter constraint 'std::exclusive' of object type "
-            "'test::OrgUniquelyNamed'?",
-
-            "did you alter object type 'test::OrgUniquelyNamed'?",
+            "did you alter object type 'test::OrgUniquelyNamedResource'?",
+            "did you alter object type 'test::OrgUniquelyNamedResource'?",
         ])
 
     async def test_edgeql_migration_rename_01(self):
@@ -4946,7 +4944,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
 
         await self.interact([
             "did you rename object type 'test::Foo' to 'test::Bar'?",
-            "did you create property 'asdf' of object type 'test::Foo'?",
+            "did you create property 'asdf' of object type 'test::Bar'?",
         ])
 
     async def test_edgeql_migration_rename_02(self):
@@ -4974,7 +4972,7 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
             "did you rename property 'asdf' of object type 'test::Foo' to "
             "'womp'?" ,
 
-            "did you create annotation 'std::title' of property 'asdf'?",
+            "did you create annotation 'std::title' of property 'womp'?",
         ])
 
     async def test_edgeql_migration_rename_03(self):
@@ -8650,6 +8648,108 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 }],
             },
         })
+
+    async def test_edgeql_migration_user_input_03(self):
+        await self.migrate('''
+            type Bar {
+                required property foo -> int64;
+            };
+        ''')
+        await self.con.execute('''
+            SET MODULE test;
+            INSERT Bar { foo := 42 };
+            INSERT Bar { foo := 1337 };
+        ''')
+
+        await self.start_migration('''
+            type Bar {
+                required property foo -> int64;
+                required property bar -> str;
+            };
+        ''')
+
+        await self.assert_describe_migration({
+            'proposed': {
+                'statements': [{
+                    'text': '''
+                        ALTER TYPE test::Bar {
+                            CREATE REQUIRED PROPERTY bar -> std::str {
+                                SET REQUIRED USING (\\(fill_expr));
+                            };
+                        };
+                    '''
+                }],
+                'required_user_input': [{
+                    'placeholder': 'fill_expr',
+                    'prompt': (
+                        "Please specify an expression to populate existing "
+                        "objects in order to make property 'bar' of object "
+                        "type 'test::Bar' required"
+                    ),
+                }],
+            },
+        })
+
+        await self.fast_forward_describe_migration(
+            user_input=[
+                '<str>.foo ++ "!"'
+            ]
+        )
+
+        await self.assert_query_result(
+            '''
+                SELECT Bar {foo, bar} ORDER BY .foo
+            ''',
+            [
+                {'foo': 42, 'bar': "42!"},
+                {'foo': 1337, 'bar': "1337!"},
+            ],
+        )
+
+    async def test_edgeql_migration_user_input_04(self):
+        await self.migrate('''
+            type BlogPost {
+                property title -> str;
+            }
+        ''')
+        await self.con.execute('''
+            SET MODULE test;
+            INSERT BlogPost { title := "Programming Considered Harmful" }
+        ''')
+
+        await self.start_migration('''
+            abstract type HasContent {
+                required property content -> str;
+            }
+            type BlogPost extending HasContent {
+                property title -> str;
+            }
+        ''')
+
+        await self.interact([
+            "did you create object type 'test::HasContent'?",
+            ("did you alter object type 'test::BlogPost'?", "y",
+             '"This page intentionally left blank"'),
+            # XXX: There is a final follow-up prompt, since the DDL
+            # generated above somewhat wrongly leaves 'content' owned
+            # by the child. This is kind of wrong, but also *works*, so
+            # maybe it's fine for now.
+            "did you alter property 'content' of object type "
+            "'test::BlogPost'?",
+        ])
+        await self.fast_forward_describe_migration()
+
+        await self.assert_query_result(
+            '''
+                SELECT BlogPost {title, content}
+            ''',
+            [
+                {
+                    'title': "Programming Considered Harmful",
+                    'content': "This page intentionally left blank",
+                },
+            ],
+        )
 
     async def test_edgeql_migration_misplaced_commands(self):
         async with self.assertRaisesRegexTx(

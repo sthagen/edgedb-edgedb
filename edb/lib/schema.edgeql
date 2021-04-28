@@ -175,7 +175,7 @@ CREATE TYPE schema::Parameter EXTENDING schema::Object {
 CREATE ABSTRACT TYPE schema::CallableObject
     EXTENDING schema::AnnotationSubject
 {
-    CREATE MULTI LINK params -> schema::Parameter {
+    CREATE MULTI LINK params EXTENDING schema::ordered -> schema::Parameter {
         ON TARGET DELETE ALLOW;
     };
 
@@ -273,6 +273,70 @@ CREATE TYPE schema::ScalarType
 {
     CREATE PROPERTY default -> std::str;
     CREATE PROPERTY enum_values -> array<std::str>;
+};
+
+
+CREATE FUNCTION std::sequence_reset(
+    seq: schema::ScalarType,
+    value: std::int64,
+) -> std::int64
+{
+    SET volatility := 'Volatile';
+    USING SQL $$
+        SELECT
+            pg_catalog.setval(
+                pg_catalog.quote_ident(sn.schema)
+                    || '.' || pg_catalog.quote_ident(sn.name),
+                "value",
+                true
+            )
+        FROM
+            ROWS FROM (edgedb.get_user_sequence_backend_name("seq"))
+                AS sn(schema text, name text)
+    $$;
+};
+
+
+CREATE FUNCTION std::sequence_reset(
+    seq: schema::ScalarType,
+) -> std::int64
+{
+    SET volatility := 'Volatile';
+    USING SQL $$
+        SELECT
+            pg_catalog.setval(
+                pg_catalog.quote_ident(sn.schema)
+                    || '.' || pg_catalog.quote_ident(sn.name),
+                s.start_value,
+                false
+            )
+        FROM
+            ROWS FROM (edgedb.get_user_sequence_backend_name("seq"))
+                AS sn(schema text, name text),
+            LATERAL (
+                SELECT start_value
+                FROM pg_catalog.pg_sequences
+                WHERE schemaname = sn.schema AND sequencename = sn.name
+            ) AS s
+    $$;
+};
+
+
+CREATE FUNCTION std::sequence_next(
+    seq: schema::ScalarType,
+) -> std::int64
+{
+    SET volatility := 'Volatile';
+    USING SQL $$
+        SELECT
+            pg_catalog.nextval(
+                pg_catalog.quote_ident(sn.schema)
+                    || '.' || pg_catalog.quote_ident(sn.name)
+            )
+        FROM
+            ROWS FROM (edgedb.get_user_sequence_backend_name("seq"))
+                AS sn(schema text, name text)
+    $$;
 };
 
 

@@ -1,7 +1,7 @@
 #
 # This source file is part of the EdgeDB open source project.
 #
-# Copyright 2020-present MagicStack Inc. and the EdgeDB authors.
+# Copyright 2016-present MagicStack Inc. and the EdgeDB authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,20 +17,6 @@
 #
 
 
-scalar type MyStr extending str;
-scalar type MySeq extending sequence;
-scalar type MyPristineSeq extending sequence;
+## std::sequence functions and operators.
 
-type Test {
-    required property name -> str {
-        constraint exclusive;
-    };
-    property array_of_tuples -> array<tuple<int64, MyStr, int64>>;
-    property tuple_of_arrays ->
-        tuple<
-            MyStr,
-            array<MyStr>,
-            tuple<int64, int64, array<MyStr>>,
-        >;
-    property seq -> MySeq;
-};
+# See schema.edgeql for definitions of sequence_next() and friends.

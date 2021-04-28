@@ -4431,6 +4431,16 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 CREATE MODULE spam;
             ''')
 
+    async def test_edgeql_ddl_module_02(self):
+        await self.con.execute('''\
+            CREATE MODULE spam IF NOT EXISTS;
+            CREATE MODULE spam IF NOT EXISTS;
+
+            # Just to validate that the module was indeed created,
+            # make something inside it.
+            CREATE TYPE spam::Test;
+        ''')
+
     async def test_edgeql_ddl_operator_01(self):
         await self.con.execute('''
             CREATE INFIX OPERATOR test::`+++`
@@ -6583,6 +6593,43 @@ type test::Foo {
                 'member_of': [{
                     'name': 'foo3',
                 }],
+            }]
+        )
+
+    async def test_edgeql_ddl_role_04(self):
+        await self.con.execute(r"""
+            CREATE SUPERUSER ROLE foo5 IF NOT EXISTS {
+                SET password := 'secret';
+            };
+            CREATE SUPERUSER ROLE foo5 IF NOT EXISTS {
+                SET password := 'secret';
+            };
+            CREATE SUPERUSER ROLE foo5 IF NOT EXISTS {
+                SET password := 'secret';
+            };
+            CREATE ROLE foo6 EXTENDING foo5 IF NOT EXISTS;
+            CREATE ROLE foo6 EXTENDING foo5 IF NOT EXISTS;
+            CREATE ROLE foo6 EXTENDING foo5 IF NOT EXISTS;
+        """)
+
+        await self.assert_query_result(
+            r"""
+                SELECT sys::Role {
+                    name,
+                    superuser,
+                    password,
+                    member_of: {
+                        name
+                    },
+                } FILTER .name = 'foo6'
+            """,
+            [{
+                'name': 'foo6',
+                'superuser': False,
+                'password': None,
+                'member_of': [{
+                    'name': 'foo5'
+                }]
             }]
         )
 
@@ -10905,6 +10952,132 @@ type test::Foo {
             await self.con.execute("""
                 CREATE ALIAS Asdf := Object { foo := random() };
             """)
+
+    async def test_edgeql_ddl_new_required_pointer_01(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+            CREATE TYPE Foo;
+            INSERT Foo;
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.MissingRequiredError,
+            "missing value for required property 'name' of object type "
+            "'test::Foo'"
+        ):
+            await self.con.execute("""
+                ALTER TYPE Foo CREATE REQUIRED PROPERTY name -> str;
+            """)
+
+    async def test_edgeql_ddl_new_required_pointer_02(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+            CREATE TYPE Foo {
+                CREATE PROPERTY num -> int64;
+            };
+            INSERT Foo { num := 20 };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                CREATE PROPERTY name -> str {
+                    SET REQUIRED USING (<str>.num ++ "!")
+                }
+            }
+        """)
+
+        await self.assert_query_result(
+            r'''SELECT Foo {name, num}''',
+            [{'name': '20!', 'num': 20}]
+        )
+
+    async def test_edgeql_ddl_new_required_pointer_03(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+            CREATE TYPE Foo {
+                CREATE PROPERTY num -> int64;
+            };
+            INSERT Foo { num := 20 };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                CREATE MULTI PROPERTY name -> str {
+                    SET REQUIRED USING (<str>.num ++ "!")
+                }
+            }
+        """)
+
+        await self.assert_query_result(
+            r'''SELECT Foo {name, num}''',
+            [{'name': ['20!'], 'num': 20}]
+        )
+
+    async def test_edgeql_ddl_new_required_pointer_04(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+            CREATE TYPE Foo {
+                CREATE PROPERTY num -> int64;
+            };
+            CREATE TYPE Bar {
+                CREATE PROPERTY code -> int64 {
+                    CREATE CONSTRAINT exclusive;
+                }
+            };
+            INSERT Foo { num := 20 };
+            INSERT Bar { code := 40 };
+            INSERT Foo { num := 30 };
+            INSERT Bar { code := 60 };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                CREATE LINK partner -> Bar {
+                    SET REQUIRED USING (SELECT Bar FILTER Bar.code = 2*Foo.num)
+                }
+            }
+        """)
+
+        await self.assert_query_result(
+            r'''SELECT Foo {num, partner: {code}} ORDER BY .num''',
+            [
+                {'num': 20, 'partner': {'code': 40}},
+                {'num': 30, 'partner': {'code': 60}},
+            ]
+        )
+
+    async def test_edgeql_ddl_new_required_pointer_05(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+            CREATE TYPE Foo {
+                CREATE PROPERTY num -> int64;
+            };
+            CREATE TYPE Bar {
+                CREATE PROPERTY code -> int64 {
+                    CREATE CONSTRAINT exclusive;
+                }
+            };
+            INSERT Foo { num := 20 };
+            INSERT Bar { code := 40 };
+            INSERT Foo { num := 30 };
+            INSERT Bar { code := 60 };
+        """)
+
+        await self.con.execute("""
+            ALTER TYPE Foo {
+                CREATE MULTI LINK partner -> Bar {
+                    SET REQUIRED USING (SELECT Bar FILTER Bar.code = 2*Foo.num)
+                }
+            }
+        """)
+
+        await self.assert_query_result(
+            r'''SELECT Foo {num, partner: {code}} ORDER BY .num''',
+            [
+                {'num': 20, 'partner': [{'code': 40}]},
+                {'num': 30, 'partner': [{'code': 60}]},
+            ]
+        )
 
 
 class TestConsecutiveMigrations(tb.DDLTestCase):
