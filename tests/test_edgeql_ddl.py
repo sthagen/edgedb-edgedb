@@ -6298,6 +6298,42 @@ type test::Foo {
                 DROP MODULE test_other;
             """)
 
+    async def test_edgeql_ddl_modules_04(self):
+        await self.con.execute(r"""
+            CREATE MODULE test_other;
+
+            CREATE ABSTRACT TYPE test_other::Named {
+                CREATE REQUIRED PROPERTY name -> str;
+            };
+
+            CREATE ABSTRACT TYPE test_other::UniquelyNamed
+                EXTENDING test_other::Named
+            {
+                ALTER PROPERTY name {
+                    CREATE DELEGATED CONSTRAINT exclusive;
+                }
+            };
+
+            CREATE ABSTRACT ANNOTATION whatever;
+
+            CREATE TYPE test_other::Foo;
+            CREATE TYPE test_other::Bar {
+                CREATE LINK foo -> test_other::Foo;
+                CREATE ANNOTATION whatever := "huh";
+            };
+            ALTER TYPE test_other::Foo {
+                CREATE LINK bar -> test_other::Bar;
+            };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaError,
+            "cannot drop module 'test_other' because it is not empty",
+        ):
+            await self.con.execute(r"""
+                DROP MODULE test_other;
+            """)
+
     async def test_edgeql_ddl_extension_package_01(self):
         await self.con.execute(r"""
             CREATE EXTENSION PACKAGE foo_01 VERSION '1.0' {
@@ -11078,6 +11114,93 @@ type test::Foo {
                 {'num': 30, 'partner': [{'code': 60}]},
             ]
         )
+
+    async def test_edgeql_ddl_alter_union_01(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+            CREATE TYPE Foo;
+            CREATE TYPE Bar;
+        """)
+
+        await self.con.execute(r"""
+            CREATE TYPE Ref {
+                CREATE LINK fubar -> Foo | Bar;
+            }
+        """)
+
+        await self.con.execute(r"""
+            ALTER TYPE Foo CREATE PROPERTY x -> str;
+            ALTER TYPE Bar CREATE PROPERTY x -> str;
+        """)
+
+        await self.assert_query_result(
+            r'''SELECT Ref.fubar.x''',
+            [],
+        )
+
+    async def test_edgeql_ddl_alter_union_02(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+            CREATE TYPE Foo { CREATE PROPERTY x -> str; };
+            CREATE TYPE Bar { CREATE PROPERTY x -> str; };
+            CREATE TYPE Baz { CREATE PROPERTY x -> str; };
+        """)
+
+        await self.con.execute(r"""
+            CREATE TYPE Ref {
+                CREATE LINK everything -> Foo | Bar | Baz;
+                CREATE LINK fubar -> Foo | Bar;
+                CREATE LINK barbaz -> Bar | Baz;
+            }
+        """)
+
+        await self.con.execute(r"""
+            ALTER TYPE Baz DROP PROPERTY x;
+        """)
+
+        await self.assert_query_result(
+            r'''SELECT Ref.fubar.x''',
+            [],
+        )
+
+        await self.con.execute(r"""
+            ALTER TYPE Baz CREATE PROPERTY x -> str;
+        """)
+
+        await self.assert_query_result(
+            r'''SELECT Ref.everything.x''',
+            [],
+        )
+
+    async def test_edgeql_ddl_alter_union_03(self):
+        await self.con.execute(r"""
+            SET MODULE test;
+            CREATE TYPE Parent;
+            CREATE TYPE Child EXTENDING Parent {
+                CREATE PROPERTY prop -> str;
+            };
+            CREATE TYPE Foo {CREATE LINK y -> Child};
+            CREATE TYPE Bar {CREATE LINK y -> Child};
+        """)
+
+        await self.con.execute(r"""
+            CREATE TYPE Ref {
+                CREATE LINK fubar -> Foo | Bar;
+            }
+        """)
+
+        await self.con.execute(r"""
+            ALTER TYPE Foo ALTER LINK y SET TYPE Parent;
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.QueryError,
+            "object type 'test::Parent' has no link or property 'prop'",
+        ):
+            await self.assert_query_result(
+                r'''SELECT Ref.fubar.y.prop''',
+                [],
+            )
 
 
 class TestConsecutiveMigrations(tb.DDLTestCase):
