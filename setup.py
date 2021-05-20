@@ -56,13 +56,13 @@ RUNTIME_DEPS = [
     "typing_inspect~=0.5.0;python_version<'3.9'",
     'wcwidth~=0.2.5',
 
-    'graphql-core~=3.1.2',
+    'graphql-core~=3.1.5',
     'promise~=2.2.0',
 
     'edgedb>=0.13.0',
 ]
 
-CYTHON_DEPENDENCY = 'Cython==0.29.21'
+CYTHON_DEPENDENCY = 'Cython==0.29.23'
 
 DOCS_DEPS = [
     'lxml~=4.6.2',
