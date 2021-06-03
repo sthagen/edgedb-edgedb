@@ -119,7 +119,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ]
         )
 
-    async def test_edgeql_scope_tuple_04(self):
+    async def test_edgeql_scope_tuple_04a(self):
         await self.assert_query_result(
             r'''
                 WITH MODULE test
@@ -174,6 +174,67 @@ class TestEdgeQLScope(tb.QueryTestCase):
                     },
                     {
                         'name': 'Bob',
+                    },
+                ],
+            ]
+        )
+
+    async def test_edgeql_scope_tuple_04b(self):
+        # N.B: for reproducing, I needed \set limit 0
+        await self.assert_query_result(
+            r'''
+                WITH MODULE test
+                SELECT _ := (
+                    User.friends {name},
+                    # User.friends is a common path, so it refers to the
+                    # SAME object in both tuple elements. In particular
+                    # that means that in the User shape there will always
+                    # be a single object appearing in friends link
+                    # (although it's a ** link).
+                    User {
+                        name,
+                        friends: {
+                            @nickname
+                        }
+                    },
+                )
+                ORDER BY _.1.name THEN _.0.name;
+            ''',
+            [
+                [
+                    {
+                        'name': 'Bob',
+                    },
+                    {
+                        'name': 'Alice',
+                        'friends': [{'@nickname': 'Swampy'}],
+                    },
+                ],
+                [
+                    {
+                        'name': 'Carol',
+                    },
+                    {
+                        'name': 'Alice',
+                        'friends': [{'@nickname': 'Firefighter'}],
+                    },
+                ],
+                [
+                    {
+                        'name': 'Dave',
+                    },
+                    {
+                        'name': 'Alice',
+                        'friends': [{'@nickname': 'Grumpy'}],
+                    },
+                ],
+                [
+                    {
+                        'name': 'Bob',
+                    },
+                    {
+                        'name': 'Dave',
+                        'friends': [{'@nickname': None}],
                     },
                 ],
             ]
@@ -733,7 +794,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ]
         )
 
-    async def test_edgeql_scope_binding_02(self):
+    async def test_edgeql_scope_binding_02a(self):
         await self.assert_query_result(
             r"""
             WITH
@@ -744,6 +805,27 @@ class TestEdgeQLScope(tb.QueryTestCase):
                     FILTER .name = name
                 )),
             SELECT _ := ((SELECT L.1.name), (SELECT L.1.name))
+            ORDER BY _;
+            """,
+            [
+                ['Alice', 'Alice'],
+                ['Alice', 'Bob'],
+                ['Bob', 'Alice'],
+                ['Bob', 'Bob'],
+            ]
+        )
+
+    async def test_edgeql_scope_binding_02b(self):
+        await self.assert_query_result(
+            r"""
+            WITH
+                MODULE test,
+                name := {'Alice', 'Bob'},
+                L := ((
+                    SELECT User
+                    FILTER .name = name
+                ), name),
+            SELECT _ := ((SELECT L.0.name), (SELECT L.0.name))
             ORDER BY _;
             """,
             [
@@ -2178,6 +2260,142 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ]
         )
 
+    async def test_edgeql_scope_computables_07a(self):
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test,
+                     U := User { cards := .deck },
+                SELECT count((U.cards.name, U.cards.cost));
+            """,
+            [9],
+        )
+
+    async def test_edgeql_scope_computables_07b(self):
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test,
+                     U := User { cards := Card },
+                SELECT count((U.cards.name, U.cards.cost));
+            """,
+            [9],
+        )
+
+    async def test_edgeql_scope_computables_07c(self):
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test,
+                     U := (SELECT User { cards := Card }
+                           FILTER .name = "Phil"),
+                SELECT count((U.cards.name, U.cards.cost));
+            """,
+            [0],
+        )
+
+    async def test_edgeql_scope_computables_08(self):
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test,
+                SELECT count((Card.owners.name, Card.owners.deck_cost));
+            """,
+            [4],
+        )
+
+    async def test_edgeql_scope_computables_09a(self):
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test,
+                    U := User {
+                        unowned := (SELECT Card FILTER Card NOT IN User.deck)
+                    },
+                SELECT _ := U.unowned.name ORDER BY _;
+            """,
+            [
+                'Djinn', 'Dragon', 'Dwarf', 'Giant eagle',
+                'Golem', 'Imp', 'Sprite',
+            ],
+        )
+
+    async def test_edgeql_scope_computables_09b(self):
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test,
+                    U := (SELECT User {
+                        unowned := (SELECT Card FILTER Card NOT IN User.deck)
+                    } FILTER .name IN {'Carol', 'Dave'}),
+                SELECT _ := U.unowned.name ORDER BY _;
+            """,
+            [
+                'Dragon', 'Dwarf', 'Imp',
+            ],
+        )
+
+    async def test_edgeql_scope_computables_09c(self):
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test,
+                    U := (SELECT User {
+                        unowned := (SELECT Card FILTER Card NOT IN User.deck)
+                    } FILTER .name IN {'Carol', 'Dave'}),
+                SELECT _ := (U.unowned.name, U.unowned.cost) ORDER BY _;
+            """,
+            [
+                ['Dragon', 5], ['Dwarf', 1], ['Imp', 1],
+            ],
+        )
+
+    async def test_edgeql_scope_computables_10(self):
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test,
+                     U := User { cards := (.deck UNION .deck) },
+                SELECT count(U.cards);
+            """,
+            [9],
+        )
+
+    async def test_edgeql_scope_computables_11a(self):
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test,
+                    U := (SELECT User {
+                        deck: {name, a := Award},
+                    }),
+                SELECT count((U.deck.a.name, U.deck.a.id, U.deck.name));
+            """,
+            [27],
+            implicit_limit=100,
+        )
+
+    async def test_edgeql_scope_computables_11b(self):
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test,
+                    U := (SELECT User {
+                        cards := .deck {name, a := Award},
+                    }),
+                SELECT count((U.cards.a.name, U.cards.a.id, U.cards.name));
+            """,
+            [27],
+        )
+
+    @test.xfail('''
+        We fail to generate a proper shape output
+    ''')
+    async def test_edgeql_scope_computables_11c(self):
+        # ... make sure we output legit objects in this case
+        await self.assert_query_result(
+            r"""
+                WITH MODULE test,
+                    U := (SELECT User {
+                        cards := .deck {name, a := Award},
+                    }),
+                SELECT (U.cards.a.name, U.cards.a.id, U.cards) LIMIT 1;
+            """,
+            [
+                [{}, {}, {"id": {}}],
+            ],
+        )
+
     async def test_edgeql_scope_with_01(self):
         # Test that same symbol can be re-used in WITH block.
         await self.assert_query_result(
@@ -2272,3 +2490,64 @@ class TestEdgeQLScope(tb.QueryTestCase):
                     SELECT foo
                 )
             """)
+
+    async def test_edgeql_scope_nested_computable_01(self):
+        # This is a test for a bug where the outside filter would get
+        # messed up when there was a clause on a nested shape element
+        # but not one on the enclosing shape element.
+        #
+        # So we only test that the top-level filter does the right thing,
+        # since adding an ORDER BY on the todo would fail to test the
+        # bug that inspired this.
+        await self.assert_query_result(
+            """
+                WITH MODULE test
+                SELECT User {
+                    name,
+                    deck: {
+                        name,
+                        awards: { name } ORDER BY .name
+                    }
+                }
+                FILTER EXISTS (User.deck.awards)
+                ORDER BY .name;
+            """,
+            [
+                {'name': 'Alice'},
+                {'name': 'Carol'},
+                {'name': 'Dave'},
+            ],
+        )
+
+    async def test_edgeql_scope_nested_computable_02(self):
+        await self.assert_query_result(
+            """
+                WITH MODULE test
+                SELECT User {
+                    name,
+                }
+                FILTER EXISTS (User.deck.good_awards)
+                ORDER BY .name;
+            """,
+            [
+                {'name': 'Alice'},
+                {'name': 'Dave'},
+            ],
+        )
+
+    async def test_edgeql_scope_link_narrow_card_01(self):
+        await self.assert_query_result(
+            """
+                WITH MODULE test
+                SELECT User {
+                    name,
+                    specials := .deck[IS SpecialCard].name
+                } ORDER BY .name;
+            """,
+            [
+                {"name": "Alice", "specials": []},
+                {"name": "Bob", "specials": []},
+                {"name": "Carol", "specials": ["Djinn"]},
+                {"name": "Dave", "specials": ["Djinn"]}
+            ],
+        )

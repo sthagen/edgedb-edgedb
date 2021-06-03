@@ -21,15 +21,14 @@ from __future__ import annotations
 from typing import *  # NoQA
 
 import argparse
-import asyncio
 import gc
 import os
 import pickle
 import signal
+import time
 import traceback
 
 import immutables
-import uvloop
 
 from edb import graphql
 
@@ -39,6 +38,7 @@ from edb.schema import schema as s_schema
 
 from edb.server import compiler
 from edb.server import config
+from edb.server import defines
 from edb.server import pgcluster
 
 from edb.common import debug
@@ -58,6 +58,13 @@ LAST_STATE: Optional[compiler.dbstate.CompilerConnectionState] = None
 STD_SCHEMA: s_schema.FlatSchema
 GLOBAL_SCHEMA: s_schema.FlatSchema
 SYSTEM_CONFIG: immutables.Map[str, config.SettingValue]
+
+# Abort the template process if more than MAX_WORKER_SPANWS new workers are
+# created continuously - it probably means the worker cannot start correctly
+MAX_WORKER_SPAWNS = defines.BACKEND_COMPILER_POOL_SIZE_DEFAULT * 2
+# "created continuously" means the interval between two consecutive spawns
+# is less than NUM_SPAWNS_RESET_INTERVAL seconds.
+NUM_SPAWNS_RESET_INTERVAL = 1
 
 
 def __init_worker__(
@@ -266,18 +273,10 @@ def compile_graphql(
     )
 
 
-async def worker(sockname):
-    loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGTERM, on_terminate_worker)
-
-    con = await amsg.worker_connect(sockname)
+def worker(sockname):
+    con = amsg.WorkerConnection(sockname)
     try:
-        while True:
-            try:
-                req_id, req = await con.next_request()
-            except amsg.PoolClosedError:
-                os._exit(0)
-
+        for req_id, req in con.iter_request():
             try:
                 methname, args = pickle.loads(req)
                 if methname == '__init_worker__':
@@ -328,20 +327,14 @@ async def worker(sockname):
                 ex_str = f'{ex}:\n\n{ex_tb}'
                 pickled = pickle.dumps((2, ex_str), -1)
 
-            await con.reply(req_id, pickled)
+            con.reply(req_id, pickled)
     finally:
         con.abort()
 
 
-def on_terminate_worker():
-    # sys.exit() might not do it, apparently.
-    os._exit(-1)
-
-
 def run_worker(sockname):
-    uvloop.install()
     with devmode.CoverageConfig.enable_coverage_if_requested():
-        asyncio.run(worker(sockname))
+        worker(sockname)
 
 
 def prepare_exception(ex):
@@ -382,16 +375,75 @@ def main():
     ql_parser.preload()
     gc.freeze()
 
-    for _ in range(int(args.numproc) - 1):
-        if not os.fork():
+    children = set()
+    continuous_num_spawns = 0
+
+    for _ in range(int(args.numproc)):
+        # spawn initial workers
+        if pid := os.fork():
+            # main process
+            children.add(pid)
+            continuous_num_spawns += 1
+        else:
             # child process
             break
+    else:
+        # main process - redirect SIGTERM to SystemExit and wait for children
+        signal.signal(signal.SIGTERM, lambda *_: exit(os.EX_OK))
+        last_spawn_timestamp = time.monotonic()
 
-    try:
-        run_worker(args.sockname)
-    except (amsg.PoolClosedError, KeyboardInterrupt):
-        exit(0)
+        try:
+            while children:
+                pid, status = os.wait()
+                children.remove(pid)
+                ec = os.waitstatus_to_exitcode(status)
+                if ec > 0 or -ec not in {0, signal.SIGINT}:
+                    # restart the child process if killed or ending abnormally,
+                    # unless we tried too many times continuously
+                    now = time.monotonic()
+                    if now - last_spawn_timestamp > NUM_SPAWNS_RESET_INTERVAL:
+                        continuous_num_spawns = 0
+                    last_spawn_timestamp = now
+                    continuous_num_spawns += 1
+                    if continuous_num_spawns > MAX_WORKER_SPAWNS:
+                        # GOTCHA: we shouldn't return here because we need the
+                        # exception handler below to clean up the workers
+                        exit(os.EX_UNAVAILABLE)
+
+                    if pid := os.fork():
+                        # main process
+                        children.add(pid)
+                    else:
+                        # child process
+                        break
+            else:
+                # main process - all children ended normally
+                return
+        except BaseException as e:  # includes SystemExit and KeyboardInterrupt
+            # main process - kill and wait for the remaining workers to exit
+            try:
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                for pid in children:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+                try:
+                    while children:
+                        pid, status = os.wait()
+                        children.discard(pid)
+                except OSError:
+                    pass
+            finally:
+                raise e
+
+    # child process - clear the SIGTERM handler for potential Rust impl
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    run_worker(args.sockname)
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

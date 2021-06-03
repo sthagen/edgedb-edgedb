@@ -713,6 +713,17 @@ class TestEdgeQLSelect(tb.QueryTestCase):
                 FILTER Issue.number = '1';
             """)
 
+    async def test_edgeql_select_computable_30(self):
+        await self.assert_query_result(
+            r"""
+                WITH O := (SELECT stdgraphql::Query {m := 10}),
+                SELECT (O {m}, O.m);
+            """,
+            [
+                [{'m': 10}, 10],
+            ]
+        )
+
     async def test_edgeql_select_match_01(self):
         await self.assert_query_result(
             r"""
@@ -6303,6 +6314,30 @@ class TestEdgeQLSelect(tb.QueryTestCase):
             [
                 [{'name': user.name}, ['x', {'id': str(user.id)}]]
                 for user in res
+            ]
+        )
+
+    async def test_edgeql_select_expr_objects_08(self):
+        await self.assert_query_result(
+            r'''
+            WITH MODULE test,
+            SELECT DISTINCT
+                [(SELECT Issue {number, name} FILTER .number = "1")];
+            ''',
+            [
+                [{'number': '1', 'name': 'Release EdgeDB'}],
+            ]
+        )
+
+        await self.assert_query_result(
+            r'''
+            WITH MODULE test,
+            SELECT DISTINCT
+                ((SELECT Issue {number, name} FILTER .number = "1"),
+                 Issue.status.name);
+            ''',
+            [
+                [{'number': '1', 'name': 'Release EdgeDB'}, "Open"],
             ]
         )
 
