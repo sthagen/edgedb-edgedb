@@ -8608,9 +8608,13 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
 
         await self.fast_forward_describe_migration(limit=1)
 
+        # N.B: It is important that the prompt_id here match the
+        # prompt_id in the first migration, so that the migration tool
+        # will automatically apply this proposal as part of the
+        # earlier action.
         await self.assert_describe_migration({
             'proposed': {
-                'prompt_id': 'CreateLink LINK test::`__|spam@test|Bar`',
+                'prompt_id': 'CreateObjectType TYPE test::Bar',
                 'statements': [{
                     'text': """
                         ALTER TYPE test::Bar {
@@ -8786,21 +8790,69 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
         )
 
     async def test_edgeql_migration_union_01(self):
+        async with self.assertRaisesRegexTx(
+            edgedb.QueryError,
+            "it is illegal to create a type union that causes a "
+            "computable property 'deleted' to mix with other versions of the "
+            "same property 'deleted'"
+        ):
+            await self.migrate('''
+                type Category {
+                    required property title -> str;
+                    required property deleted :=
+                        EXISTS(.<element[IS DeletionRecord]);
+                };
+                type Article {
+                    required property title -> str;
+                    required property deleted :=
+                        EXISTS(.<element[IS DeletionRecord]);
+                };
+                type DeletionRecord {
+                    link element -> Article | Category;
+                }
+            ''')
+
+    async def test_edgeql_migration_backlink_01(self):
         await self.migrate('''
-            type Category {
-                required property title -> str;
-                required property deleted :=
-                    EXISTS(.<element[IS DeletionRecord]);
-            };
-            type Article {
-                required property title -> str;
-                required property deleted :=
-                    EXISTS(.<element[IS DeletionRecord]);
-            };
-            type DeletionRecord {
-                link element -> Article | Category;
+            type User {
+                link posts := .<user;
             }
+
+            abstract type Action {
+                required link user -> User;
+            }
+
+            type Post extending Action;
         ''')
+
+        # Make sure that the objects can actually be created and
+        # queried.
+        await self.con.execute('''
+            SET MODULE test;
+            INSERT User;
+        ''')
+        post = await self.con.query_one('''
+            INSERT Post {
+                user := (SELECT User LIMIT 1),
+            };
+        ''')
+
+        await self.assert_query_result(
+            r'''
+                SELECT User{
+                    id,
+                    posts: {
+                        id
+                    } LIMIT 1  # this LIMIT is needed as a workaround
+                               # for another bug
+                }
+            ''',
+            [
+                {
+                    'posts': [{'id': str(post.id)}],
+                },
+            ],
+        )
 
     async def test_edgeql_migration_misplaced_commands(self):
         async with self.assertRaisesRegexTx(

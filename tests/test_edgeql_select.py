@@ -684,11 +684,54 @@ class TestEdgeQLSelect(tb.QueryTestCase):
     async def test_edgeql_select_computable_30(self):
         await self.assert_query_result(
             r"""
-                WITH O := (SELECT stdgraphql::Query {m := 10}),
+                WITH O := (SELECT {m := 10}),
                 SELECT (O {m}, O.m);
             """,
             [
                 [{'m': 10}, 10],
+            ]
+        )
+
+    async def test_edgeql_select_computable_31(self):
+        await self.assert_query_result(
+            r"""
+                WITH O := (SELECT {multi m := 10}),
+                SELECT (O {m});
+            """,
+            [
+                {'m': [10]},
+            ]
+        )
+
+    async def test_edgeql_select_computable_32(self):
+        await self.assert_query_result(
+            r"""
+            SELECT _ := (User {x := .name}.x, (SELECT User.name)) ORDER BY _;
+            """,
+            [
+                ['Elvis', 'Elvis'],
+                ['Yury', 'Yury'],
+            ]
+        )
+
+        await self.assert_query_result(
+            r"""
+            SELECT _ := ((SELECT User.name), User {x := .name}.x) ORDER BY _;
+            """,
+            [
+                ['Elvis', 'Elvis'],
+                ['Yury', 'Yury'],
+            ]
+        )
+
+        await self.assert_query_result(
+            r"""
+            SELECT _ := ((SELECT User.name), (User {x := .name},).0.x)
+            ORDER BY _;
+            """,
+            [
+                ['Elvis', 'Elvis'],
+                ['Yury', 'Yury'],
             ]
         )
 
@@ -2350,6 +2393,7 @@ class TestEdgeQLSelect(tb.QueryTestCase):
             ],
         )
 
+    @test.xfail('Too many results')
     async def test_edgeql_select_setops_13a(self):
         await self.assert_query_result(
             r"""
@@ -2400,34 +2444,34 @@ class TestEdgeQLSelect(tb.QueryTestCase):
         )
 
     async def test_edgeql_select_setops_14(self):
-        await self.assert_query_result(
-            r"""
-            # The computable in the type variant is omitted from the duck type
-            # of the UNION because ultimately it's the duck type of
-            # the operands, which are both Issue with the real
-            # property 'number'.
-            SELECT {
-                Issue{number := 'foo'}, Issue
-            }.number;
-            """,
-            ['1', '1', '2', '2', '3', '3', '4', '4'],
-            sort=True
-        )
+        with self.assertRaisesRegex(
+            edgedb.SchemaError,
+            "it is illegal to create a type union that causes "
+            "a computable property 'number' to mix with other "
+            "versions of the same property 'number'"
+        ):
+            await self.con.execute(
+                r"""
+                SELECT {
+                    Issue{number := 'foo'}, Issue
+                }.number;
+                """
+            )
 
     async def test_edgeql_select_setops_15(self):
-        await self.assert_query_result(
-            r"""
-            # The computable in the type variant is omitted from the duck type
-            # of the UNION because ultimately it's the duck type of
-            # the operands, which are both Issue with the real
-            # property 'number'.
-            WITH
-                I := Issue{number := 'foo'}
-            SELECT {I, Issue}.number;
-            """,
-            ['1', '1', '2', '2', '3', '3', '4', '4'],
-            sort=True
-        )
+        with self.assertRaisesRegex(
+            edgedb.SchemaError,
+            "it is illegal to create a type union that causes "
+            "a computable property 'number' to mix with other "
+            "versions of the same property 'number'"
+        ):
+            await self.con.execute(
+                r"""
+                WITH
+                    I := Issue{number := 'foo'}
+                SELECT {I, Issue}.number;
+                """
+            )
 
     async def test_edgeql_select_setops_16(self):
         await self.assert_query_result(
@@ -5987,6 +6031,25 @@ class TestEdgeQLSelect(tb.QueryTestCase):
                 [{'number': '1', 'name': 'Release EdgeDB'}, "Open"],
             ]
         )
+
+    async def test_edgeql_select_banned_anonymous_01(self):
+        async with self.assertRaisesRegexTx(
+            edgedb.QueryError,
+            "it is illegal to create a type union that causes a "
+            "computable property 'z' to mix with other versions of the "
+            "same property 'z'"
+        ):
+            await self.con.execute("""
+                SELECT DISTINCT {{ z := 1 }, { z := 2 }};
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.QueryError,
+            "cannot use DISTINCT on anonymous shape",
+        ):
+            await self.con.execute("""
+                SELECT DISTINCT { z := 1 } = { z := 2 };
+            """)
 
     @test.xfail("We produce results that don't decode properly")
     async def test_edgeql_select_array_common_type_01(self):

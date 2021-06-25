@@ -119,9 +119,10 @@ def fini_expression(
     # The inference context object will be shared between
     # cardinality and multiplicity inferrers.
     inf_ctx = inference.make_ctx(env=ctx.env)
-    cardinality = inference.infer_cardinality(
+    cardinality = inference.infer_toplevel_cardinality(
         ir,
         scope_tree=ctx.path_scope,
+        source_map=ctx.source_map,
         ctx=inf_ctx,
     )
     multiplicity: Optional[qltypes.Multiplicity] = None
@@ -331,7 +332,7 @@ def _rewrite_weak_namespaces(
         if path_scope_id is not None:
             # Some entries in set_types are from compiling views
             # in temporary scopes, so we need to just skip those.
-            if scope := tree.find_by_unique_id(path_scope_id):
+            if scope := ctx.env.scope_tree_nodes.get(path_scope_id):
                 _try_namespace_fix(scope, ir_set)
 
 
@@ -573,8 +574,7 @@ def declare_view_from_schema(
 
         vc = subctx.aliased_views[viewcls_name]
         assert vc is not None
-        if not ctx.in_temp_scope:
-            ctx.env.schema_view_cache[viewcls] = vc
+        ctx.env.schema_view_cache[viewcls] = vc
         ctx.source_map.update(subctx.source_map)
         ctx.aliased_views[viewcls_name] = subctx.aliased_views[viewcls_name]
         ctx.view_nodes[vc.get_name(ctx.env.schema)] = vc

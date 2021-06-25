@@ -856,7 +856,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
     async def test_edgeql_scope_binding_06(self):
         await self.assert_query_result(
             r"""
-            SELECT stdgraphql::Query {
+            SELECT {
                 lol := (
                     WITH L := (FOR name in {'Alice', 'Bob'} UNION (
                         SELECT User
@@ -882,7 +882,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
     async def test_edgeql_scope_binding_07(self):
         await self.assert_query_result(
             r"""
-            SELECT stdgraphql::Query {
+            SELECT {
                 lol := (
                     WITH Y := (FOR x IN {1, 2} UNION (x + 1)),
                     SELECT _ := ((SELECT Y), (SELECT Y))
@@ -2436,4 +2436,90 @@ class TestEdgeQLScope(tb.QueryTestCase):
                 {"name": "Carol", "specials": ["Djinn"]},
                 {"name": "Dave", "specials": ["Djinn"]}
             ],
+        )
+
+    async def test_edgeql_scope_branch_01(self):
+        await self.assert_query_result(
+            """
+                SELECT count(((SELECT User), ((User),).0));
+            """,
+            [4],
+        )
+
+    async def test_edgeql_scope_branch_02(self):
+        await self.assert_query_result(
+            """
+                SELECT count((
+                    (SELECT User.name),
+                    ((SELECT User.name) ++ (User.name),).0,
+                 ));
+            """,
+            [4],
+        )
+
+    async def test_edgeql_scope_branch_03(self):
+        await self.assert_query_result(
+            """
+                SELECT count((
+                    (SELECT User.name),
+                    ((SELECT User.name) ++ (User.name)) ?? "uhoh",
+                 ));
+            """,
+            [4],
+        )
+
+    async def test_edgeql_scope_computable_factoring_01(self):
+        await self.assert_query_result(
+            """
+                WITH U := (
+                        SELECT User {
+                            cards := (
+                                SELECT .deck {
+                                    foo := .name
+                                }
+                            )
+                        } FILTER .name = 'Dave'
+                    )
+                SELECT
+                    count(((SELECT U.cards.foo), (SELECT U.cards.foo)));
+            """,
+            [49],
+        )
+
+    async def test_edgeql_scope_computable_factoring_02(self):
+        await self.assert_query_result(
+            """
+                WITH U := (
+                        SELECT User {
+                            cards := (
+                                SELECT .deck {
+                                    foo := .name
+                                }
+                            )
+                        } FILTER .name = 'Dave'
+                    )
+                SELECT
+                    count(((SELECT U.cards.foo),
+                          ((SELECT U.cards.foo), (U.cards.foo))))
+            """,
+            [7],
+        )
+
+    async def test_edgeql_scope_computable_factoring_03(self):
+        await self.assert_query_result(
+            """
+                WITH U := (
+                        SELECT User {
+                            cards := (
+                                SELECT .deck {
+                                    foo := .name
+                                }
+                            )
+                        } FILTER .name = 'Dave'
+                    )
+                SELECT
+                    count(((SELECT U.cards.foo),
+                          (((SELECT U.cards.foo), (U.cards.foo)),).0))
+            """,
+            [7],
         )

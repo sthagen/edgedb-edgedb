@@ -611,7 +611,7 @@ class ObjectMeta(type):
             del clsdict[k]
 
         try:
-            cls = cast(ObjectMeta, super().__new__(mcls, name, bases, clsdict))
+            cls = super().__new__(mcls, name, bases, clsdict)
         except TypeError as ex:
             raise TypeError(
                 f'Object metaclass has failed to create class {name}: {ex}')
@@ -2876,7 +2876,7 @@ class InheritingObject(SubclassableObject):
     def get_default_base_name(self) -> Optional[sn.Name]:
         return None
 
-    # Redefinining bases and ancestors accessors to make them generic
+    # Redefining bases and ancestors accessors to make them generic
     def get_bases(
         self: InheritingObjectT,
         schema: s_schema.Schema,

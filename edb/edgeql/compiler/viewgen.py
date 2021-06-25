@@ -78,17 +78,22 @@ def process_view(
     if view_scls is not None:
         return view_scls
 
-    with ctx.newscope(fenced=True, temporary=True) as scopectx:
-        scopectx.path_scope.attach_path(path_id, context=parser_context)
+    with ctx.newscope(fenced=True) as scopectx:
         view_path_id_ns = None
+        new_path_id = path_id
         if ctx.expr_exposed or is_insert or is_update:
             view_path_id_ns = irast.WeakNamespace(ctx.aliases.get('ns'))
             scopectx.path_id_namespace |= {view_path_id_ns}
             scopectx.path_scope.add_namespaces({view_path_id_ns})
+            new_path_id = path_id.merge_namespace({view_path_id_ns})
+
+        scopectx.path_scope.attach_path(new_path_id, context=parser_context)
+        if ctx.path_log is not None:
+            ctx.path_log.append(path_id)
 
         view_scls = _process_view(
             stype=stype,
-            path_id=path_id,
+            path_id=new_path_id,
             elements=elements,
             view_rptr=view_rptr,
             view_name=view_name,
@@ -360,6 +365,7 @@ def _normalize_view_ptr_expr(
     target_typexpr = None
     source: qlast.Base
     base_ptrcls_is_alias = False
+    irexpr = None
 
     if plen >= 2 and isinstance(steps[-1], qlast.TypeIntersection):
         # Target type intersection: foo: Type
@@ -524,8 +530,10 @@ def _normalize_view_ptr_expr(
                 ns=ctx.path_id_namespace,
                 ctx=ctx)
 
-            ctx.path_scope.attach_path(sub_path_id,
-                                       context=shape_el.context)
+            if ctx.path_log is not None:
+                ctx.path_log.append(sub_path_id)
+            ctx.path_scope.attach_path(
+                sub_path_id, context=shape_el.context)
 
             if not isinstance(ptr_target, s_objtypes.ObjectType):
                 raise errors.QueryError(
@@ -827,6 +835,7 @@ def _normalize_view_ptr_expr(
     if qlexpr is not None:
         ctx.source_map[ptrcls] = irast.ComputableInfo(
             qlexpr=qlexpr,
+            irexpr=irexpr,
             context=ctx,
             path_id=path_id,
             path_id_ns=path_id_namespace,

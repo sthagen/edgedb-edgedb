@@ -248,6 +248,7 @@ EDB_TO_GQL_SCALARS_MAP = {
     'cal::local_datetime': GraphQLString,
     'cal::local_date': GraphQLString,
     'cal::local_time': GraphQLString,
+    'cal::relative_duration': GraphQLString,
 }
 
 
@@ -1366,9 +1367,9 @@ class GQLTypeMeta(type):
 
         edb_type = dct.get('edb_type')
         if edb_type:
-            mcls.edb_map[str(edb_type)] = cls
+            mcls.edb_map[str(edb_type)] = cls  # type: ignore
 
-        return cls  # type: ignore
+        return cls
 
 
 class GQLBaseType(metaclass=GQLTypeMeta):

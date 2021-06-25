@@ -73,13 +73,22 @@ Object Shape Descriptor
         //   1 << 0: the field is implicit
         //   1 << 1: the field is a link property
         //   1 << 2: the field is a link
-        uint8           flags;
+        uint32          flags;
+
+        uint8<Cardinality> cardinality;
 
         // Field name.
         string          name;
 
         // Field type descriptor index.
         uint16          type_pos;
+    };
+
+    enum Cardinality {
+        AT_MOST_ONE     = 0x0;
+        ONE             = 0x1;
+        MANY            = 0x2;
+        AT_LEAST_ONE    = 0x3;
     };
 
 Objects are encoded on the wire as :ref:`tuples <ref_protocol_fmt_tuple>`.
@@ -159,6 +168,9 @@ The following table lists all EdgeDB base types descriptor IDs:
 
    * - ``00000000-0000-0000-0000-000000000110``
      - :ref:`std::bigint <ref_protocol_fmt_bigint>`
+
+   * - ``00000000-0000-0000-0000-000000000111``
+     - :ref:`cal::relative_duration <ref_protocol_fmt_relative_duration>`
 
 
 Scalar Type Descriptor

@@ -1048,6 +1048,17 @@ aa';
         SELECT ``::Bar;
         """
 
+    @tb.must_fail(errors.EdgeQLSyntaxError, line=2, col=16)
+    def test_edgeql_syntax_name_27(self):
+        """
+        SELECT `$event`;
+        """
+
+    def test_edgeql_syntax_name_28(self):
+        """
+        SELECT `ok$event`;
+        """
+
     def test_edgeql_syntax_shape_01(self):
         """
         SELECT Foo {bar};
@@ -1176,8 +1187,6 @@ aa';
         };
         """
 
-    @tb.must_fail(errors.EdgeQLSyntaxError,
-                  "Unexpected ':='", line=3, col=18)
     def test_edgeql_syntax_shape_14(self):
         """
         SELECT {

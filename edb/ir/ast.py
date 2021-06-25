@@ -398,8 +398,8 @@ class Pointer(Base):
     target: Set
     ptrref: BasePointerRef
     direction: s_pointers.PointerDirection
-    anchor: typing.Union[str, ast.MetaAST]
-    show_as_anchor: typing.Union[str, ast.MetaAST]
+    anchor: str
+    show_as_anchor: str
 
     @property
     def is_inbound(self) -> bool:
@@ -470,6 +470,7 @@ class Param:
 class ComputableInfo(typing.NamedTuple):
 
     qlexpr: qlast.Expr
+    irexpr: typing.Optional[typing.Union[Set, Expr]]
     context: compiler.ContextLevel
     path_id: PathId
     path_id_ns: typing.Optional[WeakNamespace]
@@ -799,7 +800,7 @@ class SessionStateCmd(Command):
     testmode: bool
 
 
-class ConfigCommand(Command):
+class ConfigCommand(Command, Expr):
     __abstract_node__ = True
     name: str
     scope: qltypes.ConfigScope
@@ -819,6 +820,6 @@ class ConfigReset(ConfigCommand):
     selector: typing.Optional[Set] = None
 
 
-class ConfigInsert(ConfigCommand, Expr):
+class ConfigInsert(ConfigCommand):
 
     expr: Set

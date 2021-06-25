@@ -741,7 +741,8 @@ class ConnectedTestCaseMixin:
                     self.fail(
                         f'{message}: {data!r} != {shape!r} '
                         f'{_format_path(path)}')
-            elif isinstance(shape, (str, int, timedelta, decimal.Decimal)):
+            elif isinstance(shape, (str, int, timedelta, decimal.Decimal,
+                                    edgedb.RelativeDuration)):
                 if data != shape:
                     self.fail(
                         f'{message}: {data!r} != {shape!r} '
@@ -1547,7 +1548,7 @@ class _EdgeDBServer:
             cmd += ['--bootstrap-command', bootstrap_command]
 
         if self.auto_shutdown:
-            cmd += ['--auto-shutdown']
+            cmd += ['--auto-shutdown-after', '0']
 
         if self.runstate_dir:
             cmd += ['--runstate-dir', self.runstate_dir]

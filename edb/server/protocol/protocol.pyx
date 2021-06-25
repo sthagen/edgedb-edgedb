@@ -128,7 +128,7 @@ cdef class HttpProtocol:
             self.unprocessed.append(req)
         else:
             self.in_response = True
-            self.loop.create_task(self._handle_request(req))
+            self.server.create_task(self._handle_request(req))
 
         self.server._http_last_minute_requests += 1
 
@@ -156,7 +156,7 @@ cdef class HttpProtocol:
 
         if self.unprocessed:
             req = self.unprocessed.popleft()
-            self.loop.create_task(self._handle_request(req))
+            self.server.create_task(self._handle_request(req))
         else:
             self.transport.resume_reading()
 
@@ -215,7 +215,7 @@ cdef class HttpProtocol:
         path = path.strip('/')
         path_parts = path.split('/')
 
-        # Check if this a request to a registered extension
+        # Check if this is a request to a registered extension
         if len(path_parts) >= 3 and path_parts[0] == 'db':
             root, dbname, extname, *args = path_parts
             db = self.server.maybe_get_db(dbname=dbname)
