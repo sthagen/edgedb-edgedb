@@ -446,11 +446,22 @@ def _break_down(
             )
         ):
             pass
-        elif isinstance(sub_op, breakable_commands):
-            _break_down(opmap, strongrefs, new_opbranch + [sub_op])
-        elif isinstance(sub_op, referencing.StronglyReferencedObjectCommand):
+        elif (
+            isinstance(sub_op, referencing.ReferencedObjectCommandBase)
+            and sub_op.is_strong_ref
+        ):
             assert isinstance(op, sd.ObjectCommand)
             strongrefs[sub_op.classname] = op.classname
+        elif isinstance(sub_op, breakable_commands):
+            _break_down(opmap, strongrefs, new_opbranch + [sub_op])
+
+    # For SET TYPE and friends, we need to make sure that an alter
+    # (with children) makes it into the opmap so it is processed.
+    if (
+        isinstance(op, sd.AlterSpecialObjectField)
+        and not isinstance(op, referencing.AlterOwned)
+    ):
+        opmap[new_opbranch[-2]] = new_opbranch[:-1]
 
     opmap[op] = new_opbranch
 
@@ -481,15 +492,25 @@ def _trace_op(
         parent_op: sd.ObjectCommand[so.Object],
     ) -> str:
         if isinstance(op.new_value, (so.Object, so.ObjectShell)):
-            nvn = op.new_value.get_name(new_schema)
+            obj = op.new_value
+            nvn = obj.get_name(new_schema)
             if nvn is not None:
                 deps.add(('create', str(nvn)))
                 deps.add(('alter', str(nvn)))
                 if nvn in renames_r:
                     deps.add(('rename', str(renames_r[nvn])))
 
+            if isinstance(obj, so.ObjectShell):
+                obj = obj.resolve(new_schema)
+            # For SET TYPE, we want to finish any rebasing into the
+            # target type before we change the type.
+            if isinstance(obj, so.InheritingObject):
+                for desc in obj.descendants(new_schema):
+                    deps.add(('rebase', str(desc.get_name(new_schema))))
+
         graph_key = f'{parent_op.classname}%%{op.property}'
         deps.add(('create', str(parent_op.classname)))
+        deps.add(('alter', str(parent_op.classname)))
 
         if isinstance(op.old_value, (so.Object, so.ObjectShell)):
             assert old_schema is not None

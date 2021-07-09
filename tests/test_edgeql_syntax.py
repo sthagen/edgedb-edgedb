@@ -2465,7 +2465,7 @@ aa';
 
 % OK %
 
-        SELECT (DETACHED Foo).bar;
+        SELECT DETACHED Foo.bar;
         """
 
     def test_edgeql_syntax_detached_05(self):
@@ -2474,7 +2474,16 @@ aa';
 
 % OK %
 
-        SELECT (DETACHED mod::Foo).bar;
+        SELECT DETACHED mod::Foo.bar;
+        """
+
+    def test_edgeql_syntax_detached_06(self):
+        """
+        SELECT (DETACHED Foo).bar;
+
+% OK %
+
+        SELECT (DETACHED Foo).bar;
         """
 
     def test_edgeql_syntax_select_01(self):
@@ -4111,6 +4120,12 @@ aa';
         RESET errmessage;
         """
 
+    def test_edgeql_syntax_ddl_constraint_13(self):
+        """
+        ALTER ABSTRACT CONSTRAINT not_bad
+            USING (((__subject__ != 'bad') and (__subject__ != 'terrible')));
+        """
+
     def test_edgeql_syntax_ddl_function_01(self):
         """
         CREATE FUNCTION std::strlen(string: std::str) -> std::int64
@@ -4528,6 +4543,19 @@ aa';
             NAMED ONLY d: OPTIONAL std::str
         ) ->
             std::int64 USING SQL FUNCTION 'aaa';
+        """
+
+    def test_edgeql_syntax_ddl_function_53(self):
+        """
+        ALTER FUNCTION foo() USING ('no');
+        """
+
+    def test_edgeql_syntax_ddl_function_54(self):
+        """
+        ALTER FUNCTION foo() {
+            SET volatility := 'volatile';
+            USING ('no');
+        };
         """
 
     def test_edgeql_syntax_ddl_operator_01(self):
@@ -4950,6 +4978,44 @@ aa';
         ALTER TYPE Foo {
             ALTER LINK bar {
                 RESET CARDINALITY USING (SELECT '123');
+            };
+        };
+        """
+
+    def test_edgeql_syntax_ddl_type_19(self):
+        """
+        ALTER TYPE Foo {
+            CREATE PROPERTY bar -> str {
+                USING (4);
+            };
+        };
+        """
+
+    def test_edgeql_syntax_ddl_type_20(self):
+        """
+        ALTER TYPE Foo {
+            ALTER PROPERTY bar {
+                SET TYPE str;
+                USING (4);
+            };
+        };
+        """
+
+    def test_edgeql_syntax_ddl_type_21(self):
+        """
+        ALTER TYPE Foo {
+            CREATE LINK bar -> Object {
+                USING (SELECT Object);
+            };
+        };
+        """
+
+    def test_edgeql_syntax_ddl_type_22(self):
+        """
+        ALTER TYPE Foo {
+            ALTER LINK bar {
+                SET TYPE Object;
+                USING (SELECT Object);
             };
         };
         """

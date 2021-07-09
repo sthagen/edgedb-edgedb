@@ -25,6 +25,7 @@ import io
 import typing
 
 from edb.common import binwrapper
+from .enums import Cardinality
 
 from . import render_utils
 
@@ -542,12 +543,6 @@ class CommandComplete(ServerMessage):
     message_length = MessageLength
     headers = Headers
     status = String('Command status.')
-
-
-class Cardinality(enum.Enum):
-    NO_RESULT = 0x6e
-    ONE = 0x6f
-    MANY = 0x6d
 
 
 class CommandDataDescription(ServerMessage):

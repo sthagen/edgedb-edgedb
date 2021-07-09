@@ -530,6 +530,18 @@ class ConstraintCommand(
             return super().compile_expr_field(
                 schema, context, field, value, track_schema_ref_exprs)
 
+    def get_dummy_expr_field_value(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        field: so.Field[Any],
+        value: Any,
+    ) -> Optional[s_expr.Expression]:
+        if field.name in {'expr', 'subjectexpr', 'finalexpr'}:
+            return s_expr.Expression(text='SELECT false')
+        else:
+            raise NotImplementedError(f'unhandled field {field.name!r}')
+
     @classmethod
     def get_inherited_ref_name(
         cls,
@@ -620,6 +632,199 @@ class ConstraintCommand(
                            constr.get_params(schema).objects(schema)}
 
         return localnames
+
+    def _populate_concrete_constraint_attrs(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        subject_obj: Optional[so.Object],
+        *,
+        name: sn.QualName,
+        subjectexpr: Optional[s_expr.Expression] = None,
+        subjectexpr_inherited: bool = False,
+        sourcectx: Optional[c_parsing.ParserContext] = None,
+        args: Any = None,
+        **kwargs: Any
+    ) -> None:
+        from edb.ir import ast as ir_ast
+        from edb.ir import utils as ir_utils
+
+        bases = self.get_resolved_attribute_value(
+            'bases', schema=schema, context=context,
+        )
+        if not bases:
+            bases = self.scls.get_bases(schema)
+        constr_base = bases.objects(schema)[0]
+        # If we have a concrete base, then we should inherit all of
+        # these attrs through the normal inherit_fields() mechanisms,
+        # and populating them ourselves will just mess up
+        # inherited_fields.
+        if not constr_base.generic(schema):
+            return
+
+        orig_subjectexpr = subjectexpr
+        orig_subject = subject_obj
+        base_subjectexpr = constr_base.get_field_value(schema, 'subjectexpr')
+        if subjectexpr is None:
+            subjectexpr = base_subjectexpr
+        elif (base_subjectexpr is not None
+                and subjectexpr.text != base_subjectexpr.text):
+            raise errors.InvalidConstraintDefinitionError(
+                f'subjectexpr is already defined for {name}'
+            )
+
+        if (isinstance(subject_obj, s_scalars.ScalarType)
+                and constr_base.get_is_aggregate(schema)):
+            raise errors.InvalidConstraintDefinitionError(
+                f'{constr_base.get_verbosename(schema)} may not '
+                f'be used on scalar types'
+            )
+
+        if subjectexpr is not None:
+            subject_ql = subjectexpr.qlast
+            subject = subject_ql
+        else:
+            subject = subject_obj
+
+        expr: s_expr.Expression = constr_base.get_field_value(schema, 'expr')
+        if not expr:
+            raise errors.InvalidConstraintDefinitionError(
+                f'missing constraint expression in {name}')
+
+        # Re-parse instead of using expr.qlast, because we mutate
+        # the AST below.
+        expr_ql = qlparser.parse(expr.text)
+
+        if not args:
+            args = constr_base.get_field_value(schema, 'args')
+
+        attrs = dict(kwargs)
+        inherited = dict()
+        if orig_subjectexpr is not None:
+            attrs['subjectexpr'] = orig_subjectexpr
+            inherited['subjectexpr'] = subjectexpr_inherited
+        else:
+            base_subjectexpr = constr_base.get_subjectexpr(schema)
+            if base_subjectexpr is not None:
+                attrs['subjectexpr'] = base_subjectexpr
+                inherited['subjectexpr'] = True
+
+        errmessage = attrs.get('errmessage')
+        if not errmessage:
+            errmessage = constr_base.get_errmessage(schema)
+            inherited['errmessage'] = True
+
+        attrs['errmessage'] = errmessage
+
+        if subject is not orig_subject:
+            # subject has been redefined
+            assert isinstance(subject, qlast.Base)
+            qlutils.inline_anchors(
+                expr_ql, anchors={qlast.Subject().name: subject})
+            subject = orig_subject
+
+        if args:
+            args_ql: List[qlast.Base] = [
+                qlast.Path(steps=[qlast.Subject()]),
+            ]
+            args_ql.extend(arg.qlast for arg in args)
+            args_map = qlutils.index_parameters(
+                args_ql,
+                parameters=constr_base.get_params(schema),
+                schema=schema,
+            )
+            qlutils.inline_parameters(expr_ql, args_map)
+
+        attrs['args'] = args
+
+        assert subject is not None
+        path_prefix_anchor = (
+            qlast.Subject().name if isinstance(subject, s_types.Type)
+            else None
+        )
+
+        final_expr = s_expr.Expression.compiled(
+            s_expr.Expression.from_ast(expr_ql, schema, {}),
+            schema=schema,
+            options=qlcompiler.CompilerOptions(
+                anchors={qlast.Subject().name: subject},
+                path_prefix_anchor=path_prefix_anchor,
+                apply_query_rewrites=not context.stdmode,
+            ),
+        )
+
+        bool_t = schema.get('std::bool', type=s_scalars.ScalarType)
+        assert isinstance(final_expr.irast, ir_ast.Statement)
+
+        expr_type = final_expr.irast.stype
+        if not expr_type.issubclass(schema, bool_t):
+            raise errors.InvalidConstraintDefinitionError(
+                f'{name} constraint expression expected '
+                f'to return a bool value, got '
+                f'{expr_type.get_verbosename(schema)}',
+                context=sourcectx
+            )
+
+        if subjectexpr is not None:
+            if (isinstance(subject_obj, s_types.Type)
+                    and subject_obj.is_object_type()):
+                singletons = frozenset({subject_obj})
+            else:
+                singletons = frozenset()
+
+            final_subjectexpr = s_expr.Expression.compiled(
+                subjectexpr,
+                schema=schema,
+                options=qlcompiler.CompilerOptions(
+                    anchors={qlast.Subject().name: subject},
+                    path_prefix_anchor=path_prefix_anchor,
+                    singletons=singletons,
+                    apply_query_rewrites=not context.stdmode,
+                ),
+            )
+            assert isinstance(final_subjectexpr.irast, ir_ast.Statement)
+
+            refs = ir_utils.get_longest_paths(final_expr.irast)
+            has_multi = False
+            for ref in refs:
+                while ref.rptr:
+                    rptr = ref.rptr
+                    if rptr.ptrref.dir_cardinality.is_multi():
+                        has_multi = True
+                    if (not isinstance(rptr.ptrref,
+                                       ir_ast.TupleIndirectionPointerRef)
+                            and rptr.ptrref.source_ptr is None
+                            and rptr.source.rptr is not None):
+                        raise errors.InvalidConstraintDefinitionError(
+                            "constraints cannot contain paths with more "
+                            "than one hop",
+                            context=sourcectx
+                        )
+
+                    ref = rptr.source
+
+            if has_multi and len(refs) > 1:
+                raise errors.InvalidConstraintDefinitionError(
+                    "cannot reference multiple links or properties in a "
+                    "constraint where at least one link or property is MULTI",
+                    context=sourcectx
+                )
+
+            if has_multi and ir_utils.contains_set_of_op(
+                    final_subjectexpr.irast):
+                raise errors.InvalidConstraintDefinitionError(
+                    "cannot use aggregate functions or operators "
+                    "in a non-aggregating constraint",
+                    context=sourcectx
+                )
+
+        attrs['finalexpr'] = final_expr
+        attrs['params'] = constr_base.get_params(schema)
+        inherited['params'] = True
+        attrs['abstract'] = False
+
+        for k, v in attrs.items():
+            self.set_attribute_value(k, v, inherited=bool(inherited.get(k)))
 
 
 class CreateConstraint(
@@ -800,6 +1005,8 @@ class CreateConstraint(
                 context,
                 subject_obj=subject,
                 name=shortname,
+                subjectexpr_inherited=self.is_attribute_inherited(
+                    'subjectexpr'),
                 sourcectx=self.source_context,
                 **props,
             )
@@ -807,197 +1014,6 @@ class CreateConstraint(
             self.set_attribute_value('subject', subject)
 
         return super()._create_begin(schema, context)
-
-    def _populate_concrete_constraint_attrs(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        subject_obj: Optional[so.Object],
-        *,
-        name: sn.QualName,
-        subjectexpr: Optional[s_expr.Expression] = None,
-        sourcectx: Optional[c_parsing.ParserContext] = None,
-        args: Any = None,
-        **kwargs: Any
-    ) -> None:
-        from edb.ir import ast as ir_ast
-        from edb.ir import utils as ir_utils
-
-        bases = self.get_resolved_attribute_value(
-            'bases', schema=schema, context=context,
-        )
-        direct_base = bases.objects(schema)[0]
-        # If we have a concrete base, then we should inherit all of
-        # these attrs through the normal inherit_fields() mechanisms,
-        # and populating them ourselves will just mess up
-        # inherited_fields.
-        if not direct_base.generic(schema):
-            return
-
-        constr_base = schema.get(name, type=Constraint)
-
-        orig_subjectexpr = subjectexpr
-        orig_subject = subject_obj
-        base_subjectexpr = constr_base.get_field_value(schema, 'subjectexpr')
-        if subjectexpr is None:
-            subjectexpr = base_subjectexpr
-        elif (base_subjectexpr is not None
-                and subjectexpr.text != base_subjectexpr.text):
-            raise errors.InvalidConstraintDefinitionError(
-                f'subjectexpr is already defined for {name}'
-            )
-
-        if (isinstance(subject_obj, s_scalars.ScalarType)
-                and constr_base.get_is_aggregate(schema)):
-            raise errors.InvalidConstraintDefinitionError(
-                f'{constr_base.get_verbosename(schema)} may not '
-                f'be used on scalar types'
-            )
-
-        if subjectexpr is not None:
-            subject_ql = subjectexpr.qlast
-            subject = subject_ql
-        else:
-            subject = subject_obj
-
-        expr: s_expr.Expression = constr_base.get_field_value(schema, 'expr')
-        if not expr:
-            raise errors.InvalidConstraintDefinitionError(
-                f'missing constraint expression in {name}')
-
-        # Re-parse instead of using expr.qlast, because we mutate
-        # the AST below.
-        expr_ql = qlparser.parse(expr.text)
-
-        if not args:
-            args = constr_base.get_field_value(schema, 'args')
-
-        attrs = dict(kwargs)
-        inherited = dict()
-        if orig_subjectexpr is not None:
-            attrs['subjectexpr'] = orig_subjectexpr
-        else:
-            base_subjectexpr = constr_base.get_subjectexpr(schema)
-            if base_subjectexpr is not None:
-                attrs['subjectexpr'] = base_subjectexpr
-                inherited['subjectexpr'] = True
-
-        errmessage = attrs.get('errmessage')
-        if not errmessage:
-            errmessage = constr_base.get_errmessage(schema)
-            inherited['errmessage'] = True
-
-        attrs['errmessage'] = errmessage
-
-        if subject is not orig_subject:
-            # subject has been redefined
-            assert isinstance(subject, qlast.Base)
-            qlutils.inline_anchors(
-                expr_ql, anchors={qlast.Subject().name: subject})
-            subject = orig_subject
-
-        if args:
-            args_ql: List[qlast.Base] = [
-                qlast.Path(steps=[qlast.Subject()]),
-            ]
-            args_ql.extend(arg.qlast for arg in args)
-            args_map = qlutils.index_parameters(
-                args_ql,
-                parameters=constr_base.get_params(schema),
-                schema=schema,
-            )
-            qlutils.inline_parameters(expr_ql, args_map)
-
-        attrs['args'] = args
-
-        assert subject is not None
-        path_prefix_anchor = (
-            qlast.Subject().name if isinstance(subject, s_types.Type)
-            else None
-        )
-
-        final_expr = s_expr.Expression.compiled(
-            s_expr.Expression.from_ast(expr_ql, schema, {}),
-            schema=schema,
-            options=qlcompiler.CompilerOptions(
-                anchors={qlast.Subject().name: subject},
-                path_prefix_anchor=path_prefix_anchor,
-                apply_query_rewrites=not context.stdmode,
-            ),
-        )
-
-        bool_t = schema.get('std::bool', type=s_scalars.ScalarType)
-        assert isinstance(final_expr.irast, ir_ast.Statement)
-
-        expr_type = final_expr.irast.stype
-        if not expr_type.issubclass(schema, bool_t):
-            raise errors.InvalidConstraintDefinitionError(
-                f'{name} constraint expression expected '
-                f'to return a bool value, got '
-                f'{expr_type.get_verbosename(schema)}',
-                context=sourcectx
-            )
-
-        if subjectexpr is not None:
-            if (isinstance(subject_obj, s_types.Type)
-                    and subject_obj.is_object_type()):
-                singletons = frozenset({subject_obj})
-            else:
-                singletons = frozenset()
-
-            final_subjectexpr = s_expr.Expression.compiled(
-                subjectexpr,
-                schema=schema,
-                options=qlcompiler.CompilerOptions(
-                    anchors={qlast.Subject().name: subject},
-                    path_prefix_anchor=path_prefix_anchor,
-                    singletons=singletons,
-                    apply_query_rewrites=not context.stdmode,
-                ),
-            )
-            assert isinstance(final_subjectexpr.irast, ir_ast.Statement)
-
-            refs = ir_utils.get_longest_paths(final_expr.irast)
-            has_multi = False
-            for ref in refs:
-                while ref.rptr:
-                    rptr = ref.rptr
-                    if rptr.ptrref.dir_cardinality.is_multi():
-                        has_multi = True
-                    if (not isinstance(rptr.ptrref,
-                                       ir_ast.TupleIndirectionPointerRef)
-                            and rptr.ptrref.source_ptr is None
-                            and rptr.source.rptr is not None):
-                        raise errors.InvalidConstraintDefinitionError(
-                            "constraints cannot contain paths with more "
-                            "than one hop",
-                            context=sourcectx
-                        )
-
-                    ref = rptr.source
-
-            if has_multi and len(refs) > 1:
-                raise errors.InvalidConstraintDefinitionError(
-                    "cannot reference multiple links or properties in a "
-                    "constraint where at least one link or property is MULTI",
-                    context=sourcectx
-                )
-
-            if has_multi and ir_utils.contains_set_of_op(
-                    final_subjectexpr.irast):
-                raise errors.InvalidConstraintDefinitionError(
-                    "cannot use aggregate functions or operators "
-                    "in a non-aggregating constraint",
-                    context=sourcectx
-                )
-
-        attrs['finalexpr'] = final_expr
-        attrs['params'] = constr_base.get_params(schema)
-        inherited['params'] = True
-        attrs['abstract'] = False
-
-        for k, v in attrs.items():
-            self.set_attribute_value(k, v, inherited=bool(inherited.get(k)))
 
     @classmethod
     def as_inherited_ref_cmd(
@@ -1228,6 +1244,53 @@ class AlterConstraint(
     astnode = [qlast.AlterConcreteConstraint, qlast.AlterConstraint]
     referenced_astnode = qlast.AlterConcreteConstraint
 
+    def _alter_begin(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        referrer_ctx = self.get_referrer_context(context)
+        if referrer_ctx is None:
+            schema = super()._alter_begin(schema, context)
+            return schema
+
+        subject = referrer_ctx.scls
+        assert isinstance(subject, ConsistencySubject)
+
+        if not context.canonical:
+            props = self.get_attributes(schema, context)
+            props.pop('name', None)
+            props.pop('subject', None)
+            props.pop('expr', None)
+            args = props.pop('args', None)
+            if not args:
+                args = self.scls.get_args(schema)
+            subjectexpr = props.pop('subjectexpr', None)
+            subjectexpr_inherited = self.is_attribute_inherited('subjectexpr')
+            if not subjectexpr:
+                subjectexpr_inherited = self.scls.field_is_inherited(
+                    schema, 'subjectexpr')
+                subjectexpr = self.scls.get_subjectexpr(schema)
+            fullname = self.classname
+            shortname = sn.shortname_from_fullname(fullname)
+            assert isinstance(shortname, sn.QualName), \
+                "expected qualified name"
+            self._populate_concrete_constraint_attrs(
+                schema,
+                context,
+                subject_obj=subject,
+                name=shortname,
+                subjectexpr=subjectexpr,
+                subjectexpr_inherited=subjectexpr_inherited,
+                args=args,
+                sourcectx=self.source_context,
+                **props,
+            )
+
+            self.set_attribute_value('subject', subject)
+
+        return super()._alter_begin(schema, context)
+
     @classmethod
     def _cmd_tree_from_ast(
         cls,
@@ -1304,6 +1367,44 @@ class AlterConstraint(
                 f' it is defined as non-delegated in {bases_repr}',
                 context=self.source_context,
             )
+
+    def canonicalize_alter_from_external_ref(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> None:
+        if (
+            not self.get_attribute_value('abstract')
+            and (subjectexpr :=
+                 self.get_attribute_value('subjectexpr')) is not None
+        ):
+            # To compute the new name, we construct an AST of the
+            # constraint, since that is the infrastructure we have for
+            # computing the classname.
+            name = sn.shortname_from_fullname(self.classname)
+            assert isinstance(name, sn.QualName), "expected qualified name"
+            ast = qlast.CreateConcreteConstraint(
+                name=qlast.ObjectRef(name=name.name, module=name.module),
+                subjectexpr=subjectexpr.qlast,
+            )
+            quals = sn.quals_from_fullname(self.classname)
+            new_name = self._classname_from_ast_and_referrer(
+                schema, sn.QualName.from_string(quals[0]), ast, context)
+            if new_name == self.classname:
+                return
+
+            rename = self.scls.init_delta_command(
+                schema, sd.RenameObject, new_name=new_name)
+            rename.set_attribute_value(
+                'name', value=new_name, orig_value=self.classname)
+            self.add(rename)
+
+    def _get_params(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_func.FuncParameterList:
+        return self.scls.get_params(schema)
 
 
 class DeleteConstraint(

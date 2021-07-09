@@ -22,7 +22,6 @@ from __future__ import annotations
 from typing import *
 
 from edb.edgeql import ast as qlast
-from edb.edgeql import compiler as qlcompiler
 from edb.edgeql import qltypes
 
 from edb import errors
@@ -223,13 +222,13 @@ class LinkCommand(
 
         super()._append_subcmd_ast(schema, node, subcmd, context)
 
-    def _validate_pointer_def(
+    def validate_object(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> None:
         """Check that link definition is sound."""
-        super()._validate_pointer_def(schema, context)
+        super().validate_object(schema, context)
 
         scls = self.scls
         assert isinstance(scls, Link)
@@ -431,6 +430,7 @@ class CreateLink(
 
         src_prop = lproperties.CreateProperty(
             classname=src_prop_name,
+            is_strong_ref=True,
         )
         src_prop.set_attribute_value('name', src_prop_name)
         src_prop.set_attribute_value(
@@ -464,6 +464,7 @@ class CreateLink(
 
         tgt_prop = lproperties.CreateProperty(
             classname=tgt_prop_name,
+            is_strong_ref=True,
         )
 
         tgt_prop.set_attribute_value('name', tgt_prop_name)
@@ -589,8 +590,7 @@ class SetTargetDeletePolicy(sd.Command):
 
 class AlterLink(
     LinkCommand,
-    pointers.PointerAlterFragment[Link],
-    referencing.AlterReferencedInheritingObject[Link],
+    pointers.AlterPointer[Link],
 ):
     astnode = [qlast.AlterConcreteLink, qlast.AlterLink]
     referenced_astnode = qlast.AlterConcreteLink
@@ -601,31 +601,13 @@ class AlterLink(
         schema: s_schema.Schema,
         astnode: qlast.DDLOperation,
         context: sd.CommandContext,
-    ) -> referencing.AlterReferencedInheritingObject[Link]:
+    ) -> AlterLink:
         cmd = super()._cmd_tree_from_ast(schema, astnode, context)
-        assert isinstance(cmd, pointers.PointerCommand)
+        assert isinstance(cmd, AlterLink)
         if isinstance(astnode, qlast.CreateConcreteLink):
             cmd._process_create_or_alter_ast(schema, astnode, context)
         else:
-            expr_cmd = qlast.get_ddl_field_command(astnode, 'expr')
-            if expr_cmd is not None:
-                expr = expr_cmd.value
-                if expr is not None:
-                    qlcompiler.normalize(
-                        expr,
-                        schema=schema,
-                        modaliases=context.modaliases
-                    )
-                    target_ref = pointers.ComputableRef(expr)
-
-                    cmd.set_attribute_value(
-                        'target',
-                        target_ref,
-                        source_context=expr.context,
-                    )
-                    cmd.discard_attribute('expr')
-
-        assert isinstance(cmd, referencing.AlterReferencedInheritingObject)
+            cmd._process_alter_ast(schema, astnode, context)
         return cmd
 
     def _apply_field_ast(
@@ -665,22 +647,8 @@ class DeleteLink(
     astnode = [qlast.DropConcreteLink, qlast.DropLink]
     referenced_astnode = qlast.DropConcreteLink
 
-    def _canonicalize(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        scls: so.Object,
-    ) -> List[sd.Command]:
-        assert isinstance(scls, Link)
-        commands = super()._canonicalize(schema, context, scls)
-        target = scls.get_target(schema)
-
-        if target and (del_cmd := target.as_type_delete_if_dead(schema)):
-            subcmds = del_cmd._canonicalize(schema, context, target)
-            del_cmd.update(subcmds)
-            commands.append(del_cmd)
-
-        return commands
+    # NB: target type cleanup (e.g. target compound type) is done by
+    #     the DeleteProperty handler for the @target property.
 
     def _get_ast(
         self,

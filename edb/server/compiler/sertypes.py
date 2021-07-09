@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import dataclasses
-import enum
 import io
 import struct
 import typing
@@ -37,6 +36,8 @@ from edb.schema import objects as s_obj
 from edb.schema import objtypes as s_objtypes
 from edb.schema import scalars as s_scalars
 from edb.schema import types as s_types
+
+from . import enums
 
 
 _int32_packer = struct.Struct('!l').pack
@@ -66,27 +67,20 @@ CTYPE_ENUM = b'\x07'
 CTYPE_ANNO_TYPENAME = b'\xff'
 
 
-class Cardinality(enum.Enum):
-    AT_MOST_ONE = 0x0
-    ONE = 0x1
-    MANY = 0x2
-    AT_LEAST_ONE = 0x3
+def cardinality_from_ptr(ptr, schema) -> enums.Cardinality:
+    required = ptr.get_required(schema)
+    is_multi = ptr.get_cardinality(schema).is_multi()
 
-    @classmethod
-    def from_ptr(cls, ptr, schema) -> Cardinality:
-        required = ptr.get_required(schema)
-        is_multi = ptr.get_cardinality(schema).is_multi()
+    if not required and not is_multi:
+        return enums.Cardinality.AT_MOST_ONE
+    if required and not is_multi:
+        return enums.Cardinality.ONE
+    if not required and is_multi:
+        return enums.Cardinality.MANY
+    if required and is_multi:
+        return enums.Cardinality.AT_LEAST_ONE
 
-        if not required and not is_multi:
-            return cls.AT_MOST_ONE
-        if required and not is_multi:
-            return cls.ONE
-        if not required and is_multi:
-            return cls.MANY
-        if required and is_multi:
-            return cls.AT_LEAST_ONE
-
-        raise RuntimeError("unreachable")
+    raise RuntimeError("unreachable")
 
 
 class TypeSerializer:
@@ -269,7 +263,7 @@ class TypeSerializer:
                 link_props.append(False)
                 links.append(not ptr.is_property(self.schema))
                 cardinalities.append(
-                    Cardinality.from_ptr(ptr, self.schema).value)
+                    cardinality_from_ptr(ptr, self.schema).value)
 
             t_rptr = t.get_rptr(self.schema)
             if t_rptr is not None and (rptr_ptrs := view_shapes.get(t_rptr)):
@@ -289,7 +283,7 @@ class TypeSerializer:
                     link_props.append(True)
                     links.append(False)
                     cardinalities.append(
-                        Cardinality.from_ptr(ptr, self.schema).value)
+                        cardinality_from_ptr(ptr, self.schema).value)
 
             type_id = self._get_object_type_id(
                 base_type_id, subtypes, element_names,
@@ -438,7 +432,8 @@ class TypeSerializer:
     def _parse(
         cls,
         desc: binwrapper.BinWrapper,
-        codecs_list: typing.List[TypeDesc]
+        codecs_list: typing.List[TypeDesc],
+        protocol_version: tuple,
     ) -> typing.Optional[TypeDesc]:
         t = desc.read_bytes(1)
         tid = uuidgen.from_bytes(desc.read_bytes(16))
@@ -451,13 +446,26 @@ class TypeSerializer:
             els = desc.read_ui16()
             fields = {}
             flags = {}
+            cardinalities = {}
             for _ in range(els):
-                flag = desc.read_bytes(1)[0]
+                if protocol_version >= (0, 11):
+                    flag = desc.read_ui32()
+                    cardinality = enums.Cardinality(desc.read_bytes(1)[0])
+                else:
+                    flag = desc.read_bytes(1)[0]
+                    cardinality = None
                 name = desc.read_len32_prefixed_bytes().decode()
                 pos = desc.read_ui16()
                 fields[name] = codecs_list[pos]
                 flags[name] = flag
-            return ShapeDesc(tid=tid, flags=flags, fields=fields)
+                if cardinality:
+                    cardinalities[name] = cardinality
+            return ShapeDesc(
+                tid=tid,
+                flags=flags,
+                fields=fields,
+                cardinalities=cardinalities,
+            )
 
         elif t == CTYPE_BASE_SCALAR:
             return BaseScalarDesc(tid=tid)
@@ -511,12 +519,12 @@ class TypeSerializer:
                 f'no codec implementation for EdgeDB data class {t}')
 
     @classmethod
-    def parse(cls, typedesc: bytes) -> TypeDesc:
+    def parse(cls, typedesc: bytes, protocol_version: tuple) -> TypeDesc:
         buf = io.BytesIO(typedesc)
         wrapped = binwrapper.BinWrapper(buf)
         codecs_list = []
         while buf.tell() < len(typedesc):
-            desc = cls._parse(wrapped, codecs_list)
+            desc = cls._parse(wrapped, codecs_list, protocol_version)
             if desc is not None:
                 codecs_list.append(desc)
         if not codecs_list:
@@ -536,8 +544,9 @@ class SetDesc(TypeDesc):
 
 @dataclasses.dataclass(frozen=True)
 class ShapeDesc(TypeDesc):
-    fields: typing.Dict[TypeDesc]
-    flags: typing.Dict[int]
+    fields: typing.Dict[str, TypeDesc]
+    flags: typing.Dict[str, int]
+    cardinalities: typing.Dict[str, enums.Cardinality]
 
 
 @dataclasses.dataclass(frozen=True)

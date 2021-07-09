@@ -26,6 +26,7 @@ from typing import *
 
 from edb import errors
 
+from edb.common import struct
 from edb.common import verutils
 
 from edb.edgeql import ast as qlast
@@ -37,7 +38,7 @@ from edb.common import uuidgen
 from . import abc as s_abc
 from . import annos as s_anno
 from . import delta as sd
-from . import expr
+from . import expr as s_expr
 from . import name as sn
 from . import objects as so
 from . import referencing
@@ -140,7 +141,7 @@ class ParameterLike(s_abc.Parameter):
     def get_kind(self, _: s_schema.Schema) -> ft.ParameterKind:
         raise NotImplementedError
 
-    def get_default(self, _: s_schema.Schema) -> Optional[expr.Expression]:
+    def get_default(self, _: s_schema.Schema) -> Optional[s_expr.Expression]:
         raise NotImplementedError
 
     def get_type(self, _: s_schema.Schema) -> s_types.Type:
@@ -158,7 +159,7 @@ class ParameterDesc(ParameterLike):
 
     num: int
     name: sn.Name
-    default: Optional[expr.Expression]
+    default: Optional[s_expr.Expression]
     type: s_types.TypeShell
     typemod: ft.TypeModifier
     kind: ft.ParameterKind
@@ -168,7 +169,7 @@ class ParameterDesc(ParameterLike):
         *,
         num: int,
         name: sn.Name,
-        default: Optional[expr.Expression],
+        default: Optional[s_expr.Expression],
         type: s_types.TypeShell,
         typemod: ft.TypeModifier,
         kind: ft.ParameterKind,
@@ -191,9 +192,9 @@ class ParameterDesc(ParameterLike):
 
         paramd = None
         if astnode.default is not None:
-            defexpr = expr.Expression.from_ast(
+            defexpr = s_expr.Expression.from_ast(
                 astnode.default, schema, modaliases, as_fragment=True)
-            paramd = expr.Expression.compiled(
+            paramd = s_expr.Expression.compiled(
                 defexpr,
                 schema,
                 as_fragment=True,
@@ -237,7 +238,7 @@ class ParameterDesc(ParameterLike):
     def get_kind(self, _: s_schema.Schema) -> ft.ParameterKind:
         return self.kind
 
-    def get_default(self, _: s_schema.Schema) -> Optional[expr.Expression]:
+    def get_default(self, _: s_schema.Schema) -> Optional[s_expr.Expression]:
         return self.default
 
     def get_type(self, schema: s_schema.Schema) -> s_types.Type:
@@ -317,7 +318,7 @@ class Parameter(
         int, compcoef=0.4)
 
     default = so.SchemaField(
-        expr.Expression, default=None, compcoef=0.4)
+        s_expr.Expression, default=None, compcoef=0.4)
 
     type = so.SchemaField(
         s_types.Type, compcoef=0.4)
@@ -379,7 +380,7 @@ class Parameter(
 
         defexpr = self.get_default(schema)
         assert defexpr is not None
-        defexpr = expr.Expression.compiled(
+        defexpr = s_expr.Expression.compiled(
             defexpr, as_fragment=True, schema=schema)
         ir = defexpr.irast
         assert isinstance(ir, (Function, irast.Statement))
@@ -455,10 +456,12 @@ class ParameterCommandContext(sd.ObjectCommandContext[Parameter]):
 # type ignore below, because making Parameter
 # a referencing.ReferencedObject breaks the code
 class ParameterCommand(
-    referencing.StronglyReferencedObjectCommand[Parameter],  # type: ignore
+    referencing.ReferencedObjectCommandBase[Parameter],  # type: ignore
     context_class=ParameterCommandContext,
     referrer_context_class=CallableCommandContext
 ):
+
+    is_strong_ref = struct.Field(bool, default=True)
 
     def get_ast(
         self,
@@ -967,8 +970,12 @@ class AlterCallableObject(
         parent_node: Optional[qlast.DDLOperation] = None,
     ) -> Optional[qlast.CallableObjectCommand]:
         node = cast(
-            qlast.CallableObjectCommand,
-            super()._get_ast(schema, context, parent_node=parent_node)
+            Optional[qlast.CallableObjectCommand],
+            # Skip AlterObject's _get_ast, since we don't want to
+            # filter things without subcommands. (Since updating
+            # nativecode isn't a subcommand in the AST.)
+            super(sd.AlterObject, self)._get_ast(
+                schema, context, parent_node=parent_node)
         )
 
         if not node:
@@ -1133,7 +1140,7 @@ class Function(
         str, default=None, compcoef=0.4)
 
     nativecode = so.SchemaField(
-        expr.Expression, default=None, compcoef=0.4)
+        s_expr.Expression, default=None, compcoef=0.9)
 
     language = so.SchemaField(
         qlast.Language, default=None, compcoef=0.4, coerce=True)
@@ -1154,7 +1161,7 @@ class Function(
         str, default=None, compcoef=0.9)
 
     initial_value = so.SchemaField(
-        expr.Expression, default=None, compcoef=0.4, coerce=True)
+        s_expr.Expression, default=None, compcoef=0.4, coerce=True)
 
     has_dml = so.SchemaField(
         bool, default=False)
@@ -1197,7 +1204,7 @@ class Function(
     ) -> str:
         return f"function '{self.get_signature_as_str(schema)}'"
 
-    def get_dummy_body(self, schema: s_schema.Schema) -> expr.Expression:
+    def get_dummy_body(self, schema: s_schema.Schema) -> s_expr.Expression:
         """Return a minimal function body that satisfies its return type."""
         rt = self.get_return_type(schema)
 
@@ -1214,7 +1221,7 @@ class Function(
             # expression it doesn't matter at the moment.
             text = f'SELECT <{rt.get_displayname(schema)}>{{}}'
 
-        return expr.Expression(text=text)
+        return s_expr.Expression(text=text)
 
 
 class FunctionCommandContext(CallableCommandContext):
@@ -1259,9 +1266,9 @@ class FunctionCommand(
         schema: s_schema.Schema,
         context: sd.CommandContext,
         field: so.Field[Any],
-        value: expr.Expression,
+        value: s_expr.Expression,
         track_schema_ref_exprs: bool=False,
-    ) -> expr.Expression:
+    ) -> s_expr.Expression:
         if field.name == 'initial_value':
             return type(value).compiled(
                 value,
@@ -1279,6 +1286,19 @@ class FunctionCommand(
         else:
             return super().compile_expr_field(
                 schema, context, field, value, track_schema_ref_exprs)
+
+    def get_dummy_expr_field_value(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        field: so.Field[Any],
+        value: Any,
+    ) -> Optional[s_expr.Expression]:
+        if field.name == 'nativecode':
+            func = schema.get(self.classname, type=Function)
+            return func.get_dummy_body(schema)
+        else:
+            raise NotImplementedError(f'unhandled field {field.name!r}')
 
     def _get_attribute_value(
         self,
@@ -1321,7 +1341,7 @@ class FunctionCommand(
         ):
             self.set_attribute_value(
                 'nativecode',
-                expr.Expression.not_compiled(nativecode)
+                s_expr.Expression.not_compiled(nativecode)
             )
 
         # Resolving 'nativecode' has side effects on has_dml and
@@ -1335,9 +1355,9 @@ class FunctionCommand(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
-        body: expr.Expression,
+        body: s_expr.Expression,
         track_schema_ref_exprs: bool=False,
-    ) -> expr.Expression:
+    ) -> s_expr.Expression:
         from edb.ir import ast as irast
 
         params = self._get_params(schema, context)
@@ -1674,7 +1694,7 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
                     assert astnode.code.code is not None
                     nativecode_expr = qlparser.parse(astnode.code.code)
 
-                nativecode = expr.Expression.from_ast(
+                nativecode = s_expr.Expression.from_ast(
                     nativecode_expr,
                     schema,
                     context.modaliases,
@@ -1862,7 +1882,7 @@ class AlterFunction(AlterCallableObject[Function], FunctionCommand):
                 nativecode_expr = qlparser.parse(astnode.code.code)
 
             if nativecode_expr is not None:
-                nativecode = expr.Expression.from_ast(
+                nativecode = s_expr.Expression.from_ast(
                     nativecode_expr,
                     schema,
                     context.modaliases,
@@ -1903,6 +1923,28 @@ class AlterFunction(AlterCallableObject[Function], FunctionCommand):
         context: sd.CommandContext,
     ) -> FuncParameterList:
         return self.scls.get_params(schema)
+
+    def canonicalize_alter_from_external_ref(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> None:
+        # Produce a param desc list which we use to find a new name.
+        param_list = self.scls.get_params(schema)
+        params = CallableCommand._get_param_desc_from_params_ast(
+            schema, context.modaliases, param_list.get_ast(schema))
+        name = sn.shortname_from_fullname(self.classname)
+        assert isinstance(name, sn.QualName), "expected qualified name"
+        new_fname = CallableObject.get_fqname(schema, name, params)
+        if new_fname == self.classname:
+            return
+
+        # Do the rename
+        rename = self.scls.init_delta_command(
+            schema, sd.RenameObject, new_name=new_fname)
+        rename.set_attribute_value(
+            'name', value=new_fname, orig_value=self.classname)
+        self.add(rename)
 
 
 class DeleteFunction(DeleteCallableObject[Function], FunctionCommand):

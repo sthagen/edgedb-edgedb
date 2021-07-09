@@ -1,7 +1,7 @@
 #
 # This source file is part of the EdgeDB open source project.
 #
-# Copyright 2019-present MagicStack Inc. and the EdgeDB authors.
+# Copyright 2016-present MagicStack Inc. and the EdgeDB authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,11 +17,27 @@
 #
 
 
-type Obj {
-    required property n -> int64;
-    multi link tgt -> Tgt;
-}
+from __future__ import annotations
+from typing import *
 
-type Tgt {
-    required property n -> int64;
-}
+import enum
+
+
+class Cardinality(enum.Enum):
+    # Cardinality isn't applicable for the query:
+    # * the query is a command like CONFIGURE that
+    #   does not return any data;
+    # * the query is composed of multiple queries.
+    NO_RESULT = 0x6e
+
+    # Cardinality is 1 or 0
+    AT_MOST_ONE = 0x6f
+
+    # Cardinality is 1
+    ONE = 0x41
+
+    # Cardinality is >= 0
+    MANY = 0x6d
+
+    # Cardinality is >= 1
+    AT_LEAST_ONE = 0x4d

@@ -557,6 +557,55 @@ class TestSchema(tb.BaseSchemaLoadTest):
             }
         """
 
+    @tb.must_fail(
+        errors.SchemaDefinitionError,
+        "the type inferred from the expression of the computable property "
+        "'title' of object type 'test::A' is scalar type 'std::int64', "
+        "which does not match the explicitly specified scalar type 'std::str'",
+        line=3, col=35)
+    def test_schema_target_consistency_check_01(self):
+        """
+            type A {
+                property title -> str {
+                    using (1)
+                }
+            }
+        """
+
+    @tb.must_fail(
+        errors.SchemaDefinitionError,
+        "the type inferred from the expression of the computable property "
+        "'title' of object type 'test::A' is collection "
+        "'tuple<std::int64, std::int64>', which does not match the explicitly "
+        "specified collection 'tuple<std::str, std::str>'",
+        line=3, col=35)
+    def test_schema_target_consistency_check_02(self):
+        """
+            type A {
+                property title -> tuple<str, str> {
+                    using ((1, 2))
+                }
+            }
+        """
+
+    @tb.must_fail(
+        errors.SchemaDefinitionError,
+        "the type inferred from the expression of the computable link "
+        "'foo' of object type 'test::C' is object type 'test::B', "
+        "which does not match the explicitly specified object type 'test::A'",
+        line=6, col=29)
+    def test_schema_target_consistency_check_03(self):
+        """
+            type A;
+            type B;
+
+            type C {
+                link foo -> A {
+                    using (SELECT B)
+                }
+            }
+        """
+
     def test_schema_refs_01(self):
         schema = self.load_schema("""
             type Object1;
@@ -1429,6 +1478,72 @@ class TestSchema(tb.BaseSchemaLoadTest):
                 std_prop,
             )
         )
+
+    @tb.must_fail(errors.InvalidReferenceError,
+                  "cannot follow backlink 'bar'",
+                  line=4, col=27)
+    def test_schema_backlink_01(self):
+        """
+            type Bar {
+                link foo -> Foo;
+                link f := .<bar[IS Foo];
+            }
+
+            type Foo {
+                link bar := .<foo[IS Bar];
+            }
+        """
+
+    @tb.must_fail(errors.InvalidReferenceError,
+                  "cannot follow backlink 'bar'",
+                  line=4, col=27)
+    def test_schema_backlink_02(self):
+        """
+            type Bar {
+                link foo -> Foo;
+                link f := .<bar;
+            }
+
+            type Foo {
+                link bar := .<foo;
+            }
+        """
+
+    @tb.must_fail(errors.InvalidReferenceError,
+                  "cannot follow backlink 'bar'",
+                  line=3, col=22)
+    def test_schema_backlink_03(self):
+        """
+            alias B := Bar {
+                f := .<bar[IS Foo]
+            };
+
+            type Bar {
+                link foo -> Foo;
+            }
+
+            type Foo {
+                link bar := .<foo[IS Bar];
+            }
+        """
+
+    @tb.must_fail(errors.InvalidReferenceError,
+                  "cannot follow backlink 'bar'",
+                  line=3, col=20)
+    def test_schema_backlink_04(self):
+        """
+            function foo() -> uuid using (
+                Bar.<bar[IS Foo].id
+            );
+
+            type Bar {
+                link foo -> Foo;
+            }
+
+            type Foo {
+                link bar := .<foo[IS Bar];
+            }
+        """
 
 
 class TestGetMigration(tb.BaseSchemaLoadTest):
@@ -3812,14 +3927,6 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             };
         """])
 
-    @test.xfail('''
-        edb.errors.SchemaError: link 'owned' of object type
-        'default::User' cannot be cast automatically from object type
-        'default::Post' to object type 'default::Action'
-
-        Notice that since this link is a computable, we shouldn't care
-        about "converting" it.
-    ''')
     def test_schema_migrations_equivalence_48(self):
         # change a link used in a computable
         self._assert_migration_equivalence([r"""
@@ -3936,6 +4043,13 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 using (
                     SELECT 'hello' ++ <str>(a + b)
                 )
+        """])
+
+    def test_schema_migrations_equivalence_function_04(self):
+        self._assert_migration_equivalence([r"""
+            function foo() -> str USING ('foo');
+        """, r"""
+            function foo() -> str USING ('bar');
         """])
 
     @test.xfail('''
@@ -4751,7 +4865,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             type Derived extending Base;
         """])
 
-    def test_schema_migrations_equivalence_constraint_04(self):
+    def test_schema_migrations_equivalence_constraint_03(self):
         self._assert_migration_equivalence([r"""
             abstract constraint Lol { using (__subject__ < 10) };
             type Foo {
@@ -4771,7 +4885,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             type Bar extending Foo;
         """])
 
-    def test_schema_migrations_equivalence_constraint_03(self):
+    def test_schema_migrations_equivalence_constraint_04(self):
         self._assert_migration_equivalence([r"""
             type Base {
                 property firstname -> str {
@@ -4799,6 +4913,31 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 }
             }
         """, r"""
+        """])
+
+    def test_schema_migrations_equivalence_constraint_05(self):
+        self._assert_migration_equivalence([r"""
+            abstract constraint not_bad {
+                using (__subject__ != "bad" and __subject__ != "terrible")
+            }
+
+            type Foo {
+                property x -> str {
+                    constraint not_bad;
+                }
+            }
+            type Bar extending Foo;
+        """, r"""
+            abstract constraint not_bad {
+                using (__subject__ != "bad" and __subject__ != "awful")
+            }
+
+            type Foo {
+                property x -> str {
+                    constraint not_bad;
+                }
+            }
+            type Bar extending Foo;
         """])
 
     # NOTE: array<str>, array<int16>, array<json> already exist in std
@@ -5909,6 +6048,39 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             abstract type Owned { property x -> str { constraint exclusive } }
             type Comment extending Text, Owned;
         """])
+
+    def test_schema_migrations_expression_ref_01(self):
+        self._assert_migration_equivalence([
+            r"""
+                type Article {
+                    required property deleted_a := (
+                        EXISTS (.<element[IS DeletionRecord]));
+                };
+                type Category {
+                    required property deleted_c := (
+                        EXISTS (.<element[IS DeletionRecord]));
+                };
+                type DeletionRecord {
+                    required link element -> (Article | Category) {
+                        on target delete delete source;
+                        constraint std::exclusive;
+                    };
+                };
+            """,
+            r"""
+                abstract type Removable {
+                    property deleted := EXISTS(.<element[IS DeletionRecord]);
+                }
+                type Article extending Removable;
+                type Category extending Removable;
+                type DeletionRecord {
+                    required link element -> Removable {
+                        on target delete delete source;
+                        constraint std::exclusive;
+                    };
+                };
+            """
+        ])
 
 
 class TestDescribe(tb.BaseSchemaLoadTest):

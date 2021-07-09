@@ -18,31 +18,31 @@
 
 
 from __future__ import annotations
-from typing import *
 
-from edb.ir import ast as irast
-from edb.edgeql import qltypes
+import enum
+import typing
 
-from .. import context
+from . import messages
+from . import render_utils
 
-
-class InfCtx(NamedTuple):
-    env: context.Environment
-    inferred_cardinality: Dict[
-        Tuple[irast.Base, irast.ScopeTreeNode],
-        qltypes.Cardinality]
-    inferred_multiplicity: Dict[
-        Tuple[irast.Base, irast.ScopeTreeNode],
-        qltypes.Multiplicity]
-    singletons: Collection[irast.PathId]
-    bindings: Dict[irast.PathId, irast.ScopeTreeNode]
+from .messages import *  # NoQA
 
 
-def make_ctx(env: context.Environment) -> InfCtx:
-    return InfCtx(
-        env=env,
-        inferred_cardinality={},
-        inferred_multiplicity={},
-        singletons=frozenset(env.singletons),
-        bindings={},
-    )
+def render(
+    obj: typing.Union[typing.Type[enum.Enum], typing.Type[messages.Struct]]
+) -> str:
+    if issubclass(obj, messages.Struct):
+        return obj.render()
+    else:
+        assert issubclass(obj, enum.Enum)
+
+        buf = render_utils.RenderBuffer()
+        buf.write(f'enum {obj.__name__} {{')
+        with buf.indent():
+            for membername, member in obj.__members__.items():
+                buf.write(
+                    f'{membername.ljust(messages._PAD - 1)} = '
+                    f'{member.value:#x};'
+                )
+        buf.write('};')
+        return str(buf)

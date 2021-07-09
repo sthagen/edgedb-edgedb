@@ -711,10 +711,6 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ]
         )
 
-    @test.xfail('''
-        Fails due to incorrect scoping of the "l" computable due
-        to an intermediate subtype.
-    ''')
     async def test_edgeql_scope_tuple_14(self):
         # Test that the tuple elements are interpreted as singletons.
 
@@ -1846,6 +1842,23 @@ class TestEdgeQLScope(tb.QueryTestCase):
             sort=lambda x: x['name']
         )
 
+        await self.assert_query_result(
+            r'''
+                # adding a top-level DETACHED should not change anything at all
+                SELECT DETACHED User {
+                    name,
+                    fire_deck := (
+                        SELECT User.deck {name, element}
+                        FILTER .element = 'Fire'
+                        ORDER BY .name
+                    ).name
+                };
+            ''',
+            res,
+            implicit_limit=100,
+            sort=lambda x: x['name']
+        )
+
     async def test_edgeql_scope_detached_09(self):
         with self.assertRaisesRegex(
                 edgedb.QueryError, r'only singletons are allowed'):
@@ -1941,6 +1954,60 @@ class TestEdgeQLScope(tb.QueryTestCase):
                     ],
                 },
             ],
+        )
+
+    async def test_edgeql_scope_detached_11(self):
+        await self.assert_query_result(
+            r"""
+            SELECT _ := (User.name, { x := User.name }) ORDER BY _;
+            """,
+            [
+                ["Alice", {"x": "Alice"}],
+                ["Bob", {"x": "Bob"}],
+                ["Carol", {"x": "Carol"}],
+                ["Dave", {"x": "Dave"}],
+            ]
+        )
+
+    async def test_edgeql_scope_detached_12(self):
+        await self.assert_query_result(
+            r"""
+            SELECT DETACHED User { name2 := User.name } ORDER BY .name;
+            """,
+            [
+                {"name2": "Alice"},
+                {"name2": "Bob"},
+                {"name2": "Carol"},
+                {"name2": "Dave"},
+            ]
+        )
+
+    async def test_edgeql_scope_detached_13(self):
+        # Detached but using a partial path should still give singletons
+        await self.assert_query_result(
+            r"""
+            SELECT (DETACHED User) { name2 := .name } ORDER BY .name;
+            """,
+            [
+                {"name2": "Alice"},
+                {"name2": "Bob"},
+                {"name2": "Carol"},
+                {"name2": "Dave"},
+            ]
+        )
+
+    async def test_edgeql_scope_detached_14(self):
+        # Detached reference to User should be an unrelated one
+        await self.assert_query_result(
+            r"""
+            SELECT (DETACHED User) { names := User.name }
+            """,
+            [
+                {"names": {"Alice", "Bob", "Carol", "Dave"}},
+                {"names": {"Alice", "Bob", "Carol", "Dave"}},
+                {"names": {"Alice", "Bob", "Carol", "Dave"}},
+                {"names": {"Alice", "Bob", "Carol", "Dave"}},
+            ]
         )
 
     async def test_edgeql_scope_union_01(self):
@@ -2290,6 +2357,34 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ],
         )
 
+    async def test_edgeql_scope_computables_12(self):
+        await self.assert_query_result(
+            r"""
+                WITH rows := Named,
+                SELECT rows {
+                    name, owner_count := count([IS Card].owners)
+                } FILTER .name IN {'1st', 'Alice', 'Dwarf'} ORDER BY .name;
+            """,
+            [
+                {"name": "1st", "owner_count": 0},
+                {"name": "Alice", "owner_count": 0},
+                {"name": "Dwarf", "owner_count": 2}
+            ]
+        )
+
+        await self.assert_query_result(
+            r"""
+                SELECT (Named { name }) {
+                    name, owner_count := count([IS Card].owners)
+                } FILTER .name IN {'1st', 'Alice', 'Dwarf'} ORDER BY .name;
+            """,
+            [
+                {"name": "1st", "owner_count": 0},
+                {"name": "Alice", "owner_count": 0},
+                {"name": "Dwarf", "owner_count": 2}
+            ]
+        )
+
     async def test_edgeql_scope_with_01(self):
         # Test that same symbol can be re-used in WITH block.
         await self.assert_query_result(
@@ -2522,4 +2617,24 @@ class TestEdgeQLScope(tb.QueryTestCase):
                           (((SELECT U.cards.foo), (U.cards.foo)),).0))
             """,
             [7],
+        )
+
+    async def test_edgeql_scope_reverse_lprop_01(self):
+        # try injecting something myself?
+        await self.assert_query_result(
+            """
+            WITH X1 := (Card { z := (.<deck[IS User], .<deck[IS User]@count)}),
+                 X2 := X1 { owners2 := .z.0 { count := X1.z.1 } },
+            SELECT X2 { name, owners2: {name, count} ORDER BY .name }
+            FILTER .name = 'Dwarf';
+            """,
+            [
+                {
+                    "name": "Dwarf",
+                    "owners2": [
+                        {"count": 3, "name": "Bob"},
+                        {"count": 4, "name": "Carol"}
+                    ]
+                }
+            ],
         )

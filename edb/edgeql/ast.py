@@ -499,6 +499,7 @@ class ShapeOp(s_enum.StrEnum):
     APPEND = 'APPEND'
     SUBTRACT = 'SUBTRACT'
     ASSIGN = 'ASSIGN'
+    MATERIALIZE = 'MATERIALIZE'  # This is an internal implementation artifact
 
 
 # Need indirection over ShapeOp to preserve the source context.
@@ -1104,11 +1105,11 @@ class Language(s_enum.StrEnum):
 
 
 class FunctionCode(Clause):
-    language: Language
+    language: Language = Language.EdgeQL
     code: typing.Optional[str]
     nativecode: typing.Optional[Expr]
     from_function: typing.Optional[str]
-    from_expr: bool
+    from_expr: bool = False
 
 
 class FunctionCommand(CallableObjectCommand):
@@ -1129,7 +1130,7 @@ class CreateFunction(CreateObject, FunctionCommand):
 
 class AlterFunction(AlterObject, FunctionCommand):
 
-    code: FunctionCode
+    code: FunctionCode = FunctionCode  # type: ignore
     nativecode: typing.Optional[Expr]
 
 
@@ -1294,12 +1295,19 @@ def get_ddl_field_value(
     return cmd.value if cmd is not None else None
 
 
+def get_ddl_subcommand(
+    ddlcmd: DDLOperation,
+    cmdtype: typing.Type[DDLOperation],
+) -> typing.Optional[DDLOperation]:
+    for cmd in ddlcmd.commands:
+        if isinstance(cmd, cmdtype):
+            return cmd
+    else:
+        return None
+
+
 def has_ddl_subcommand(
     ddlcmd: DDLOperation,
     cmdtype: typing.Type[DDLOperation],
 ) -> bool:
-    for cmd in ddlcmd.commands:
-        if isinstance(cmd, cmdtype):
-            return True
-    else:
-        return False
+    return bool(get_ddl_subcommand(ddlcmd, cmdtype))

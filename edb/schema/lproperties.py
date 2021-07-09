@@ -169,6 +169,24 @@ class Property(
     ) -> bool:
         return not self.is_endpoint_pointer(schema)
 
+    def init_delta_command(
+        self,
+        schema: s_schema.Schema,
+        cmdtype: Type[sd.ObjectCommand_T],
+        *,
+        classname: Optional[sn.Name] = None,
+        **kwargs: Any,
+    ) -> sd.ObjectCommand_T:
+        delta = super().init_delta_command(
+            schema=schema,
+            cmdtype=cmdtype,
+            classname=classname,
+            **kwargs,
+        )
+        assert isinstance(delta, referencing.ReferencedObjectCommandBase)
+        delta.is_strong_ref = self.is_endpoint_pointer(schema)
+        return delta  # type: ignore
+
 
 class PropertySourceContext(sources.SourceCommandContext):
     pass
@@ -191,13 +209,13 @@ class PropertyCommand(
     referrer_context_class=PropertySourceContext,
 ):
 
-    def _validate_pointer_def(
+    def validate_object(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> None:
         """Check that property definition is sound."""
-        super()._validate_pointer_def(schema, context)
+        super().validate_object(schema, context)
 
         scls = self.scls
         if not scls.get_owned(schema):
@@ -376,8 +394,7 @@ class AlterPropertyOwned(
 
 class AlterProperty(
     PropertyCommand,
-    pointers.PointerAlterFragment[Property],
-    referencing.AlterReferencedInheritingObject[Property],
+    pointers.AlterPointer[Property],
 ):
     astnode = [qlast.AlterConcreteProperty,
                qlast.AlterProperty]
@@ -390,14 +407,13 @@ class AlterProperty(
         schema: s_schema.Schema,
         astnode: qlast.DDLOperation,
         context: sd.CommandContext,
-    ) -> referencing.AlterReferencedInheritingObject[Property]:
+    ) -> AlterProperty:
         cmd = super()._cmd_tree_from_ast(schema, astnode, context)
-
+        assert isinstance(cmd, AlterProperty)
         if isinstance(astnode, qlast.CreateConcreteProperty):
-            assert isinstance(cmd, pointers.PointerCommand)
             cmd._process_create_or_alter_ast(schema, astnode, context)
-
-        assert isinstance(cmd, referencing.AlterReferencedInheritingObject)
+        else:
+            cmd._process_alter_ast(schema, astnode, context)
         return cmd
 
     def _apply_field_ast(
@@ -451,9 +467,11 @@ class DeleteProperty(
         cmds = super()._canonicalize(schema, context, scls)
 
         target = scls.get_target(schema)
-        if target is not None and not scls.is_special_pointer(schema):
-            if op := target.as_type_delete_if_dead(schema):
-                cmds.append(op)
+        if target is not None and not scls.is_link_source_property(schema):
+            if del_cmd := target.as_type_delete_if_dead(schema):
+                subcmds = del_cmd._canonicalize(schema, context, target)
+                del_cmd.update(subcmds)
+                cmds.append(del_cmd)
 
         return cmds
 

@@ -98,7 +98,7 @@ BUILD_DEPS = [
     CYTHON_DEPENDENCY,
 ]
 
-RUST_VERSION = '1.45.0'  # Also update docs/internal/dev.rst
+RUST_VERSION = '1.53.0'  # Also update docs/internal/dev.rst
 
 EDGEDBCLI_REPO = 'https://github.com/edgedb/edgedb-cli'
 
@@ -727,8 +727,8 @@ setuptools.setup(
             extra_link_args=EXT_LDFLAGS),
 
         distutils_extension.Extension(
-            "edb.testbase.protocol.protocol",
-            ["edb/testbase/protocol/protocol.pyx"],
+            "edb.protocol.protocol",
+            ["edb/protocol/protocol.pyx"],
             extra_compile_args=EXT_CFLAGS,
             extra_link_args=EXT_LDFLAGS),
 
