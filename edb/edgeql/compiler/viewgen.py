@@ -37,10 +37,8 @@ from edb.schema import objtypes as s_objtypes
 from edb.schema import objects as s_objects
 from edb.schema import pointers as s_pointers
 from edb.schema import types as s_types
-from edb.schema import utils as s_utils
 
 from edb.edgeql import ast as qlast
-from edb.edgeql import parser as qlparser
 from edb.edgeql import qltypes
 
 from . import astutils
@@ -291,61 +289,6 @@ def _process_view(
                         view_rptr=view_rptr,
                         ctx=scopectx,
                     ),
-                )
-
-    elif (
-        stype.get_name(ctx.env.schema).module == 'schema'
-        and ctx.env.options.apply_query_rewrites
-    ):
-        explicit_ptrs = {
-            ptrcls.get_local_name(ctx.env.schema)
-            for ptrcls in pointers
-        }
-        scls_pointers = stype.get_pointers(ctx.env.schema)
-        for pn, ptrcls in scls_pointers.items(ctx.env.schema):
-            if (
-                pn in explicit_ptrs
-                or ptrcls.is_pure_computable(ctx.env.schema)
-            ):
-                continue
-
-            schema_deflt = ptrcls.get_schema_reflection_default(ctx.env.schema)
-            if schema_deflt is None:
-                continue
-
-            with ctx.newscope(fenced=True) as scopectx:
-                ptr_ref = s_utils.name_to_ast_ref(pn)
-                implicit_ql = qlast.ShapeElement(
-                    expr=qlast.Path(steps=[qlast.Ptr(ptr=ptr_ref)]),
-                    compexpr=qlast.BinOp(
-                        left=qlast.Path(
-                            partial=True,
-                            steps=[
-                                qlast.Ptr(
-                                    ptr=ptr_ref,
-                                    direction=(
-                                        s_pointers.PointerDirection.Outbound
-                                    ),
-                                )
-                            ],
-                        ),
-                        right=qlparser.parse_fragment(schema_deflt),
-                        op='??',
-                    ),
-                )
-
-                # Note: we only need to record the schema default
-                # as a computable, but not include it in the type
-                # shape, so we ignore the return value.
-                _normalize_view_ptr_expr(
-                    implicit_ql,
-                    view_scls,
-                    path_id=path_id,
-                    path_id_namespace=path_id_namespace,
-                    is_insert=is_insert,
-                    is_update=is_update,
-                    view_rptr=view_rptr,
-                    ctx=scopectx,
                 )
 
     for ptrcls in pointers:
@@ -623,9 +566,12 @@ def _normalize_view_ptr_expr(
             ctx=ctx,
         )
 
-        # If the element has clauses or computable elements, we need to
-        # compile it to figure out if those need materialization.
-        if is_nontrivial and qlexpr and not is_mutation:
+        # If we generated qlexpr for the element, we process the
+        # subview by just compiling the qlexpr. This is so that we can
+        # figure out if it needs materialization and also so that
+        # `qlexpr is not None` always implies that we did the
+        # compilation. (Except for mutations)
+        if qlexpr and not is_mutation:
             irexpr, _ = _compile_qlexpr(
                 qlexpr, view_scls, ptrcls=ptrcls, ptrsource=ptrsource,
                 path_id=path_id, ptr_name=ptr_name, is_linkprop=is_linkprop,
@@ -900,7 +846,8 @@ def _normalize_view_ptr_expr(
             irexpr = setgen.ensure_set(irexpr, ctx=ctx)
             setgen.maybe_materialize(ptrcls, irexpr, ctx=ctx)
 
-    if qlexpr is None:
+    if qlexpr is None and not setgen.is_injected_computable_ptr(
+            ptrcls, ctx=ctx):
         # This is not a computable, just a pointer
         # to a nested shape.  Have it reuse the original
         # pointer name so that in `Foo.ptr.name` and
