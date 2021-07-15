@@ -29,12 +29,12 @@ import textwrap
 
 import setuptools
 from setuptools.command import develop as setuptools_develop
+from setuptools.command import build_ext as setuptools_build_ext
 
 import distutils
 from distutils import version
 from distutils import extension as distutils_extension
 from distutils.command import build as distutils_build
-from distutils.command import build_ext as distutils_build_ext
 
 try:
     import setuptools_rust
@@ -50,16 +50,17 @@ RUNTIME_DEPS = [
     'parsing~=1.6.1',
     'psutil~=5.8.0',
     'setproctitle~=1.1.10',
-    'setuptools-rust==0.10.3',
+    'setuptools-rust~=0.11.4',
     'setuptools_scm~=3.2.0',
     'uvloop~=0.15.3',
     "typing_inspect~=0.5.0;python_version<'3.9'",
     'wcwidth~=0.2.5',
+    'cryptography~=3.4.7',
 
     'graphql-core~=3.1.5',
     'promise~=2.2.0',
 
-    'edgedb @ git+https://github.com/edgedb/edgedb-python.git@master',
+    'edgedb>=0.16.0',
 ]
 
 CYTHON_DEPENDENCY = 'Cython==0.29.23'
@@ -481,9 +482,9 @@ class build_postgres(setuptools.Command):
             build_contrib=self.build_contrib)
 
 
-class build_ext(distutils_build_ext.build_ext):
+class build_ext(setuptools_build_ext.build_ext):
 
-    user_options = distutils_build_ext.build_ext.user_options + [
+    user_options = setuptools_build_ext.build_ext.user_options + [
         ('cython-annotate', None,
             'Produce a colorized HTML version of the Cython source.'),
         ('cython-directives=', None,

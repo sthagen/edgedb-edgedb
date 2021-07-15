@@ -772,7 +772,7 @@ class CLITestCaseMixin:
         cmd_args = [
             '--host', conn_args['host'],
             '--port', str(conn_args['port']),
-            '--tls-cert-file', conn_args['tls_cert_file']
+            '--tls-ca-file', conn_args['tls_ca_file']
         ]
         if conn_args.get('user'):
             cmd_args += ['--user', conn_args['user']]
@@ -1410,7 +1410,7 @@ class _EdgeDBServerData(NamedTuple):
             password=self.password,
             host=self.host,
             port=self.port,
-            tls_cert_file=self.tls_cert_file,
+            tls_ca_file=self.tls_cert_file,
         )
 
         conn_args.update(kwargs)
@@ -1497,7 +1497,7 @@ class _EdgeDBServer:
         status_r, status_w = socket.socketpair()
 
         cmd = [
-            sys.executable, '-m', 'edb.tools', 'testserver',
+            sys.executable, '-m', 'edb.server.main',
             '--port', 'auto',
             '--testmode',
             '--emit-server-status', f'fd://{status_w.fileno()}',

@@ -47,7 +47,7 @@ class ClusterError(Exception):
 class BaseCluster:
     def __init__(self, runstate_dir, *, port=edgedb_defines.EDGEDB_PORT,
                  env=None, testmode=False, log_level=None):
-        self._edgedb_cmd = [sys.executable, '-m', 'edb.tools', 'testserver']
+        self._edgedb_cmd = [sys.executable, '-m', 'edb.server.main']
 
         if log_level:
             self._edgedb_cmd.extend(['--log-level', log_level])
@@ -106,7 +106,7 @@ class BaseCluster:
         return {
             'host': 'localhost',
             'port': self._effective_port,
-            'tls_cert_file': self._tls_cert_file,
+            'tls_ca_file': self._tls_cert_file,
         }
 
     async def async_connect(self, **kwargs):

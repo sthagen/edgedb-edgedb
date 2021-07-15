@@ -83,7 +83,7 @@ class TestServerOps(tb.TestCase):
                     user='edgedb',
                     host=sd.host,
                     port=sd.port,
-                    tls_cert_file=sd.tls_cert_file,
+                    tls_ca_file=sd.tls_cert_file,
                     wait_until_available=0,
                 )
 
@@ -95,7 +95,7 @@ class TestServerOps(tb.TestCase):
         # * "--bootstrap-command"
 
         cmd = [
-            sys.executable, '-m', 'edb.tools', 'testserver',
+            sys.executable, '-m', 'edb.server.main',
             '--port', 'auto',
             '--testmode',
             '--temp-dir',
@@ -138,7 +138,7 @@ class TestServerOps(tb.TestCase):
         os.close(status_fd)
 
         cmd = [
-            sys.executable, '-m', 'edb.tools', 'testserver',
+            sys.executable, '-m', 'edb.server.main',
             '--port', 'auto',
             '--testmode',
             '--temp-dir',
@@ -334,7 +334,7 @@ class TestServerOps(tb.TestCase):
                 password=sd.password,
                 host=sd.host,
                 port=sd.port,
-                tls_cert_file=sd.tls_cert_file,
+                tls_ca_file=sd.tls_cert_file,
             )
             try:
                 await self._test_connection(con)
