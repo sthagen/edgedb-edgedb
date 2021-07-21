@@ -617,7 +617,7 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
         """
         SELECT stdgraphql::Query { o := (SELECT (SELECT User) ORDER BY .name) }
 % OK %
-        MANY
+        ONE
         """
 
     def test_edgeql_ir_card_inference_68(self):
@@ -632,4 +632,34 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
         SELECT {1, 2} FILTER false
 % OK %
         MANY
+        """
+
+    def test_edgeql_ir_card_inference_70(self):
+        """
+        SELECT (1, 'a')
+% OK %
+        ONE
+        """
+
+    def test_edgeql_ir_card_inference_71(self):
+        """
+        SELECT (1, Card.name)
+% OK %
+        MANY
+        """
+
+    def test_edgeql_ir_card_inference_72(self):
+        """
+        SELECT {a := 42}
+% OK %
+        ONE
+        """
+
+    def test_edgeql_ir_card_inference_73(self):
+        # Make sure that a union of anonymous shapes still ends up
+        # with cardinality AT_LEAST_ONE.
+        """
+        FOR x IN {0, 1} UNION {a := x}
+% OK %
+        AT_LEAST_ONE
         """
