@@ -77,6 +77,7 @@ def process_view(
         return view_scls
 
     with ctx.newscope(fenced=True) as scopectx:
+        scopectx.path_scope.is_temporary = True
         view_path_id_ns = None
         new_path_id = path_id
         if ctx.expr_exposed or is_insert or is_update:
@@ -462,8 +463,8 @@ def _normalize_view_ptr_expr(
     ptrname = lexpr.ptr.name
 
     compexpr: Optional[qlast.Expr] = shape_el.compexpr
-    if compexpr is None and is_insert and shape_el.elements:
-        # Short shape form in INSERT, e.g
+    if compexpr is None and (is_insert or is_update) and shape_el.elements:
+        # Short shape form in INSERT or UPDATE, e.g
         #     INSERT Foo { bar: Spam { name := 'name' }}
         # is prohibited.
         raise errors.EdgeQLSyntaxError(
@@ -488,6 +489,7 @@ def _normalize_view_ptr_expr(
             name=ptrcls.get_shortname(ctx.env.schema).name,
         )
 
+        base_required = base_ptrcls.get_required(ctx.env.schema)
         base_cardinality = _get_base_ptr_cardinality(base_ptrcls, ctx=ctx)
         base_is_singleton = False
         if base_cardinality is not None and base_cardinality.is_known():
@@ -553,6 +555,7 @@ def _normalize_view_ptr_expr(
             assert _ptr_target
             ptr_target = _ptr_target
 
+        ptr_required = base_required
         ptr_cardinality = base_cardinality
         if ptr_cardinality is None or not ptr_cardinality.is_known():
             # We do not know the parent's pointer cardinality yet.
@@ -706,6 +709,7 @@ def _normalize_view_ptr_expr(
                 ctx.env.schema, 'owned', True)
 
         ptr_cardinality = None
+        ptr_required = False
 
         if (
             isinstance(ptr_target, s_types.Collection)
@@ -802,6 +806,7 @@ def _normalize_view_ptr_expr(
             assert existing_target is not None
             if ctx.recompiling_schema_alias:
                 ptr_cardinality = existing.get_cardinality(ctx.env.schema)
+                ptr_required = existing.get_required(ctx.env.schema)
             if ptr_target == existing_target:
                 ptrcls = existing
             elif ptr_target.implicitly_castable_to(
@@ -884,6 +889,8 @@ def _normalize_view_ptr_expr(
     if ptr_cardinality is not None:
         ctx.env.schema = ptrcls.set_field_value(
             ctx.env.schema, 'cardinality', ptr_cardinality)
+        ctx.env.schema = ptrcls.set_field_value(
+            ctx.env.schema, 'required', ptr_required)
     else:
         if qlexpr is None and ptrcls is not base_ptrcls:
             ctx.env.pointer_derivation_map[base_ptrcls].append(ptrcls)
@@ -1089,7 +1096,7 @@ def _inline_type_computable(
         ptr = setgen.resolve_ptr(stype, compname, track_ref=None, ctx=ctx)
         # The pointer might exist on the base type. That doesn't count,
         # and we need to re-inject it.
-        if not ptr.get_computable(ctx.env.schema):
+        if ptr not in ctx.source_map:
             ptr = None
     except errors.InvalidReferenceError:
         ptr = None
