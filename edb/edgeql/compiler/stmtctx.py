@@ -106,7 +106,7 @@ def init_context(
 
 
 def fini_expression(
-    ir: irast.Base,
+    ir: irast.Set,
     *,
     ctx: context.ContextLevel,
 ) -> irast.Command:
@@ -143,11 +143,10 @@ def fini_expression(
 
     ctx.path_scope.validate_unique_ids()
 
-    if isinstance(ir, irast.Command):
-        if isinstance(ir, irast.ConfigCommand):
-            ir.scope_tree = ctx.path_scope
-        # IR is already a Command
-        return ir
+    # ConfigSet and ConfigReset don't like being part of a Set
+    if isinstance(ir.expr, (irast.ConfigSet, irast.ConfigReset)):
+        ir.expr.scope_tree = ctx.path_scope
+        return ir.expr
 
     volatility = inference.infer_volatility(ir, env=ctx.env)
 
@@ -221,11 +220,14 @@ def fini_expression(
             context=srcctx,
         )
 
+    assert isinstance(ir, irast.Set)
+    source_map = {k: v for k, v in ctx.source_map.items()
+                  if isinstance(k, s_pointers.Pointer)}
     result = irast.Statement(
         expr=ir,
         params=list(ctx.env.query_parameters.values()),
         views=ctx.view_nodes,
-        source_map=ctx.source_map,
+        source_map=source_map,
         scope_tree=ctx.env.path_scope,
         cardinality=cardinality,
         volatility=volatility,
@@ -234,6 +236,7 @@ def fini_expression(
         view_shapes={
             src: [ptr for ptr, op in ptrs if op != qlast.ShapeOp.MATERIALIZE]
             for src, ptrs in ctx.env.view_shapes.items()
+            if isinstance(src, s_obj.Object)
         },
         view_shapes_metadata=ctx.env.view_shapes_metadata,
         schema=ctx.env.schema,
@@ -245,6 +248,7 @@ def fini_expression(
             if isinstance(t, s_types.Collection) and t != expr_type
         ),
         type_rewrites={s.typeref.id: s for s in ctx.type_rewrites.values()},
+        dml_exprs=ctx.env.dml_exprs,
     )
     return result
 
@@ -254,11 +258,13 @@ def _fixup_materialized_sets(
 ) -> None:
     # Make sure that all materialized sets have their views compiled
     flt = lambda n: isinstance(n, irast.Stmt)
-    children = ast_visitor.find_children(ir, flt)
+    children: List[irast.Stmt] = ast_visitor.find_children(ir, flt)
     for nobe in ctx.source_map.values():
         if nobe.irexpr:
             children += ast_visitor.find_children(nobe.irexpr, flt)
     for stmt in children:
+        if not stmt.materialized_sets:
+            continue
         for key in list(stmt.materialized_sets):
             mat_set = stmt.materialized_sets[key]
 
@@ -504,7 +510,7 @@ def compile_anchor(
                 step.show_as_anchor = None
 
     elif isinstance(anchor, qlast.Base):
-        step = setgen.ensure_set(dispatch.compile(anchor, ctx=ctx), ctx=ctx)
+        step = dispatch.compile(anchor, ctx=ctx)
 
     elif isinstance(anchor, irast.Parameter):
         step = setgen.ensure_set(anchor, ctx=ctx)

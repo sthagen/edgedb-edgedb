@@ -336,7 +336,7 @@ def _compile_qlexpr(
     is_linkprop: bool,
 
     ctx: context.ContextLevel,
-) -> Tuple[Union[irast.Expr, irast.Set], context.ViewRPtr]:
+) -> Tuple[irast.Set, context.ViewRPtr]:
 
     is_mutation = is_insert or is_update
 
@@ -849,7 +849,6 @@ def _normalize_view_ptr_expr(
         ctx.env.materialized_sets[ptrcls] = ctx.qlstmt
 
         if not ctx.expr_exposed and irexpr:
-            irexpr = setgen.ensure_set(irexpr, ctx=ctx)
             setgen.maybe_materialize(ptrcls, irexpr, ctx=ctx)
 
     if qlexpr is None and not setgen.is_injected_computable_ptr(
@@ -1304,6 +1303,7 @@ def _compile_view_shapes_in_set(
         if ir_set.shape:
             return
 
+        shape = []
         for path_tip, ptr, shape_op in shape_ptrs:
             srcctx = None
             if ptr in ctx.env.pointer_specified_info:
@@ -1335,7 +1335,9 @@ def _compile_view_shapes_in_set(
                     parent_view_type=stype.get_expr_type(ctx.env.schema),
                     ctx=scopectx)
 
-            ir_set.shape.append((element, shape_op))
+            shape.append((element, shape_op))
+
+        ir_set.shape = tuple(shape)
 
     elif ir_set.expr is not None:
         set_scope = pathctx.get_set_scope(ir_set, ctx=ctx)
