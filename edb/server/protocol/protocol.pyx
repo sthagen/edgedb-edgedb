@@ -62,20 +62,25 @@ cdef class HttpProtocol:
 
     def __init__(self, server, sslctx, *,
                  external_auth: bool=False,
-                 allow_cleartext_connections: bool=False):
+                 allow_insecure_binary_clients: bool=False,
+                 allow_insecure_http_clients: bool=False):
         self.loop = server.get_loop()
         self.server = server
         self.transport = None
         self.external_auth = external_auth
         self.sslctx = sslctx
-        self.allow_cleartext_connections = allow_cleartext_connections
 
         self.parser = None
         self.current_request = None
         self.in_response = False
         self.unprocessed = None
         self.first_data_call = True
+
+        self.allow_insecure_binary_clients = allow_insecure_binary_clients
+        self.allow_insecure_http_clients = allow_insecure_http_clients
         self.respond_hsts = False  # redirect non-TLS HTTP clients to TLS URL
+
+        self.is_tls = False
 
     def connection_made(self, transport):
         self.transport = transport
@@ -93,10 +98,10 @@ cdef class HttpProtocol:
 
             # Detect if the client is speaking TLS in the "first" data using
             # the SSL library. This is not the official handshake as we only
-            # need to know "is_ssl"; the first data is used again for the true
-            # handshake if is_ssl = True. This is for further responding a nice
+            # need to know "is_tls"; the first data is used again for the true
+            # handshake if is_tls = True. This is for further responding a nice
             # error message to non-TLS clients.
-            is_ssl = True
+            is_tls = True
             try:
                 outgoing = ssl.MemoryBIO()
                 incoming = ssl.MemoryBIO()
@@ -108,9 +113,11 @@ cdef class HttpProtocol:
             except ssl.SSLWantReadError:
                 pass
             except ssl.SSLError:
-                is_ssl = False
+                is_tls = False
 
-            if is_ssl:
+            self.is_tls = is_tls
+
+            if is_tls:
                 # Most clients should arrive here to continue with TLS
                 self.transport.pause_reading()
                 self.loop.create_task(self._forward_first_data(data))
@@ -124,7 +131,7 @@ cdef class HttpProtocol:
                 # as its first message kind is `V`.
                 #
                 # Switch protocols now (for compatibility).
-                if self.allow_cleartext_connections:
+                if self.allow_insecure_binary_clients:
                     self._switch_to_binary_protocol(data)
                 else:
                     self.loop.create_task(self._return_binary_error(
@@ -134,7 +141,7 @@ cdef class HttpProtocol:
             else:
                 # HTTP.
                 self._init_http_parser()
-                self.respond_hsts = not self.allow_cleartext_connections
+                self.respond_hsts = not self.allow_insecure_http_clients
 
         try:
             self.parser.feed_data(data)
@@ -314,7 +321,7 @@ cdef class HttpProtocol:
                     b'\r\n'
                 )
             else:
-                msg = b'Request is missing header: Host\r\n'
+                msg = b'Request is missing a header: Host\r\n'
                 self.transport.write(
                     b'HTTP/1.1 400 Bad Request\r\n'
                     b'Content-Length: ' + str(len(msg)).encode() + b'\r\n'
@@ -323,6 +330,14 @@ cdef class HttpProtocol:
 
             self.close()
             return
+
+        if self.is_tls:
+            if self.allow_insecure_http_clients:
+                response.custom_headers['Strict-Transport-Security'] = \
+                    'max-age=0'
+            else:
+                response.custom_headers['Strict-Transport-Security'] = \
+                    'max-age=31536000'
 
         try:
             await self.handle_request(request, response)

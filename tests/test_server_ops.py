@@ -21,10 +21,12 @@ from __future__ import annotations
 from typing import *
 
 import asyncio
+import http.client
 import json
 import os.path
 import random
 import subprocess
+import ssl
 import sys
 import tempfile
 import time
@@ -365,10 +367,10 @@ class TestServerOps(tb.TestCase):
             transaction_state=protocol.TransactionState.NOT_IN_TRANSACTION,
         )
 
-    async def test_server_ops_downgrade_to_plaintext(self):
+    async def test_server_ops_downgrade_to_cleartext(self):
         async with tb.start_edgedb_server(
             auto_shutdown=True,
-            allow_cleartext_connections=True,
+            allow_insecure_binary_clients=True,
         ) as sd:
             con = await edb_protocol.new_connection(
                 user='edgedb',
@@ -382,11 +384,35 @@ class TestServerOps(tb.TestCase):
             finally:
                 await con.aclose()
 
-    async def test_server_ops_no_plaintext(self):
+    async def test_server_ops_no_cleartext(self):
         async with tb.start_edgedb_server(
             auto_shutdown=True,
-            allow_cleartext_connections=False,
+            allow_insecure_binary_clients=False,
+            allow_insecure_http_clients=False,
         ) as sd:
+            con = http.client.HTTPConnection(sd.host, sd.port)
+            con.connect()
+            try:
+                con.request(
+                    'GET',
+                    f'http://{sd.host}:{sd.port}/blah404'
+                )
+                resp = con.getresponse()
+                self.assertEqual(resp.status, 301)
+                resp_headers = {k.lower(): v.lower()
+                                for k, v in resp.getheaders()}
+                self.assertIn('location', resp_headers)
+                self.assertTrue(
+                    resp_headers['location'].startswith('https://'))
+
+                self.assertIn('strict-transport-security', resp_headers)
+                # By default we enforce HTTPS via HSTS on all routes.
+                self.assertEqual(
+                    resp_headers['strict-transport-security'],
+                    'max-age=31536000')
+            finally:
+                con.close()
+
             con = await edb_protocol.new_connection(
                 user='edgedb',
                 password=sd.password,
@@ -402,6 +428,65 @@ class TestServerOps(tb.TestCase):
             finally:
                 await con.aclose()
 
+            con = await edb_protocol.new_connection(
+                user='edgedb',
+                password=sd.password,
+                host=sd.host,
+                port=sd.port,
+                tls_ca_file=sd.tls_cert_file,
+            )
+            try:
+                await self._test_connection(con)
+            finally:
+                await con.aclose()
+
+    async def test_server_ops_cleartext_http_allowed(self):
+        async with tb.start_edgedb_server(
+            auto_shutdown=True,
+            allow_insecure_http_clients=True,
+        ) as sd:
+
+            con = http.client.HTTPConnection(sd.host, sd.port)
+            con.connect()
+            try:
+                con.request(
+                    'GET',
+                    f'http://{sd.host}:{sd.port}/blah404'
+                )
+                resp = con.getresponse()
+                self.assertEqual(resp.status, 404)
+            finally:
+                con.close()
+
+            tls_context = ssl.SSLContext()
+            tls_context.verify_mode = ssl.CERT_REQUIRED
+            tls_context.check_hostname = False
+            tls_context.load_verify_locations(cafile=sd.tls_cert_file)
+            con = http.client.HTTPSConnection(
+                sd.host, sd.port, context=tls_context)
+            con.connect()
+            try:
+                con.request(
+                    'GET',
+                    f'http://{sd.host}:{sd.port}/blah404'
+                )
+                resp = con.getresponse()
+                self.assertEqual(resp.status, 404)
+                resp_headers = {k.lower(): v.lower()
+                                for k, v in resp.getheaders()}
+
+                self.assertIn('strict-transport-security', resp_headers)
+                # When --allow-insecure-http-clients is passed, we set
+                # max-age to 0, to let browsers know that it's safe
+                # for the user to open http://
+                self.assertEqual(
+                    resp_headers['strict-transport-security'], 'max-age=0')
+            finally:
+                con.close()
+
+            # Connect to let it autoshutdown; also test that
+            # --allow-insecure-http-clients doesn't break binary
+            # connections.
             con = await edb_protocol.new_connection(
                 user='edgedb',
                 password=sd.password,

@@ -218,6 +218,8 @@ def get_set_rvar(
                                           rvars=rvars, ctx=subctx)
         elif not is_optional and is_empty_set:
             null_query = rvars.main.rvar.query
+            assert isinstance(
+                null_query, (pgast.SelectStmt, pgast.NullRelation))
             null_query.where_clause = pgast.BooleanConstant(val='FALSE')
 
         result_rvar = _include_rvars(rvars, scope_stmt=scope_stmt, ctx=subctx)
@@ -1982,6 +1984,8 @@ def process_set_as_singleton_assertion(
             ),
         )
 
+        if newctx.rel.sort_clause is None:
+            newctx.rel.sort_clause = []
         newctx.rel.sort_clause.append(
             pgast.SortBy(node=pgast.ColumnRef(name=["_sentinel"])),
         )
@@ -2102,6 +2106,8 @@ def process_set_as_std_min_max(
 
         arg_val = output.output_as_value(arg_ref, env=newctx.env)
 
+        if newctx.rel.sort_clause is None:
+            newctx.rel.sort_clause = []
         newctx.rel.sort_clause.append(
             pgast.SortBy(
                 node=arg_val,
@@ -2495,6 +2501,8 @@ def process_set_as_agg_expr_inner(
                 group_rvar = relctx.rvar_for_rel(group_rel, ctx=ctx)
                 relctx.include_rvar(stmt, group_rvar, path_id=path_id, ctx=ctx)
                 ref = pathctx.get_path_identity_var(stmt, path_id, env=ctx.env)
+                if stmt.group_clause is None:
+                    stmt.group_clause = []
                 stmt.group_clause.append(ref)
                 newctx.path_scope[s_path_id] = stmt
 
@@ -2571,7 +2579,7 @@ def process_set_as_agg_expr_inner(
                         query = qrvar.query
                         assert isinstance(query, pgast.SelectStmt)
 
-                        for i, sortref in enumerate(query.sort_clause):
+                        for i, sortref in enumerate(query.sort_clause or ()):
                             alias = argctx.env.aliases.get(f's{i}')
 
                             query.target_list.append(
