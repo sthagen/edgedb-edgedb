@@ -37,6 +37,7 @@ import pprint
 import random
 import re
 import secrets
+import shlex
 import socket
 import subprocess
 import sys
@@ -374,37 +375,38 @@ class _TryRunner:
 _default_cluster = None
 
 
-def _init_cluster(data_dir=None, postgres_dsn=None, *,
-                  cleanup_atexit=True, init_settings=None):
+async def init_cluster(
+    data_dir=None,
+    postgres_dsn=None,
+    *,
+    cleanup_atexit=True,
+    init_settings=None,
+) -> edgedb_cluster.BaseCluster:
     if data_dir is not None and postgres_dsn is not None:
         raise ValueError(
             "data_dir and postgres_dsn cannot be set at the same time")
     if init_settings is None:
         init_settings = {}
-    if (not os.environ.get('EDGEDB_DEBUG_SERVER') and
-            not os.environ.get('EDGEDB_LOG_LEVEL')):
-        _env = {'EDGEDB_LOG_LEVEL': 'silent'}
-    else:
-        _env = {}
 
     if postgres_dsn:
         cluster = edgedb_cluster.TempClusterWithRemotePg(
-            postgres_dsn, env=_env, testmode=True, log_level='s')
+            postgres_dsn, testmode=True, log_level='s',
+            data_dir_prefix='edb-test-')
         destroy = True
     elif data_dir is None:
         cluster = edgedb_cluster.TempCluster(
-            env=_env, testmode=True, log_level='s')
+            testmode=True, log_level='s', data_dir_prefix='edb-test-')
         destroy = True
     else:
         cluster = edgedb_cluster.Cluster(
-            data_dir=data_dir, env=_env, log_level='s')
+            data_dir=data_dir, log_level='s')
         destroy = False
 
-    if cluster.get_status() == 'not-initialized':
-        cluster.init(server_settings=init_settings)
+    if await cluster.get_status() == 'not-initialized':
+        await cluster.init(server_settings=init_settings)
 
-    cluster.start(port=0)
-    cluster.set_superuser_password('test')
+    await cluster.start(port=0)
+    await cluster.set_superuser_password('test')
 
     if cleanup_atexit:
         atexit.register(_shutdown_cluster, cluster, destroy=destroy)
@@ -412,7 +414,7 @@ def _init_cluster(data_dir=None, postgres_dsn=None, *,
     return cluster
 
 
-def _start_cluster(*, cleanup_atexit=True):
+def _start_cluster(*, loop: asyncio.AbstractEventLoop, cleanup_atexit=True):
     global _default_cluster
 
     if _default_cluster is None:
@@ -422,12 +424,16 @@ def _start_cluster(*, cleanup_atexit=True):
             _default_cluster = edgedb_cluster.RunningCluster(**conn_spec)
         else:
             # This branch is not usually used - `edb test` will call
-            # _init_cluster() separately and set EDGEDB_TEST_CLUSTER_ADDR
+            # init_cluster() separately and set EDGEDB_TEST_CLUSTER_ADDR
             data_dir = os.environ.get('EDGEDB_TEST_DATA_DIR')
             postgres_dsn = os.environ.get('EDGEDB_TEST_POSTGRES_DSN')
-            _default_cluster = _init_cluster(
-                data_dir=data_dir, postgres_dsn=postgres_dsn,
-                cleanup_atexit=cleanup_atexit)
+            _default_cluster = loop.run_until_complete(
+                init_cluster(
+                    data_dir=data_dir,
+                    postgres_dsn=postgres_dsn,
+                    cleanup_atexit=cleanup_atexit,
+                )
+            )
 
     return _default_cluster
 
@@ -449,7 +455,7 @@ class ClusterTestCase(TestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.cluster = _start_cluster(cleanup_atexit=True)
+        cls.cluster = _start_cluster(loop=cls.loop, cleanup_atexit=True)
         cls.postgres_dsn = os.environ.get('EDGEDB_TEST_POSTGRES_DSN')
 
     @classmethod
@@ -1305,37 +1311,34 @@ def get_test_cases_setup(
     return result
 
 
-def setup_test_cases(cases, conn, num_jobs, verbose=False):
+async def setup_test_cases(cases, conn, num_jobs, verbose=False):
     setup = get_test_cases_setup(cases)
 
-    async def _run():
-        stats = []
-        if num_jobs == 1:
-            # Special case for --jobs=1
+    stats = []
+    if num_jobs == 1:
+        # Special case for --jobs=1
+        for _case, dbname, setup_script in setup:
+            await _setup_database(dbname, setup_script, conn, stats)
+            if verbose:
+                print(f' -> {dbname}: OK', flush=True)
+    else:
+        async with taskgroup.TaskGroup(name='setup test cases') as g:
+            # Use a semaphore to limit the concurrency of bootstrap
+            # tasks to the number of jobs (bootstrap is heavy, having
+            # more tasks than `--jobs` won't necessarily make
+            # things faster.)
+            sem = asyncio.BoundedSemaphore(num_jobs)
+
+            async def controller(coro, dbname, *args):
+                async with sem:
+                    await coro(dbname, *args)
+                    if verbose:
+                        print(f' -> {dbname}: OK', flush=True)
+
             for _case, dbname, setup_script in setup:
-                await _setup_database(dbname, setup_script, conn, stats)
-                if verbose:
-                    print(f' -> {dbname}: OK', flush=True)
-        else:
-            async with taskgroup.TaskGroup(name='setup test cases') as g:
-                # Use a semaphore to limit the concurrency of bootstrap
-                # tasks to the number of jobs (bootstrap is heavy, having
-                # more tasks than `--jobs` won't necessarily make
-                # things faster.)
-                sem = asyncio.BoundedSemaphore(num_jobs)
-
-                async def controller(coro, dbname, *args):
-                    async with sem:
-                        await coro(dbname, *args)
-                        if verbose:
-                            print(f' -> {dbname}: OK', flush=True)
-
-                for _case, dbname, setup_script in setup:
-                    g.create_task(controller(
-                        _setup_database, dbname, setup_script, conn, stats))
-        return stats
-
-    return asyncio.run(_run())
+                g.create_task(controller(
+                    _setup_database, dbname, setup_script, conn, stats))
+    return stats
 
 
 async def _setup_database(dbname, setup_script, conn_args, stats):
@@ -1509,8 +1512,7 @@ class _EdgeDBServer:
 
         reset_auth = self.reset_auth
 
-        if self.debug:
-            cmd.extend(['--log-level', 'd'])
+        cmd.extend(['--log-level', 'd' if self.debug else 's'])
         if self.max_allowed_connections is not None:
             cmd.extend([
                 '--max-backend-connections', str(self.max_allowed_connections),
@@ -1571,13 +1573,16 @@ class _EdgeDBServer:
             cmd += ['--allow-insecure-http-clients']
 
         if self.debug:
-            print(f'Starting EdgeDB cluster with the following params: {cmd}')
+            print(
+                f'Starting EdgeDB cluster with the following params:\n'
+                f'{" ".join(shlex.quote(c) for c in cmd)}'
+            )
 
         stat_reader, stat_writer = await asyncio.open_connection(sock=status_r)
 
         self.proc: asyncio.Process = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=None if self.debug else subprocess.DEVNULL,
+            stdout=None,
             stderr=subprocess.STDOUT,
             pass_fds=(status_w.fileno(),),
         )

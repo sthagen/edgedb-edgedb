@@ -129,11 +129,6 @@ class TestServerOps(tb.TestCase):
                 f'STDERR: {stderr.decode()}',
             )
 
-            if stderr != b'':
-                self.fail(
-                    'Unexpected server error output:\n' + stderr.decode()
-                )
-
     async def test_server_ops_bootstrap_script_server(self):
         # Test that "edgedb-server" works as expected with the
         # following arguments:
@@ -219,7 +214,7 @@ class TestServerOps(tb.TestCase):
             finally:
                 await con.aclose()
 
-    def test_server_ops_detect_postgres_pool_size(self):
+    async def test_server_ops_detect_postgres_pool_size(self):
         actual = random.randint(50, 100)
 
         async def test(pgdata_path):
@@ -244,7 +239,7 @@ class TestServerOps(tb.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             cluster = pgcluster.get_local_pg_cluster(
-                td, max_connections=actual)
+                td, max_connections=actual, log_level='s')
             cluster.set_connection_params(
                 pgconnparams.ConnectionParameters(
                     user='postgres',
@@ -252,13 +247,13 @@ class TestServerOps(tb.TestCase):
                 ),
             )
             self.assertTrue(cluster.ensure_initialized())
-            cluster.start()
+            await cluster.start()
             try:
-                self.loop.run_until_complete(test(td))
+                await test(td)
             finally:
                 cluster.stop()
 
-    def test_server_ops_postgres_multitenant(self):
+    async def test_server_ops_postgres_multitenant(self):
         async def test(pgdata_path, tenant):
             async with tb.start_edgedb_server(
                 auto_shutdown=True,
@@ -278,13 +273,8 @@ class TestServerOps(tb.TestCase):
                 finally:
                     await con.aclose()
 
-        async def run():
-            async with taskgroup.TaskGroup() as tg:
-                tg.create_task(test(td, 'tenant1'))
-                tg.create_task(test(td, 'tenant2'))
-
         with tempfile.TemporaryDirectory() as td:
-            cluster = pgcluster.get_local_pg_cluster(td)
+            cluster = pgcluster.get_local_pg_cluster(td, log_level='s')
             cluster.set_connection_params(
                 pgconnparams.ConnectionParameters(
                     user='postgres',
@@ -292,13 +282,16 @@ class TestServerOps(tb.TestCase):
                 ),
             )
             self.assertTrue(cluster.ensure_initialized())
-            cluster.start()
+
+            await cluster.start()
             try:
-                self.loop.run_until_complete(run())
+                async with taskgroup.TaskGroup() as tg:
+                    tg.create_task(test(td, 'tenant1'))
+                    tg.create_task(test(td, 'tenant2'))
             finally:
                 cluster.stop()
 
-    def test_server_ops_postgres_recovery(self):
+    async def test_server_ops_postgres_recovery(self):
         async def test(pgdata_path):
             async with tb.start_edgedb_server(
                 postgres_dsn=f'postgres:///?user=postgres&host={pgdata_path}',
@@ -320,7 +313,7 @@ class TestServerOps(tb.TestCase):
                         await con.query_single('SELECT 123+456')
 
                     # bring postgres back
-                    await self.loop.run_in_executor(None, cluster.start)
+                    await cluster.start()
 
                     # give the EdgeDB server some time to recover
                     deadline = time.monotonic() + 5
@@ -335,7 +328,7 @@ class TestServerOps(tb.TestCase):
                     await con.aclose()
 
         with tempfile.TemporaryDirectory() as td:
-            cluster = pgcluster.get_local_pg_cluster(td)
+            cluster = pgcluster.get_local_pg_cluster(td, log_level='s')
             cluster.set_connection_params(
                 pgconnparams.ConnectionParameters(
                     user='postgres',
@@ -343,9 +336,9 @@ class TestServerOps(tb.TestCase):
                 ),
             )
             self.assertTrue(cluster.ensure_initialized())
-            cluster.start()
+            await cluster.start()
             try:
-                self.loop.run_until_complete(test(td))
+                await test(td)
             finally:
                 cluster.stop()
 
@@ -458,10 +451,11 @@ class TestServerOps(tb.TestCase):
             finally:
                 con.close()
 
-            tls_context = ssl.SSLContext()
-            tls_context.verify_mode = ssl.CERT_REQUIRED
+            tls_context = ssl.create_default_context(
+                ssl.Purpose.SERVER_AUTH,
+                cafile=sd.tls_cert_file,
+            )
             tls_context.check_hostname = False
-            tls_context.load_verify_locations(cafile=sd.tls_cert_file)
             con = http.client.HTTPSConnection(
                 sd.host, sd.port, context=tls_context)
             con.connect()
