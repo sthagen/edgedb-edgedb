@@ -138,7 +138,7 @@ def new_set_from_set(
         stype: Optional[s_types.Type]=None,
         rptr: Optional[irast.Pointer]=None,
         context: Optional[parsing.ParserContext]=None,
-        is_binding: Optional[bool]=None,
+        is_binding: Optional[irast.BindingKind]=None,
         ctx: context.ContextLevel) -> irast.Set:
     """Create a new ir.Set from another ir.Set.
 
@@ -286,12 +286,16 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
                 view_set = ctx.view_sets.get(stype)
                 if view_set is not None:
                     view_scope_info = ctx.path_scope_map[view_set]
+                    is_binding = (
+                        irast.BindingKind.For if view_scope_info.is_for_view
+                        else irast.BindingKind.With
+                    )
                     path_tip = new_set_from_set(
                         view_set,
                         preserve_scope_ns=(
                             view_scope_info.pinned_path_id_ns is not None
                         ),
-                        is_binding=True,
+                        is_binding=is_binding,
                         ctx=ctx,
                     )
 
@@ -967,7 +971,7 @@ def type_intersection_set(
         # when evaluating the path cardinality, as well as to
         # route link property references accordingly.
         for component in rptr.ptrref.union_components:
-            component_endpoint_ref = component.dir_target
+            component_endpoint_ref = component.dir_target(rptr.direction)
             ctx.env.schema, component_endpoint = irtyputils.ir_typeref_to_type(
                 ctx.env.schema, component_endpoint_ref)
             if component_endpoint.issubclass(ctx.env.schema, stype):
@@ -983,7 +987,6 @@ def type_intersection_set(
                     irtyputils.ptrref_from_ptrcls(
                         schema=ctx.env.schema,
                         ptrcls=narrow_ptr,
-                        direction=rptr.direction,
                         cache=ctx.env.ptr_ref_cache,
                         typeref_cache=ctx.env.type_ref_cache,
                     ),
@@ -1460,16 +1463,15 @@ def should_materialize(
 ) -> Sequence[irast.MaterializeReason]:
     volatility = inference.infer_volatility(
         ir, ctx.env, for_materialization=True)
-    if volatility is qltypes.Volatility.Volatile:
-        # vol is always good enough, don't need to look harder
-        return (irast.MaterializeVolatile(),)
+    reasons: List[irast.MaterializeReason] = []
+
+    if volatility.is_volatile():
+        reasons.append(irast.MaterializeVolatile())
 
     if not isinstance(ir, irast.Set):
-        return ()
+        return reasons
 
     typ = get_set_type(ir, ctx=ctx)
-
-    reasons: List[irast.MaterializeReason] = []
 
     # For shape elements, we need to materialize when they reference
     # bindings that are visible from that point. This means that doing

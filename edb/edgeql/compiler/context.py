@@ -94,6 +94,7 @@ class StatementMetadata:
 class ScopeInfo:
     path_scope: irast.ScopeTreeNode
     pinned_path_id_ns: Optional[FrozenSet[str]] = None
+    is_for_view: bool = False
 
 
 class PointerRefCache(Dict[irtyputils.PtrRefCacheKey, irast.BasePointerRef]):
@@ -110,7 +111,7 @@ class PointerRefCache(Dict[irtyputils.PtrRefCacheKey, irast.BasePointerRef]):
         val: irast.BasePointerRef,
     ) -> None:
         super().__setitem__(key, val)
-        self._rcache[val] = key[0]
+        self._rcache[val] = key
 
     def get_ptrcls_for_ref(
         self,

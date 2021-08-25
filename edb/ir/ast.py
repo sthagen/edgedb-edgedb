@@ -69,7 +69,7 @@ import dataclasses
 import typing
 import uuid
 
-from edb.common import ast, compiler, parsing, markup
+from edb.common import ast, compiler, parsing, markup, enum as s_enum
 
 from edb.schema import modules as s_mod
 from edb.schema import name as sn
@@ -184,7 +184,7 @@ class BasePointerRef(ImmutableBase):
     # cardinality fields need to be mutable for lazy cardinality inference.
     # and children because we update pointers with newly derived children
     __ast_mutable_fields__ = frozenset(
-        ('dir_cardinality', 'out_cardinality', 'children')
+        ('in_cardinality', 'out_cardinality', 'children')
     )
 
     # The defaults set here are mostly to try to reduce debug spew output.
@@ -194,8 +194,6 @@ class BasePointerRef(ImmutableBase):
     std_parent_name: typing.Optional[sn.QualName] = None
     out_source: TypeRef
     out_target: TypeRef
-    direction: s_pointers.PointerDirection = (
-        s_pointers.PointerDirection.Outbound)
     source_ptr: typing.Optional[PointerRef] = None
     base_ptr: typing.Optional[BasePointerRef] = None
     material_ptr: typing.Optional[BasePointerRef] = None
@@ -206,33 +204,34 @@ class BasePointerRef(ImmutableBase):
     has_properties: bool = False
     is_derived: bool = False
     is_computable: bool = False
-    # Relation cardinality in the direction specified
-    # by *direction*.
-    dir_cardinality: qltypes.Cardinality
     # Outbound cardinality of the pointer.
     out_cardinality: qltypes.Cardinality
+    # Inbound cardinality of the pointer.
+    in_cardinality: qltypes.Cardinality = qltypes.Cardinality.MANY
 
-    @property
-    def dir_target(self) -> TypeRef:
-        if self.direction is s_pointers.PointerDirection.Outbound:
+    def dir_target(self, direction: s_pointers.PointerDirection) -> TypeRef:
+        if direction is s_pointers.PointerDirection.Outbound:
             return self.out_target
         else:
             return self.out_source
 
-    @property
-    def dir_source(self) -> TypeRef:
-        if self.direction is s_pointers.PointerDirection.Outbound:
+    def dir_source(self, direction: s_pointers.PointerDirection) -> TypeRef:
+        if direction is s_pointers.PointerDirection.Outbound:
             return self.out_source
         else:
             return self.out_target
+
+    def dir_cardinality(
+        self, direction: s_pointers.PointerDirection
+    ) -> qltypes.Cardinality:
+        if direction is s_pointers.PointerDirection.Outbound:
+            return self.out_cardinality
+        else:
+            return self.in_cardinality
 
     @property
     def required(self) -> bool:
         return self.out_cardinality.to_schema_value()[0]
-
-    @property
-    def is_inbound(self) -> bool:
-        return self.direction is self.direction.Inbound
 
     def descendants(self) -> typing.Set[BasePointerRef]:
         res = set(self.children)
@@ -408,6 +407,10 @@ class Pointer(Base):
     def is_inbound(self) -> bool:
         return self.direction == s_pointers.PointerDirection.Inbound
 
+    @property
+    def dir_cardinality(self) -> qltypes.Cardinality:
+        return self.ptrref.dir_cardinality(self.direction)
+
 
 class TypeIntersectionPointer(Pointer):
 
@@ -432,6 +435,11 @@ class ImmutableExpr(Expr, ImmutableBase):
     __abstract_node__ = True
 
 
+class BindingKind(s_enum.StrEnum):
+    With = 'With'
+    For = 'For'
+
+
 class Set(Base):
 
     __ast_frozen_fields__ = frozenset({'typeref'})
@@ -447,7 +455,7 @@ class Set(Base):
     # A pointer to a set nested within this one has a shape and the same
     # typeref, if such a set exists.
     shape_source: typing.Optional[Set] = None
-    is_binding: bool = False
+    is_binding: typing.Optional[BindingKind] = None
 
     def __repr__(self) -> str:
         return f'<ir.Set \'{self.path_id}\' at 0x{id(self):x}>'
@@ -479,7 +487,7 @@ class MaterializeVolatile(typing.NamedTuple):
 
 
 class MaterializeVisible(typing.NamedTuple):
-    paths: typing.Set[PathId]
+    sets: typing.Set[typing.Tuple[PathId, Set]]
 
 
 MaterializeReason = typing.Union[MaterializeVolatile, MaterializeVisible]
@@ -701,6 +709,10 @@ class FunctionCall(Call):
 
     # Error to raise if the underlying SQL function returns NULL.
     error_on_null_result: typing.Optional[str] = None
+
+    # Whether the generic function preserves optionality of the generic
+    # argument(s).
+    preserves_optionality: bool = False
 
     # Set to the type of the variadic parameter of the bound function
     # (or None, if the function has no variadic parameters.)
