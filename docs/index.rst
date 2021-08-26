@@ -14,12 +14,12 @@ Welcome to the EdgeDB |version| documentation.
     :includehidden:
 
     intro
-    quickstart
-    cheatsheet/index
+    guides/index
     datamodel/index
     edgeql/index
+    graphql/index
+    stdlib/index
     clients/index
-    admin/index
-    cli/__toc__
-    changelog/index
+    cli/index
     internals/index
+    changelog/index

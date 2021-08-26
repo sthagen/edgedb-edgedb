@@ -90,13 +90,13 @@ set roles, passwords, and so on using EdgeDB.
     :maxdepth: 3
     :hidden:
 
-    overview
-    expressions/__toc__
-    statements/index
-    funcops/index
+    concepts
+    expressions/index
+    commands/index
     types
     sdl/index
     ddl/index
     introspection/index
     admin/index
     lexical
+    eval

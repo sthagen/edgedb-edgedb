@@ -1,8 +1,8 @@
 .. eql:section-intro-page:: datamodel
 
-========
-Concepts
-========
+==========
+Data Model
+==========
 
 In this section you'll find an overview of EdgeDB, a relational
 database with strongly typed schema, starting from the database server
@@ -13,11 +13,10 @@ EdgeDB.
     :maxdepth: 3
     :hidden:
 
-    overview
+    typesystem
     objects/index
     scalars/index
     colltypes
-    abstract
     functions
     links
     props
