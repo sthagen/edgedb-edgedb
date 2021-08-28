@@ -29,6 +29,7 @@ from edb.common import devmode
 from edb.common import taskgroup as tg
 from edb.testbase import server as tb
 from edb.server.compiler import enums
+from edb.tools import test
 
 
 SERVER_HEADER_CAPABILITIES = 0x1001
@@ -71,6 +72,13 @@ class TestServerProto(tb.QueryTestCase):
     TEARDOWN = '''
         DROP TYPE Tmp;
     '''
+
+    def setUp(self):
+        super().setUp()
+        # Reset cached codecs for every test. That ensures that
+        # tests cannot interfere with each other when the connection
+        # is reused.
+        self.con._clear_codecs_cache()
 
     async def is_testmode_on(self):
         # The idea is that if __internal_testmode value config is lost
@@ -766,7 +774,7 @@ class TestServerProto(tb.QueryTestCase):
             async with tg.TaskGroup() as g:
 
                 async def exec_to_fail():
-                    with self.assertRaises(ConnectionResetError):
+                    with self.assertRaises(edgedb.ClientConnectionClosedError):
                         await con2.query(
                             'select sys::_advisory_lock(<int64>$0)', lock_key)
 
@@ -1703,6 +1711,7 @@ class TestServerProto(tb.QueryTestCase):
             await self.con.query_single('SELECT 1;'),
             1)
 
+    @test.xfail("... we currently always use serializable")
     async def test_server_proto_tx_16(self):
         try:
             for isol, expected in [
