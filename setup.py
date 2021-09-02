@@ -52,7 +52,7 @@ RUNTIME_DEPS = [
     'click~=7.1',
     'cryptography~=3.4',
     'graphql-core~=3.1.5',
-    'parsing~=1.6',
+    'parsing~=2.0',
     'psutil~=5.8',
     'setproctitle~=1.2',
     'setuptools_scm~=6.0',
@@ -349,12 +349,25 @@ class build(distutils_build.build):
 
     def finalize_options(self):
         super().finalize_options()
+        if self.pg_config is None:
+            self.pg_config = os.environ.get("EDGEDB_BUILD_PG_CONFIG")
+        if self.runstatedir is None:
+            self.runstatedir = os.environ.get("EDGEDB_BUILD_RUNSTATEDIR")
+        if self.shared_dir is None:
+            self.shared_dir = os.environ.get("EDGEDB_BUILD_SHARED_DIR")
+        if self.version_suffix is None:
+            self.version_suffix = os.environ.get("EDGEDB_BUILD_VERSION_SUFFIX")
 
     def run(self, *args, **kwargs):
         super().run(*args, **kwargs)
         build_lib = pathlib.Path(self.build_lib)
         _compile_parsers(build_lib)
-        if self.pg_config:
+        if (
+            self.pg_config
+            or self.runstatedir
+            or self.shared_dir
+            or self.version_suffix
+        ):
             _compile_build_meta(
                 build_lib,
                 self.distribution.metadata.version,
