@@ -32,7 +32,6 @@ from edb.common import context as pctx
 from edb.ir import ast as irast
 from edb.ir import typeutils
 
-from edb.schema import constraints as s_constr
 from edb.schema import ddl as s_ddl
 from edb.schema import functions as s_func
 from edb.schema import links as s_links
@@ -60,6 +59,7 @@ from . import viewgen
 from . import schemactx
 from . import stmtctx
 from . import typegen
+from . import conflicts
 
 
 @dispatch.compile.register(qlast.SelectQuery)
@@ -231,404 +231,6 @@ def compile_GroupQuery(
         context=expr.context)
 
 
-def _compile_insert_unless_conflict_select(
-    stmt: irast.InsertStmt,
-    subject_typ: s_objtypes.ObjectType,
-    *,
-    obj_constrs: Sequence[s_constr.Constraint],
-    constrs: Dict[str, Tuple[s_pointers.Pointer, List[s_constr.Constraint]]],
-    parser_context: Optional[pctx.ParserContext],
-    ctx: context.ContextLevel,
-) -> Optional[qlast.Expr]:
-    """Synthesize a select of conflicting objects for UNLESS CONFLICT
-
-    ... for a single object type. This gets called once for each ancestor
-    type that provides constraints to the type being inserted.
-
-    `cnstrs` contains the constraints to consider.
-    """
-    # Find which pointers we need to grab
-    needed_ptrs = set(constrs)
-    for constr in obj_constrs:
-        subjexpr = constr.get_subjectexpr(ctx.env.schema)
-        assert subjexpr
-        needed_ptrs |= qlutils.find_subject_ptrs(subjexpr.qlast)
-
-    wl = list(needed_ptrs)
-    ptr_anchors = {}
-    while wl:
-        p = wl.pop()
-        ptr = subject_typ.getptr(ctx.env.schema, s_name.UnqualName(p))
-        if expr := ptr.get_expr(ctx.env.schema):
-            assert isinstance(expr.qlast, qlast.Expr)
-            ptr_anchors[p] = expr.qlast
-            for ref in qlutils.find_subject_ptrs(expr.qlast):
-                if ref not in needed_ptrs:
-                    wl.append(ref)
-                    needed_ptrs.add(ref)
-
-    ctx.anchors = ctx.anchors.copy()
-
-    # Find the IR corresponding to the fields we care about and
-    # produce anchors for them
-    for elem, _ in stmt.subject.shape:
-        assert elem.rptr is not None
-        name = elem.rptr.ptrref.shortname.name
-        if name in needed_ptrs and name not in ptr_anchors:
-            assert elem.expr
-
-            if inference.infer_volatility(elem.expr, ctx.env).is_volatile():
-                raise errors.UnsupportedFeatureError(
-                    'INSERT UNLESS CONFLICT ON does not support volatile '
-                    'properties',
-                    context=parser_context,
-                )
-
-            # FIXME: The wrong thing will definitely happen if there are
-            # volatile entries here
-            source_alias = ctx.aliases.get(name)
-            ctx.anchors[source_alias] = setgen.ensure_set(elem.expr, ctx=ctx)
-            ptr_anchors[name] = (
-                qlast.Path(steps=[qlast.ObjectRef(name=source_alias)]))
-
-    # Fill in empty sets for pointers that are needed but not present
-    present_ptrs = set(ptr_anchors)
-    for p in (needed_ptrs - present_ptrs):
-        ptr = subject_typ.getptr(ctx.env.schema, s_name.UnqualName(p))
-        typ = ptr.get_target(ctx.env.schema)
-        assert typ
-        ptr_anchors[p] = qlast.TypeCast(
-            expr=qlast.Set(elements=[]),
-            type=typegen.type_to_ql_typeref(typ, ctx=ctx))
-
-    if not ptr_anchors:
-        raise errors.QueryError(
-            'INSERT UNLESS CONFLICT property requires matching shape',
-            context=parser_context,
-        )
-
-    conds: List[qlast.Expr] = []
-    for ptrname, (ptr, ptr_cnstrs) in constrs.items():
-        if ptrname not in present_ptrs:
-            continue
-        anchor = qlutils.subject_paths_substitute(
-            ptr_anchors[ptrname], ptr_anchors)
-        ptr_val = qlast.Path(partial=True, steps=[
-            qlast.Ptr(ptr=qlast.ObjectRef(name=ptrname))
-        ])
-        ptr, ptr_cnstrs = constrs[ptrname]
-        ptr_card = ptr.get_cardinality(ctx.env.schema)
-
-        for cnstr in ptr_cnstrs:
-            lhs: qlast.Expr = anchor
-            rhs: qlast.Expr = ptr_val
-            # If there is a subjectexpr, substitute our lhs and rhs in
-            # for __subject__ in the subjectexpr and compare *that*
-            if (subjectexpr := cnstr.get_subjectexpr(ctx.env.schema)):
-                assert isinstance(subjectexpr.qlast, qlast.Expr)
-                lhs = qlutils.subject_substitute(subjectexpr.qlast, lhs)
-                rhs = qlutils.subject_substitute(subjectexpr.qlast, rhs)
-
-            conds.append(qlast.BinOp(
-                op='=' if ptr_card.is_single() else 'IN',
-                left=lhs, right=rhs,
-            ))
-
-    insert_subject = qlast.Path(steps=[
-        s_utils.name_to_ast_ref(subject_typ.get_name(ctx.env.schema))])
-
-    for constr in obj_constrs:
-        subjectexpr = constr.get_subjectexpr(ctx.env.schema)
-        assert subjectexpr and isinstance(subjectexpr.qlast, qlast.Expr)
-        lhs = qlutils.subject_paths_substitute(subjectexpr.qlast, ptr_anchors)
-        rhs = qlutils.subject_substitute(subjectexpr.qlast, insert_subject)
-        conds.append(qlast.BinOp(op='=', left=lhs, right=rhs))
-
-    if not conds:
-        return None
-
-    # We use `any` to compute the disjunction here because some might
-    # be empty.
-    if len(conds) == 1:
-        cond = conds[0]
-    else:
-        cond = qlast.FunctionCall(
-            func='any',
-            args=[qlast.Set(elements=conds)],
-        )
-
-    # Produce a query that finds the conflicting objects
-    select_ast = qlast.SelectQuery(
-        result=insert_subject,
-        where=cond,
-    )
-
-    return select_ast
-
-
-def _constr_matters(
-    constr: s_constr.Constraint, ctx: context.ContextLevel,
-) -> bool:
-    schema = ctx.env.schema
-    return (
-        not constr.generic(schema)
-        and not constr.get_delegated(schema)
-        and (
-            constr.get_owned(schema)
-            or all(anc.get_delegated(schema) or anc.generic(schema) for anc
-                   in constr.get_ancestors(schema).objects(schema))
-        )
-    )
-
-
-ConflictTypeMap = Dict[
-    s_objtypes.ObjectType,
-    Tuple[
-        Dict[str, Tuple[s_pointers.Pointer, List[s_constr.Constraint]]],
-        List[s_constr.Constraint],
-    ],
-]
-
-
-def _split_constraints(
-    obj_constrs: Sequence[s_constr.Constraint],
-    constrs: Dict[str, Tuple[s_pointers.Pointer, List[s_constr.Constraint]]],
-    ctx: context.ContextLevel,
-) -> ConflictTypeMap:
-    schema = ctx.env.schema
-
-    type_maps: ConflictTypeMap = {}
-
-    # Split up pointer constraints by what object types they come from
-    for name, (_, p_constrs) in constrs.items():
-        for p_constr in p_constrs:
-            ancs = (p_constr,) + p_constr.get_ancestors(schema).objects(schema)
-            for anc in ancs:
-                if not _constr_matters(anc, ctx):
-                    continue
-                p_ptr = anc.get_subject(schema)
-                assert isinstance(p_ptr, s_pointers.Pointer)
-                obj = p_ptr.get_source(schema)
-                assert isinstance(obj, s_objtypes.ObjectType)
-                map, _ = type_maps.setdefault(obj, ({}, []))
-                _, entry = map.setdefault(name, (p_ptr, []))
-                entry.append(anc)
-
-    # Split up object constraints by what object types they come from
-    for obj_constr in obj_constrs:
-        ancs = (obj_constr,) + obj_constr.get_ancestors(schema).objects(schema)
-        for anc in ancs:
-            if not _constr_matters(anc, ctx):
-                continue
-            obj = anc.get_subject(schema)
-            assert isinstance(obj, s_objtypes.ObjectType)
-            _, o_constr_entry = type_maps.setdefault(obj, ({}, []))
-            o_constr_entry.append(anc)
-
-    return type_maps
-
-
-def compile_insert_unless_conflict_select(
-    stmt: irast.InsertStmt,
-    subject_typ: s_objtypes.ObjectType,
-    *,
-    obj_constrs: Sequence[s_constr.Constraint],
-    constrs: Dict[str, Tuple[s_pointers.Pointer, List[s_constr.Constraint]]],
-    parser_context: Optional[pctx.ParserContext],
-    ctx: context.ContextLevel,
-) -> Tuple[irast.Set, bool, bool]:
-    """Synthesize a select of conflicting objects for UNLESS CONFLICT
-
-    This teases apart the constraints we care about based on which
-    type they originate from, generates a SELECT for each type, and
-    unions them together.
-
-    `cnstrs` contains the constraints to consider.
-    """
-    schema = ctx.env.schema
-    type_maps = _split_constraints(obj_constrs, constrs, ctx=ctx)
-
-    # Generate a separate query for each type
-    from_parent = False
-    frags = []
-    for a_obj, (a_constrs, a_obj_constrs) in type_maps.items():
-        frag = _compile_insert_unless_conflict_select(
-            stmt, a_obj, obj_constrs=a_obj_constrs, constrs=a_constrs,
-            parser_context=parser_context, ctx=ctx,
-        )
-        if frag:
-            if a_obj != subject_typ:
-                from_parent = True
-            frags.append(frag)
-
-    always_check = from_parent or any(
-        not child.is_view(schema) for child in subject_typ.children(schema)
-    )
-
-    # Union them all together
-    select_ast = qlast.Set(elements=frags)
-    with ctx.new() as ectx:
-        ectx.implicit_limit = 0
-        select_ir = dispatch.compile(select_ast, ctx=ectx)
-        select_ir = setgen.scoped_set(
-            select_ir, force_reassign=True, ctx=ectx)
-        assert isinstance(select_ir, irast.Set)
-
-    return select_ir, always_check, from_parent
-
-
-def compile_insert_unless_conflict(
-    stmt: irast.InsertStmt,
-    typ: s_objtypes.ObjectType,
-    *, ctx: context.ContextLevel,
-) -> irast.OnConflictClause:
-    """Compile an UNLESS CONFLICT clause with no ON
-
-    This requires synthesizing a conditional based on all the exclusive
-    constraints on the object.
-    """
-
-    schema = ctx.env.schema
-
-    pointers = {}
-
-    exclusive_constr = schema.get('std::exclusive', type=s_constr.Constraint)
-    for ptr in typ.get_pointers(schema).objects(schema):
-        ptr = ptr.get_nearest_non_derived_parent(schema)
-        ex_cnstrs = [c for c in ptr.get_constraints(schema).objects(schema)
-                     if c.issubclass(schema, exclusive_constr)]
-        if ex_cnstrs:
-            name = ptr.get_shortname(schema).name
-            if name != 'id':
-                pointers[name] = ptr, ex_cnstrs
-
-    ctx.env.schema = schema
-
-    obj_constrs = typ.get_constraints(schema).objects(schema)
-
-    select_ir, always_check, _ = compile_insert_unless_conflict_select(
-        stmt, typ,
-        constrs=pointers,
-        obj_constrs=obj_constrs,
-        parser_context=stmt.context, ctx=ctx)
-
-    return irast.OnConflictClause(
-        constraint=None, select_ir=select_ir, always_check=always_check,
-        else_ir=None)
-
-
-def compile_insert_unless_conflict_on(
-    stmt: irast.InsertStmt,
-    typ: s_objtypes.ObjectType,
-    constraint_spec: qlast.Expr,
-    else_branch: Optional[qlast.Expr],
-    *, ctx: context.ContextLevel,
-) -> irast.OnConflictClause:
-
-    with ctx.new() as constraint_ctx:
-        constraint_ctx.partial_path_prefix = stmt.subject
-
-        # We compile the name here so we can analyze it, but we don't do
-        # anything else with it.
-        cspec_res = dispatch.compile(constraint_spec, ctx=constraint_ctx)
-
-    # We accept a property, link, or a list of them in the form of a
-    # tuple.
-    if cspec_res.rptr is None and isinstance(cspec_res.expr, irast.Tuple):
-        cspec_args = [elem.val for elem in cspec_res.expr.elements]
-    else:
-        cspec_args = [cspec_res]
-
-    for cspec_arg in cspec_args:
-        if not cspec_arg.rptr:
-            raise errors.QueryError(
-                'UNLESS CONFLICT argument must be a property, link, '
-                'or tuple of properties and links',
-                context=constraint_spec.context,
-            )
-
-        if cspec_arg.rptr.source.path_id != stmt.subject.path_id:
-            raise errors.QueryError(
-                'UNLESS CONFLICT argument must be a property of the '
-                'type being inserted',
-                context=constraint_spec.context,
-            )
-
-    schema = ctx.env.schema
-
-    ptrs = []
-    exclusive_constr = schema.get('std::exclusive', type=s_constr.Constraint)
-    for cspec_arg in cspec_args:
-        assert cspec_arg.rptr is not None
-        schema, ptr = (
-            typeutils.ptrcls_from_ptrref(cspec_arg.rptr.ptrref, schema=schema))
-        if not isinstance(ptr, s_pointers.Pointer):
-            raise errors.QueryError(
-                'UNLESS CONFLICT property must be a property',
-                context=constraint_spec.context,
-            )
-
-        ptr = ptr.get_nearest_non_derived_parent(schema)
-        ptr_card = ptr.get_cardinality(schema)
-        if not ptr_card.is_single():
-            raise errors.QueryError(
-                'UNLESS CONFLICT property must be a SINGLE property',
-                context=constraint_spec.context,
-            )
-
-        ptrs.append(ptr)
-
-    obj_constrs = inference.cardinality.get_object_exclusive_constraints(
-        typ, set(ptrs), ctx.env)
-
-    field_constrs = []
-    if len(ptrs) == 1:
-        field_constrs = [
-            c for c in ptrs[0].get_constraints(schema).objects(schema)
-            if c.issubclass(schema, exclusive_constr)]
-
-    all_constrs = list(obj_constrs) + field_constrs
-    if len(all_constrs) != 1:
-        raise errors.QueryError(
-            'UNLESS CONFLICT property must have a single exclusive constraint',
-            context=constraint_spec.context,
-        )
-
-    ds = {ptr.get_shortname(schema).name: (ptr, field_constrs)
-          for ptr in ptrs}
-    select_ir, always_check, from_anc = compile_insert_unless_conflict_select(
-        stmt, typ, constrs=ds, obj_constrs=obj_constrs,
-        parser_context=stmt.context, ctx=ctx)
-
-    # Compile an else branch
-    else_ir = None
-    if else_branch:
-        # TODO: We should support this, but there is some semantic and
-        # implementation trickiness.
-        if from_anc:
-            raise errors.UnsupportedFeatureError(
-                'UNLESS CONFLICT can not use ELSE when constraint is from a '
-                'parent type',
-                context=constraint_spec.context,
-            )
-
-        # The ELSE needs to be able to reference the subject in an
-        # UPDATE, even though that would normally be prohibited.
-        ctx.path_scope.factoring_allowlist.add(stmt.subject.path_id)
-
-        # Compile else
-        else_ir = dispatch.compile(
-            astutils.ensure_qlstmt(else_branch), ctx=ctx)
-        assert isinstance(else_ir, irast.Set)
-
-    return irast.OnConflictClause(
-        constraint=irast.ConstraintRef(id=all_constrs[0].id),
-        select_ir=select_ir,
-        always_check=always_check,
-        else_ir=else_ir
-    )
-
-
 @dispatch.compile.register(qlast.InsertQuery)
 def compile_InsertQuery(
         expr: qlast.InsertQuery, *,
@@ -687,15 +289,21 @@ def compile_InsertQuery(
         stmt_subject_stype = setgen.get_set_type(subject, ctx=ictx)
         assert isinstance(stmt_subject_stype, s_objtypes.ObjectType)
 
+        stmt.conflict_checks = conflicts.compile_inheritance_conflict_checks(
+            stmt, stmt_subject_stype, ctx=ictx)
+
+        if not ctx.path_scope.in_temp_scope():
+            ctx.env.dml_stmts.add(stmt)
+
         if expr.unless_conflict is not None:
             constraint_spec, else_branch = expr.unless_conflict
 
             if constraint_spec:
-                stmt.on_conflict = compile_insert_unless_conflict_on(
+                stmt.on_conflict = conflicts.compile_insert_unless_conflict_on(
                     stmt, stmt_subject_stype, constraint_spec, else_branch,
                     ctx=ictx)
             else:
-                stmt.on_conflict = compile_insert_unless_conflict(
+                stmt.on_conflict = conflicts.compile_insert_unless_conflict(
                     stmt, stmt_subject_stype, ctx=ictx)
 
         result = setgen.class_set(
@@ -803,6 +411,10 @@ def compile_UpdateQuery(
                 ctx=bodyctx)
 
         stmt_subject_stype = setgen.get_set_type(subject, ctx=ictx)
+        assert isinstance(stmt_subject_stype, s_objtypes.ObjectType)
+
+        if not ctx.path_scope.in_temp_scope():
+            ctx.env.dml_stmts.add(stmt)
 
         result = setgen.class_set(
             schemactx.get_material_type(stmt_subject_stype, ctx=ctx),
@@ -821,6 +433,9 @@ def compile_UpdateQuery(
                 compile_views=ictx.stmt is ictx.toplevel_stmt,
                 ctx=resultctx,
             )
+
+        stmt.conflict_checks = conflicts.compile_inheritance_conflict_checks(
+            stmt, stmt_subject_stype, ctx=ictx)
 
         result = fini_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
 
