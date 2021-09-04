@@ -35,7 +35,7 @@ from . import qltypes
 _module_name_re = re.compile(r'^(?!=\d)\w+(\.(?!=\d)\w+)*$')
 _BYTES_ESCAPE_RE = re.compile(b'[\\\'\x00-\x1f\x7e-\xff]')
 _NON_PRINTABLE_RE = re.compile(
-    r'[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F]')
+    r'[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F\n]')
 _ESCAPES = {
     b'\\': b'\\\\',
     b'\'': b'\\\'',
@@ -525,8 +525,11 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         # and must not be quoted.
 
         quals = []
-        if node.required:
-            quals.append('required')
+        if node.required is not None:
+            if node.required:
+                quals.append('required')
+            else:
+                quals.append('optional')
 
         if node.cardinality:
             quals.append(node.cardinality.as_ptr_qual())

@@ -302,6 +302,8 @@ aa';
         r"""
         SELECT 'aa
         aa';
+% OK %
+        SELECT 'aa\naa';
         """
 
     @tb.must_fail(errors.EdgeQLSyntaxError,
@@ -452,8 +454,7 @@ aa';
         r"""
         SELECT "\n";
 % OK %
-        SELECT '
-';
+        SELECT '\n';
         """
 
     def test_edgeql_syntax_constants_39(self):
@@ -1459,6 +1460,24 @@ aa';
         """
         SELECT Foo {
             required single foo := Foo {
+                name
+            }
+        };
+        """
+
+    def test_edgeql_syntax_shape_43a(self):
+        """
+        SELECT Foo {
+            optional multi foo := Foo {
+                name
+            }
+        };
+        """
+
+    def test_edgeql_syntax_shape_43b(self):
+        """
+        SELECT Foo {
+            optional single foo := Foo {
                 name
             }
         };
@@ -3965,6 +3984,24 @@ aa';
         """
         ALTER ABSTRACT ANNOTATION foo::my_annotation
             RENAME TO foo::renamed_annotation;
+        """
+
+    def test_edgeql_syntax_ddl_annotation_05(self):
+        # N.B: The multi line string literal here *must* get turned
+        # into a single line literal with a \n in it, since otherwise
+        # generated DDL migrations with multi-line literals will be
+        # mangled by the cli indenting them.
+        r"""
+        CREATE TYPE Foo {
+            CREATE ANNOTATION description :=
+                "multi
+                 line";
+        };
+% OK %
+        CREATE TYPE Foo {
+            CREATE ANNOTATION description :=
+                'multi\n                 line';
+        };
         """
 
     def test_edgeql_syntax_ddl_constraint_01(self):
