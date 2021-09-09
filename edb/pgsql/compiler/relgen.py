@@ -418,7 +418,7 @@ def _get_set_rvar(
     return rvars
 
 
-def _ensure_source_rvar(
+def ensure_source_rvar(
     ir_set: irast.Set,
     stmt: pgast.Query,
     *,
@@ -696,9 +696,10 @@ def process_set_as_link_property_ref(
         assert link_path_id is not None
         orig_link_path_id = link_path_id
 
-        rptr_specialization: Set[irast.PointerRef] = set()
+        rptr_specialization: Optional[Set[irast.PointerRef]] = None
 
         if link_path_id.is_type_intersection_path():
+            rptr_specialization = set()
             link_prefix, ind_ptrs = (
                 irutils.collapse_type_intersection(ir_source))
             for ind_ptr in ind_ptrs:
@@ -721,18 +722,22 @@ def process_set_as_link_property_ref(
                 link_prefix.rptr, src_rvar=src_rvar,
                 link_bias=True, ctx=newctx)
 
-        if rptr_specialization and astutils.is_set_op_query(link_rvar.query):
-            # This is a link property reference to a link union narrowed
-            # by a type intersection.  We already know which union components
+        if astutils.is_set_op_query(link_rvar.query):
+            # If we have an rptr_specialization, then this is a link
+            # property reference to a link union narrowed by a type
+            # intersection.  We already know which union components
             # match the indirection expression, and can route the link
             # property references to correct UNION subqueries.
-            ptr_ids = {spec.id for spec in rptr_specialization}
+            ptr_ids = (
+                {spec.id for spec in rptr_specialization}
+                if rptr_specialization is not None else None
+            )
 
             def cb(subquery: pgast.Query) -> None:
                 if isinstance(subquery, pgast.SelectStmt):
                     rvar = subquery.from_clause[0]
                     assert isinstance(rvar, pgast.PathRangeVar)
-                    if rvar.schema_object_id in ptr_ids:
+                    if ptr_ids is None or rvar.schema_object_id in ptr_ids:
                         pathctx.put_path_source_rvar(
                             subquery, orig_link_path_id, rvar, env=ctx.env
                         )
@@ -952,7 +957,7 @@ def process_set_as_path(
             # (The returned one won't be a source rvar if it comes
             # from a function, for example)
             if not ir_source.path_id.is_type_intersection_path():
-                src_rvar = _ensure_source_rvar(ir_source, ctx.rel, ctx=srcctx)
+                src_rvar = ensure_source_rvar(ir_source, ctx.rel, ctx=srcctx)
             set_rvar = relctx.semi_join(stmt, ir_set, src_rvar, ctx=srcctx)
             rvars.append(SetRVar(set_rvar, ir_set.path_id,
                                  ['value', 'source']))
@@ -969,7 +974,7 @@ def process_set_as_path(
             if is_inline_primitive_ref:
                 # Semi-join variant for inline scalar links,
                 # which is, essentially, just filtering out NULLs.
-                _ensure_source_rvar(ir_source, srcctx.rel, ctx=srcctx)
+                ensure_source_rvar(ir_source, srcctx.rel, ctx=srcctx)
 
                 var = pathctx.get_path_value_var(
                     srcctx.rel, path_id=ir_set.path_id, env=ctx.env)
@@ -991,7 +996,7 @@ def process_set_as_path(
 
     elif is_id_ref_to_inline_source:
         main_rvar = SetRVar(
-            _ensure_source_rvar(ir_source, stmt, ctx=ctx),
+            ensure_source_rvar(ir_source, stmt, ctx=ctx),
             path_id=ir_set.path_id,
             aspects=['value']
         )
@@ -1002,7 +1007,7 @@ def process_set_as_path(
         # complex field indirections, so rely on tuple_getattr()
         # fallback for tuple properties for now.
         main_rvar = SetRVar(
-            _ensure_source_rvar(ir_source, stmt, ctx=ctx),
+            ensure_source_rvar(ir_source, stmt, ctx=ctx),
             path_id=ir_set.path_id,
             aspects=['value']
         )
@@ -1013,7 +1018,7 @@ def process_set_as_path(
             aspects = ['value']
             # If this is a link that is stored inline, make sure
             # the source aspect is actually accessible (not just value).
-            src_rvar = _ensure_source_rvar(ir_source, stmt, ctx=ctx)
+            src_rvar = ensure_source_rvar(ir_source, stmt, ctx=ctx)
         else:
             aspects = ['value', 'source']
             src_rvar = get_set_rvar(ir_source, ctx=ctx)
