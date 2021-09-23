@@ -511,6 +511,7 @@ def ptrref_from_ptrcls(  # NoQA: F811
             assert isinstance(source, s_types.Type)
             source_ref = type_to_typeref(schema,
                                          source,
+                                         include_ancestors=True,
                                          cache=typeref_cache)
         else:
             source_ref = source
@@ -756,6 +757,18 @@ def is_id_ptrref(ptrref: irast.BasePointerRef) -> bool:
 def is_computable_ptrref(ptrref: irast.BasePointerRef) -> bool:
     """Return True if pointer described by *ptrref* is computed."""
     return ptrref.is_computable
+
+
+def get_tuple_element_index(ptrref: irast.TupleIndirectionPointerRef) -> int:
+    name = ptrref.name.name
+    if name.isdecimal() and name.isascii():
+        return int(name)
+    else:
+        for i, st in enumerate(ptrref.out_source.subtypes):
+            if st.element_name == name:
+                return i
+
+        raise AssertionError(f"element {name} is not found in tuple type")
 
 
 def type_contains(

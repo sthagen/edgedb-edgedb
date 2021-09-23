@@ -667,7 +667,7 @@ class TestUpdate(tb.QueryTestCase):
                 UPDATE UpdateTest
                 FILTER UpdateTest.name = 'update-test1'
                 SET {
-                    tags := UpdateTest.tags UNION (
+                    tags += (
                         SELECT Tag
                         FILTER Tag.name = 'wow'
                     )
@@ -1495,6 +1495,239 @@ class TestUpdate(tb.QueryTestCase):
             ]
         )
 
+    async def test_edgeql_update_props_09(self):
+        # Check that we can update a link property on a specific link.
+
+        # Setup some multi links
+        await self.con.execute(
+            r"""
+                UPDATE UpdateTest
+                FILTER UpdateTest.name = 'update-test1'
+                SET {
+                    weighted_tags := (SELECT Tag FILTER .name != 'boring')
+                };
+            """,
+        )
+
+        # Update the @weight for Tag 'wow'
+        await self.con.execute(
+            r"""
+                UPDATE UpdateTest
+                FILTER UpdateTest.name = 'update-test1'
+                SET {
+                    weighted_tags += (
+                        SELECT .weighted_tags {@weight := 1}
+                        FILTER .name = 'wow'
+                    )
+                };
+            """,
+        )
+        # Update the @weight for Tag 'boring', which should do nothing
+        # because that Tag is not actually linked.
+        await self.con.execute(
+            r"""
+                UPDATE UpdateTest
+                FILTER UpdateTest.name = 'update-test1'
+                SET {
+                    weighted_tags += (
+                        SELECT .weighted_tags {@weight := 2}
+                        FILTER .name = 'boring'
+                    )
+                };
+            """,
+        )
+
+        await self.assert_query_result(
+            r"""
+                SELECT UpdateTest {
+                    name,
+                    weighted_tags: {
+                        name,
+                        @weight
+                    } ORDER BY .name
+                } FILTER UpdateTest.name = 'update-test1';
+            """,
+            [
+                {
+                    'name': 'update-test1',
+                    'weighted_tags': [{
+                        'name': 'fun',
+                        '@weight': None,
+                    }, {
+                        'name': 'wow',
+                        '@weight': 1,
+                    }],
+                },
+            ]
+        )
+
+    async def test_edgeql_update_props_10(self):
+        # Check that we can update a link property on a specific link.
+
+        # Setup some multi links on several objects
+        await self.con.execute(
+            r"""
+                UPDATE UpdateTest
+                FILTER UpdateTest.name = 'update-test1'
+                SET {
+                    weighted_tags := (
+                        SELECT Tag {@weight := 2}
+                        FILTER .name != 'boring'
+                    )
+                };
+
+                UPDATE UpdateTest
+                FILTER UpdateTest.name = 'update-test2'
+                SET {
+                    weighted_tags := (
+                        SELECT Tag {@weight := len(.name)}
+                        FILTER .name != 'wow'
+                    )
+                };
+
+                UPDATE UpdateTest
+                FILTER UpdateTest.name = 'update-test3'
+                SET {
+                    weighted_tags := (
+                        SELECT Tag {
+                            @weight := 10,
+                            @note := 'original'
+                        }
+                        FILTER .name = 'fun'
+                    )
+                };
+            """,
+        )
+
+        await self.assert_query_result(
+            r"""
+                SELECT UpdateTest {
+                    name,
+                    weighted_tags: {
+                        name,
+                        @weight,
+                        @note,
+                    } ORDER BY .name
+                } ORDER BY .name;
+            """,
+            [
+                {
+                    'name': 'update-test1',
+                    'weighted_tags': [{
+                        'name': 'fun',
+                        '@weight': 2,
+                        '@note': None,
+                    }, {
+                        'name': 'wow',
+                        '@weight': 2,
+                        '@note': None,
+                    }],
+                },
+                {
+                    'name': 'update-test2',
+                    'weighted_tags': [{
+                        'name': 'boring',
+                        '@weight': 6,
+                        '@note': None,
+                    }, {
+                        'name': 'fun',
+                        '@weight': 3,
+                        '@note': None,
+                    }],
+                },
+                {
+                    'name': 'update-test3',
+                    'weighted_tags': [{
+                        'name': 'fun',
+                        '@weight': 10,
+                        '@note': 'original',
+                    }],
+                },
+            ]
+        )
+
+        # Update the @weight, @note for some tags on all of the
+        # UpdateTest objects.
+        await self.con.execute(
+            r"""
+                UPDATE UpdateTest
+                SET {
+                    weighted_tags += (
+                        FOR x IN {
+                            (
+                                name := 'fun',
+                                weight_adj := -1,
+                                empty_note := 'new fun'
+                            ),
+                            (
+                                name := 'wow',
+                                weight_adj := 5,
+                                empty_note := 'new wow'
+                            ),
+                            (
+                                name := 'boring',
+                                weight_adj := -2,
+                                empty_note := 'new boring'
+                            ),
+                        } UNION (
+                            SELECT .weighted_tags {
+                                @weight := @weight + x.weight_adj,
+                                @note := @note ?? x.empty_note,
+                            }
+                            FILTER .name = x.name
+                        )
+                    )
+                };
+            """,
+        )
+
+        await self.assert_query_result(
+            r"""
+                SELECT UpdateTest {
+                    name,
+                    weighted_tags: {
+                        name,
+                        @weight,
+                        @note,
+                    } ORDER BY .name
+                } ORDER BY .name;
+            """,
+            [
+                {
+                    'name': 'update-test1',
+                    'weighted_tags': [{
+                        'name': 'fun',
+                        '@weight': 1,
+                        '@note': 'new fun',
+                    }, {
+                        'name': 'wow',
+                        '@weight': 7,
+                        '@note': 'new wow',
+                    }],
+                },
+                {
+                    'name': 'update-test2',
+                    'weighted_tags': [{
+                        'name': 'boring',
+                        '@weight': 4,
+                        '@note': 'new boring',
+                    }, {
+                        'name': 'fun',
+                        '@weight': 2,
+                        '@note': 'new fun',
+                    }],
+                },
+                {
+                    'name': 'update-test3',
+                    'weighted_tags': [{
+                        'name': 'fun',
+                        '@weight': 9,
+                        '@note': 'original',
+                    }],
+                },
+            ]
+        )
+
     async def test_edgeql_update_for_01(self):
         await self.assert_query_result(
             r"""
@@ -2128,7 +2361,7 @@ class TestUpdate(tb.QueryTestCase):
             UPDATE UpdateTest
             FILTER .name = 'update-test-subtract-1'
             SET {
-                annotated_tests := (
+                annotated_tests := DISTINCT(
                     FOR v IN {
                         ('update-test-subtract-2', 'one'),
                         ('update-test-subtract-3', 'two'),
@@ -2660,26 +2893,28 @@ class TestUpdate(tb.QueryTestCase):
     async def test_edgeql_update_inheritance_02(self):
         await self.con.execute('''
             INSERT UpdateTest {
-                name := 'update-test-inh-supertype-1',
+                name := 'update-test-inh-supertype-2',
                 related := (
                     SELECT (DETACHED UpdateTest)
-                    FILTER .name = 'update-test1'
+                    FILTER .name = 'update-test2'
                 )
             };
 
             INSERT UpdateTestSubType {
-                name := 'update-test-inh-subtype-1',
+                name := 'update-test-inh-subtype-2',
+                comment := 'update-test-inh-02',
                 related := (
                     SELECT (DETACHED UpdateTest)
-                    FILTER .name = 'update-test1'
+                    FILTER .name = 'update-test2'
                 )
             };
 
             INSERT UpdateTestSubSubType {
-                name := 'update-test-inh-subtype-1',
+                name := 'update-test-inh-subsubtype-2',
+                comment := 'update-test-inh-02',
                 related := (
                     SELECT (DETACHED UpdateTest)
-                    FILTER .name = 'update-test1'
+                    FILTER .name = 'update-test2'
                 )
             };
         ''')
@@ -2687,7 +2922,7 @@ class TestUpdate(tb.QueryTestCase):
         await self.assert_query_result(
             r"""
                 UPDATE UpdateTest
-                FILTER .name = 'update-test-inh-subtype-1'
+                FILTER .comment = 'update-test-inh-02'
                 SET {
                     comment := 'updated',
                     related := (
@@ -2713,24 +2948,24 @@ class TestUpdate(tb.QueryTestCase):
             """,
             [
                 {
-                    'name': 'update-test-inh-subtype-1',
+                    'name': 'update-test-inh-subsubtype-2',
                     'comment': 'updated',
                     'related': [{
                         'name': 'update-test2'
                     }]
                 },
                 {
-                    'name': 'update-test-inh-subtype-1',
+                    'name': 'update-test-inh-subtype-2',
                     'comment': 'updated',
                     'related': [{
                         'name': 'update-test2'
                     }]
                 },
                 {
-                    'name': 'update-test-inh-supertype-1',
+                    'name': 'update-test-inh-supertype-2',
                     'comment': None,
                     'related': [{
-                        'name': 'update-test1'
+                        'name': 'update-test2'
                     }]
                 },
             ]
@@ -3155,3 +3390,67 @@ class TestUpdate(tb.QueryTestCase):
                     status := Status,
                 }
             ''')
+
+    async def test_edgeql_update_and_delete_01(self):
+        # Updating something that would violate a constraint while
+        # fixing the violation is still supposed to be an error.
+
+        with self.assertRaisesRegex(edgedb.ConstraintViolationError,
+                                    "violates exclusivity constraint"):
+            await self.con.execute('''
+                SELECT (
+                    (DELETE Tag FILTER .name = 'fun'),
+                    (UPDATE Tag FILTER .name = 'wow' SET { name := 'fun' })
+                )
+            ''')
+
+    async def test_edgeql_update_and_delete_02(self):
+        # Assigning the result of a DELETE as a link during an UPDATE
+        # should be an error.
+
+        with self.assertRaisesRegex(edgedb.ConstraintViolationError,
+                                    r"deletion of default::Tag.+ is "
+                                    r"prohibited by link target policy"):
+            await self.con.execute('''
+                UPDATE UpdateTest
+                FILTER .name = 'update-test1'
+                SET {
+                    tags := (DELETE Tag FILTER .name = 'fun')
+                };
+            ''')
+
+    async def test_edgeql_update_subtract_backlink_overload_01(self):
+        await self.con.execute(r"""
+            CREATE TYPE Clash { CREATE LINK statuses -> Status; };
+        """)
+
+        await self.con.execute(r"""
+            UPDATE UpdateTest FILTER .name = 'update-test1'
+            SET { statuses := MajorLifeEvent };
+        """)
+
+        await self.assert_query_result(
+            r"""
+            SELECT (
+                UPDATE UpdateTest FILTER .name = "update-test1" SET {
+                    statuses -= (SELECT Status
+                                 FILTER .name = "Downloaded a Car")
+                }
+            ) {
+                statuses: {
+                    name,
+                    backlinks := .<statuses[IS UpdateTest].name
+                }
+            };
+            """,
+            [
+                {
+                    "statuses": [
+                        {
+                            "backlinks": ["update-test1"],
+                            "name": "Broke a Type System"
+                        }
+                    ]
+                }
+            ]
+        )

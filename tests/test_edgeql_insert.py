@@ -920,11 +920,11 @@ class TestInsert(tb.QueryTestCase):
             SELECT
             (INSERT Person {
                 name := "test",
-                notes := {
+                notes := assert_distinct({
                     (SELECT Note FILTER .name = "anote"),
                     (INSERT DerivedNote { name := "new note", note := "hi" }),
                     (UPDATE Note FILTER .name = "dnote" SET { note := "b" }),
-                }
+                })
             })
             { name, notes: {name, note} ORDER BY .name };
             ''',
@@ -953,11 +953,11 @@ class TestInsert(tb.QueryTestCase):
             SELECT
             (INSERT Person {
                 name := "test",
-                notes := {
+                notes := assert_distinct({
                     (SELECT Note FILTER .name = "anote"),
                     (INSERT DerivedNote { name := "new note", note := "hi" }),
                     (UPDATE Note FILTER .name = "dnote" SET { note := "b" }),
-                }
+                })
             })
             {
                 name,
@@ -1776,7 +1776,7 @@ class TestInsert(tb.QueryTestCase):
 
             INSERT InsertTest {
                 l2 := 99,
-                subordinates := (
+                subordinates := DISTINCT(
                     FOR x IN {('a', '1'), ('b', '2'), ('c', '3')} UNION (
                         SELECT Subordinate {@comment := x.0}
                         FILTER .name[-1] = x.1
@@ -4647,6 +4647,25 @@ class TestInsert(tb.QueryTestCase):
                     (DELETE Person FILTER .name = 'foo'),
                     (INSERT Person { name := 'foo' })
                 )
+            ''')
+
+    async def test_edgeql_insert_and_delete_02(self):
+        # Assigning the result of a DELETE as a link during an INSERT
+        # should be an error.
+        await self.con.execute('''
+            INSERT Note { name := 'delete me' };
+        ''')
+
+        with self.assertRaisesRegex(edgedb.ConstraintViolationError,
+                                    r"deletion of default::Note.+ is "
+                                    r"prohibited by link target policy"):
+            await self.con.execute('''
+                INSERT Person {
+                    name := 'foo',
+                    note := (
+                        DELETE Note FILTER .name = 'delete me' LIMIT 1
+                    )
+                }
             ''')
 
     async def test_edgeql_insert_cardinality_assertion(self):

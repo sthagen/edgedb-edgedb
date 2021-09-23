@@ -358,10 +358,11 @@ class Field(struct.ProtoField, Generic[T]):
 
         if (
             merge_fn is default_field_merge
-            and callable(getattr(self.type, 'merge_values', None))
+            and callable(
+                type_merge_fn := getattr(self.type, 'merge_values', None)
+            )
         ):
-            # type ignore due to https://github.com/python/mypy/issues/1424
-            self.merge_fn = self.type.merge_values  # type: ignore
+            self.merge_fn = type_merge_fn
         else:
             self.merge_fn = merge_fn
 
@@ -3222,9 +3223,8 @@ def _serialize_to_markup(o: Object, *, ctx: markup.Context) -> markup.Markup:
 
 
 def _merge_lineage(
-    schema: s_schema.Schema,
-    obj: InheritingObjectT,
     lineage: Iterable[List[InheritingObjectT]],
+    subject_name: str,
 ) -> List[InheritingObjectT]:
     result: List[Any] = []
 
@@ -3239,9 +3239,8 @@ def _merge_lineage(
             if not tails:
                 break
         else:
-            name = obj.get_verbosename(schema)
             raise errors.SchemaError(
-                f"Could not find consistent ancestor order for {name}"
+                f"Could not find consistent ancestor order for {subject_name}"
             )
 
         result.append(candidate)
@@ -3250,27 +3249,42 @@ def _merge_lineage(
             if line[0] == candidate:
                 del line[0]
 
-    return result
 
-
-def compute_lineage(
+def _compute_lineage(
     schema: s_schema.Schema,
     obj: InheritingObjectT,
+    subject_name: str,
 ) -> List[InheritingObjectT]:
     bases = tuple(obj.get_bases(schema).objects(schema))
     lineage = [[obj]]
 
     for base in bases:
-        lineage.append(compute_lineage(schema, base))
+        lineage.append(_compute_lineage(schema, base, subject_name))
 
-    return _merge_lineage(schema, obj, lineage)
+    return _merge_lineage(lineage, subject_name)
+
+
+def compute_lineage(
+    schema: s_schema.Schema,
+    bases: Iterable[InheritingObjectT],
+    subject_name: str,
+) -> List[InheritingObjectT]:
+    lineage = []
+    for base in bases:
+        lineage.append(_compute_lineage(schema, base, subject_name))
+
+    return _merge_lineage(lineage, subject_name)
 
 
 def compute_ancestors(
     schema: s_schema.Schema,
     obj: InheritingObjectT,
 ) -> List[InheritingObjectT]:
-    return compute_lineage(schema, obj)[1:]
+    return compute_lineage(
+        schema,
+        obj.get_bases(schema).objects(schema),
+        obj.get_verbosename(schema),
+    )
 
 
 def derive_name(

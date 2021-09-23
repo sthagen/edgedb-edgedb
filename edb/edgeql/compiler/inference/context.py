@@ -20,22 +20,46 @@
 from __future__ import annotations
 from typing import *
 
+import dataclasses
+
 from edb.ir import ast as irast
 from edb.edgeql import qltypes
 
 from .. import context
 
 
+@dataclasses.dataclass(frozen=True, eq=False)
+class MultiplicityInfo:
+    """Extended multiplicity descriptor"""
+
+    #: Actual multiplicity number
+    own: qltypes.Multiplicity
+    #: Whether this multiplicity descriptor describes
+    #: part of a disjoint set.
+    disjoint_union: bool = False
+
+    def is_one(self) -> bool:
+        return self.own.is_one()
+
+    def is_many(self) -> bool:
+        return self.own.is_many()
+
+    def is_zero(self) -> bool:
+        return self.own.is_zero()
+
+
 class InfCtx(NamedTuple):
     env: context.Environment
     inferred_cardinality: Dict[
         Tuple[irast.Base, irast.ScopeTreeNode],
-        qltypes.Cardinality]
+        qltypes.Cardinality,
+    ]
     inferred_multiplicity: Dict[
         Tuple[irast.Base, irast.ScopeTreeNode],
-        qltypes.Multiplicity]
+        MultiplicityInfo,
+    ]
     singletons: Collection[irast.PathId]
-    bindings: Dict[irast.PathId, irast.ScopeTreeNode]
+    distinct_iterators: Set[irast.PathId]
 
 
 def make_ctx(env: context.Environment) -> InfCtx:
@@ -44,5 +68,5 @@ def make_ctx(env: context.Environment) -> InfCtx:
         inferred_cardinality={},
         inferred_multiplicity={},
         singletons=frozenset(env.singletons),
-        bindings={},
+        distinct_iterators=set(),
     )

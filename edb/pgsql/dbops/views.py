@@ -34,6 +34,12 @@ class View(base.DBObject):
         self.name = name
         self.query = query
 
+    def get_type(self) -> str:
+        return "VIEW"
+
+    def get_id(self):
+        return qn(*self.name)
+
 
 class CreateView(ddl.SchemaObjectOperation):
     def __init__(
@@ -43,10 +49,9 @@ class CreateView(ddl.SchemaObjectOperation):
         conditions=None,
         neg_conditions=None,
         or_replace=False,
-        priority=0,
     ):
         super().__init__(view.name, conditions=conditions,
-                         neg_conditions=neg_conditions, priority=priority)
+                         neg_conditions=neg_conditions)
         self.view = view
         self.or_replace = or_replace
 

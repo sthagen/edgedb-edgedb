@@ -400,8 +400,17 @@ class Command(
 
     _context_class: Optional[Type[CommandContextToken[Command]]] = None
 
-    ops: List[Command]
+    #: An optional list of commands that are prerequisites of this
+    #: command and must run before any of the operations in this
+    #: command or its subcommands in ops or caused_ops.
     before_ops: List[Command]
+    #: An optional list of subcommands that are considered to be
+    #: integral part of this command.
+    ops: List[Command]
+    #: An optional list of commands that are _caused_ by this command,
+    #: such as any propagation to children or any other side-effects
+    #: that are not considered integral to this command.
+    caused_ops: List[Command]
 
     #: AlterObjectProperty lookup table for get|set_attribute_value
     _attrs: Dict[str, AlterObjectProperty]
@@ -412,14 +421,16 @@ class Command(
         super().__init__(**kwargs)
         self.ops = []
         self.before_ops = []
+        self.caused_ops = []
         self.qlast: qlast.DDLOperation
         self._attrs = {}
         self._special_attrs = {}
 
     def copy(self: Command_T) -> Command_T:
         result = super().copy()
-        result.ops = [op.copy() for op in self.ops]
         result.before_ops = [op.copy() for op in self.before_ops]
+        result.ops = [op.copy() for op in self.ops]
+        result.caused_ops = [op.copy() for op in self.caused_ops]
         return result
 
     def get_verb(self) -> str:
@@ -447,8 +458,13 @@ class Command(
         mcls = cast(CommandMeta, type(cls))
         for op in obj.get_prerequisites():
             result.add_prerequisite(mcls.adapt(op))
-        for op in obj.get_subcommands(include_prerequisites=False):
+        for op in obj.get_subcommands(
+            include_prerequisites=False,
+            include_caused=False,
+        ):
             result.add(mcls.adapt(op))
+        for op in obj.get_caused():
+            result.add_caused(mcls.adapt(op))
         return result
 
     def is_data_safe(self) -> bool:
@@ -680,6 +696,7 @@ class Command(
         metaclass: Optional[Type[so.Object]] = None,
         exclude: Union[Type[Command], Tuple[Type[Command], ...], None] = None,
         include_prerequisites: bool = True,
+        include_caused: bool = True,
     ) -> Tuple[Command_T, ...]:
         ...
 
@@ -691,6 +708,7 @@ class Command(
         metaclass: Optional[Type[so.Object]] = None,
         exclude: Union[Type[Command], Tuple[Type[Command], ...], None] = None,
         include_prerequisites: bool = True,
+        include_caused: bool = True,
     ) -> Tuple[Command, ...]:
         ...
 
@@ -701,12 +719,14 @@ class Command(
         metaclass: Optional[Type[so.Object]] = None,
         exclude: Union[Type[Command], Tuple[Type[Command], ...], None] = None,
         include_prerequisites: bool = True,
+        include_caused: bool = True,
     ) -> Tuple[Command, ...]:
-        ops: Iterable[Command]
+        ops: Iterable[Command] = self.ops
         if include_prerequisites:
-            ops = itertools.chain(self.before_ops, self.ops)
-        else:
-            ops = self.ops
+            ops = itertools.chain(self.before_ops, ops)
+
+        if include_caused:
+            ops = itertools.chain(ops, self.caused_ops)
 
         filters = []
 
@@ -737,7 +757,6 @@ class Command(
         self,
         *,
         type: Type[Command_T],
-        include_prerequisites: bool = True,
     ) -> Tuple[Command_T, ...]:
         ...
 
@@ -753,7 +772,6 @@ class Command(
         self,
         *,
         type: Union[Type[Command_T], None] = None,
-        include_prerequisites: bool = True,
     ) -> Tuple[Command, ...]:
         if type is not None:
             t = type
@@ -761,19 +779,39 @@ class Command(
         else:
             return tuple(self.before_ops)
 
+    @overload
+    def get_caused(
+        self,
+        *,
+        type: Type[Command_T],
+    ) -> Tuple[Command_T, ...]:
+        ...
+
+    @overload
+    def get_caused(  # NoQA: F811
+        self,
+        *,
+        type: None = None,
+    ) -> Tuple[Command, ...]:
+        ...
+
+    def get_caused(  # NoQA: F811
+        self,
+        *,
+        type: Union[Type[Command_T], None] = None,
+    ) -> Tuple[Command, ...]:
+        if type is not None:
+            t = type
+            return tuple(filter(lambda i: isinstance(i, t), self.caused_ops))
+        else:
+            return tuple(self.caused_ops)
+
     def has_subcommands(self) -> bool:
-        return bool(self.ops) or bool(self.before_ops)
+        return bool(self.ops) or bool(self.before_ops) or bool(self.caused_ops)
 
     def get_nonattr_subcommand_count(self) -> int:
-        count = 0
         attr_cmds = (AlterObjectProperty, AlterSpecialObjectField)
-        for op in self.ops:
-            if not isinstance(op, attr_cmds):
-                count += 1
-        for op in self.before_ops:
-            if not isinstance(op, attr_cmds):
-                count += 1
-        return count
+        return len(self.get_subcommands(exclude=attr_cmds))
 
     def prepend_prerequisite(self, command: Command) -> None:
         if isinstance(command, CommandGroup):
@@ -787,6 +825,19 @@ class Command(
             self.before_ops.extend(command.get_subcommands())
         else:
             self.before_ops.append(command)
+
+    def prepend_caused(self, command: Command) -> None:
+        if isinstance(command, CommandGroup):
+            for op in reversed(command.get_subcommands()):
+                self.prepend_caused(op)
+        else:
+            self.caused_ops.insert(0, command)
+
+    def add_caused(self, command: Command) -> None:
+        if isinstance(command, CommandGroup):
+            self.caused_ops.extend(command.get_subcommands())
+        else:
+            self.caused_ops.append(command)
 
     def prepend(self, command: Command) -> None:
         if isinstance(command, CommandGroup):
@@ -832,6 +883,10 @@ class Command(
             self.before_ops.remove(command)
         except ValueError:
             pass
+        try:
+            self.caused_ops.remove(command)
+        except ValueError:
+            pass
         if isinstance(command, AlterObjectProperty):
             self._attrs.pop(command.property)
         elif isinstance(command, AlterSpecialObjectField):
@@ -858,9 +913,21 @@ class Command(
         schema: s_schema.Schema,
         context: CommandContext,
     ) -> s_schema.Schema:
-        for op in self.get_subcommands(include_prerequisites=False):
+        for op in self.get_subcommands(
+            include_prerequisites=False,
+            include_caused=False,
+        ):
             if not isinstance(op, AlterObjectProperty):
                 schema = op.apply(schema, context=context)
+        return schema
+
+    def apply_caused(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> s_schema.Schema:
+        for op in self.get_caused():
+            schema = op.apply(schema, context)
         return schema
 
     def get_ast(
@@ -1045,6 +1112,7 @@ class CommandGroup(Command):
     ) -> s_schema.Schema:
         schema = self.apply_prerequisites(schema, context)
         schema = self.apply_subcommands(schema, context)
+        schema = self.apply_caused(schema, context)
         return schema
 
 
@@ -1295,6 +1363,22 @@ class CommandContext:
 
         return None
 
+    def get_topmost_ancestor(
+        self,
+        cls: Union[Type[Command], Type[CommandContextToken[Command]]],
+    ) -> Optional[CommandContextToken[Command]]:
+        if issubclass(cls, Command):
+            ctxcls = cls.get_context_class()
+            assert ctxcls is not None
+        else:
+            ctxcls = cls
+
+        for item in self.stack:
+            if isinstance(item, ctxcls):
+                return item
+
+        return None
+
     def top(self) -> CommandContextToken[Command]:
         if self.stack:
             return self.stack[0]
@@ -1316,11 +1400,6 @@ class CommandContext:
     def copy(self) -> CommandContext:
         ctx = CommandContext()
         ctx.stack = self.stack[:]
-        return ctx
-
-    def at_top(self) -> CommandContext:
-        ctx = CommandContext()
-        ctx.stack = ctx.stack[:1]
         return ctx
 
     def cache_value(self, key: Hashable, value: Any) -> None:
@@ -1400,6 +1479,7 @@ class DeltaRoot(CommandGroup, context_class=DeltaRootContext):
         with context(DeltaRootContext(schema=schema, op=self)):
             schema = self.apply_prerequisites(schema, context)
             schema = self.apply_subcommands(schema, context)
+            schema = self.apply_caused(schema, context)
 
         return schema
 
@@ -1991,27 +2071,7 @@ class ObjectCommand(Command, Generic[so.Object_T]):
         context: CommandContext,
         update: Mapping[str, bool],
     ) -> None:
-        cur_comp_fields = self.scls.get_computed_fields(schema)
-        comp_fields = set(cur_comp_fields)
-        for fn, computed in update.items():
-            if computed:
-                comp_fields.add(fn)
-            else:
-                comp_fields.discard(fn)
-
-        if cur_comp_fields != comp_fields:
-            if comp_fields:
-                self.set_attribute_value(
-                    'computed_fields',
-                    frozenset(comp_fields),
-                    orig_value=cur_comp_fields if cur_comp_fields else None,
-                )
-            else:
-                self.set_attribute_value(
-                    'computed_fields',
-                    None,
-                    orig_value=cur_comp_fields if cur_comp_fields else None,
-                )
+        raise NotImplementedError
 
     def _append_subcmd_ast(
         self,
@@ -2301,11 +2361,19 @@ class ObjectCommand(Command, Generic[so.Object_T]):
         """Resolve, canonicalize and amend field mutations in this command.
 
         This is called just before the object described by this command
-        is created or updated but after all prerequisite command have
+        is created or updated but after all prerequisite commands have
         been applied, so it is safe to resolve object shells and do
         other schema inquiries here.
         """
         return schema
+
+    def update_field_status(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> None:
+        computed_status = self._get_computed_status_of_fields(schema, context)
+        self._update_computed_fields(schema, context, computed_status)
 
     def populate_ddl_identity(
         self,
@@ -2721,7 +2789,14 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         schema: s_schema.Schema,
         context: CommandContext,
     ) -> None:
-        pass
+        # Check if functions by this name exist
+        fn = self.get_attribute_value('name')
+        if fn is not None and not sn.is_fullname(str(fn)):
+            funcs = schema.get_functions(fn, tuple())
+            if funcs:
+                raise errors.SchemaError(
+                    f'{funcs[0].get_verbosename(schema)} is already present '
+                    f'in the schema {schema!r}')
 
     def _create_begin(
         self,
@@ -2731,6 +2806,29 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         self._validate_legal_command(schema, context)
 
         schema = self.apply_prerequisites(schema, context)
+
+        if not context.canonical:
+            schema = self.populate_ddl_identity(schema, context)
+            schema = self.canonicalize_attributes(schema, context)
+            self.update_field_status(schema, context)
+            self.validate_create(schema, context)
+
+        props = self.get_resolved_attributes(schema, context)
+        metaclass = self.get_schema_metaclass()
+        schema, self.scls = metaclass.create_in_schema(schema, **props)
+
+        if not props.get('id'):
+            # Record the generated ID.
+            self.set_attribute_value('id', self.scls.id)
+
+        return schema
+
+    def canonicalize_attributes(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+    ) -> s_schema.Schema:
+        schema = super().canonicalize_attributes(schema, context)
 
         if context.schema_object_ids is not None:
             mcls = self.get_schema_metaclass()
@@ -2752,49 +2850,23 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
             if specified_id is not None:
                 self.set_attribute_value('id', specified_id)
 
-        if not context.canonical:
-            schema = self.populate_ddl_identity(schema, context)
-            schema = self.canonicalize_attributes(schema, context)
-            self.validate_create(schema, context)
-            computed_status = self._get_computed_status_of_fields(
-                schema, context)
-            computed_fields = {n for n, v in computed_status.items() if v}
-            if computed_fields:
-                self.set_attribute_value(
-                    'computed_fields', frozenset(computed_fields))
-
-        props = self.get_resolved_attributes(schema, context)
-        metaclass = self.get_schema_metaclass()
-
-        # Check if functions by this name exist
-        fn = props.get('name')
-        if fn is not None and not sn.is_fullname(str(fn)):
-            funcs = schema.get_functions(fn, tuple())
-            if funcs:
-                raise errors.SchemaError(
-                    f'{funcs[0].get_verbosename(schema)} is already present '
-                    f'in the schema {schema!r}')
-
-        schema, self.scls = metaclass.create_in_schema(schema, **props)
-
-        if not props.get('id'):
-            # Record the generated ID.
-            self.set_attribute_value('id', self.scls.id)
-
-        return schema
-
-    def canonicalize_attributes(
-        self,
-        schema: s_schema.Schema,
-        context: CommandContext,
-    ) -> s_schema.Schema:
-        schema = super().canonicalize_attributes(schema, context)
         self.set_attribute_value('builtin', context.stdmode)
         if not self.has_attribute_value('builtin'):
             self.set_attribute_value('builtin', context.stdmode)
         if not self.has_attribute_value('internal'):
             self.set_attribute_value('internal', context.internal_schema_mode)
         return schema
+
+    def _update_computed_fields(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        update: Mapping[str, bool],
+    ) -> None:
+        computed_fields = {n for n, v in update.items() if v}
+        if computed_fields:
+            self.set_attribute_value(
+                'computed_fields', frozenset(computed_fields))
 
     def _get_ast(
         self,
@@ -2847,6 +2919,7 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
             objctx = cast(ObjectCommandContext[so.Object_T], ctx)
             objctx.scls = self.scls
             schema = self._create_innards(schema, context)
+            schema = self.apply_caused(schema, context)
             schema = self._create_finalize(schema, context)
         return schema
 
@@ -2868,6 +2941,7 @@ class CreateExternalObject(
 
             schema = self._create_begin(schema, context)
             schema = self._create_innards(schema, context)
+            schema = self.apply_caused(schema, context)
             schema = self._create_finalize(schema, context)
 
         return schema
@@ -2882,13 +2956,8 @@ class CreateExternalObject(
         if not context.canonical:
             schema = self.populate_ddl_identity(schema, context)
             schema = self.canonicalize_attributes(schema, context)
+            self.update_field_status(schema, context)
             self.validate_create(schema, context)
-            computed_status = self._get_computed_status_of_fields(
-                schema, context)
-            computed_fields = {n for n, v in computed_status.items() if v}
-            if computed_fields:
-                self.set_attribute_value(
-                    'computed_fields', frozenset(computed_fields))
 
         props = self.get_resolved_attributes(schema, context)
         metaclass = self.get_schema_metaclass()
@@ -2935,9 +3004,7 @@ class AlterObjectOrFragment(ObjectCommand[so.Object_T]):
         if not context.canonical:
             schema = self.populate_ddl_identity(schema, context)
             schema = self.canonicalize_attributes(schema, context)
-            computed_status = self._get_computed_status_of_fields(
-                schema, context)
-            self._update_computed_fields(schema, context, computed_status)
+            self.update_field_status(schema, context)
             self.validate_alter(schema, context)
 
         props = self.get_resolved_attributes(schema, context)
@@ -2960,6 +3027,34 @@ class AlterObjectOrFragment(ObjectCommand[so.Object_T]):
             self.validate_object(schema, context)
         return schema
 
+    def _update_computed_fields(
+        self,
+        schema: s_schema.Schema,
+        context: CommandContext,
+        update: Mapping[str, bool],
+    ) -> None:
+        cur_comp_fields = self.scls.get_computed_fields(schema)
+        comp_fields = set(cur_comp_fields)
+        for fn, computed in update.items():
+            if computed:
+                comp_fields.add(fn)
+            else:
+                comp_fields.discard(fn)
+
+        if cur_comp_fields != comp_fields:
+            if comp_fields:
+                self.set_attribute_value(
+                    'computed_fields',
+                    frozenset(comp_fields),
+                    orig_value=cur_comp_fields if cur_comp_fields else None,
+                )
+            else:
+                self.set_attribute_value(
+                    'computed_fields',
+                    None,
+                    orig_value=cur_comp_fields if cur_comp_fields else None,
+                )
+
 
 class AlterObjectFragment(AlterObjectOrFragment[so.Object_T]):
 
@@ -2975,6 +3070,7 @@ class AlterObjectFragment(AlterObjectOrFragment[so.Object_T]):
 
         schema = self._alter_begin(schema, context)
         schema = self._alter_innards(schema, context)
+        schema = self.apply_caused(schema, context)
         schema = self._alter_finalize(schema, context)
 
         return schema
@@ -3291,6 +3387,7 @@ class AlterObject(AlterObjectOrFragment[so.Object_T], Generic[so.Object_T]):
         with self.new_context(schema, context, scls):
             schema = self._alter_begin(schema, context)
             schema = self._alter_innards(schema, context)
+            schema = self.apply_caused(schema, context)
             schema = self._alter_finalize(schema, context)
 
         return schema
@@ -3464,6 +3561,7 @@ class DeleteObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
 
             schema = self._delete_begin(schema, context)
             schema = self._delete_innards(schema, context)
+            schema = self.apply_caused(schema, context)
             schema = self._delete_finalize(schema, context)
 
         return schema
@@ -3507,6 +3605,7 @@ class DeleteExternalObject(
         with self.new_context(schema, context, self.scls):
             schema = self._delete_begin(schema, context)
             schema = self._delete_innards(schema, context)
+            schema = self.apply_caused(schema, context)
             schema = self._delete_finalize(schema, context)
 
         return schema
