@@ -41,7 +41,7 @@ except ImportError:
 
 
 RUNTIME_DEPS = [
-    'edgedb>=0.18.0a1',
+    'edgedb>=0.18.0a2',
 
     'asyncpg~=0.24.0',
     'httptools>=0.3.0',
@@ -110,6 +110,7 @@ EDGEDBCLI_REPO = 'https://github.com/edgedb/edgedb-cli'
 EXTRA_DEPS = {
     'test': TEST_DEPS,
     'docs': DOCS_DEPS,
+    'build': BUILD_DEPS,
 }
 
 EXT_CFLAGS = ['-O2']
@@ -230,6 +231,7 @@ def _compile_postgres(build_base, *,
             subprocess.run([
                 str(postgres_src / 'configure'),
                 '--prefix=' + str(postgres_build / 'install'),
+                '--with-openssl',
                 '--with-uuid=' + uuidlib,
             ], check=True, cwd=str(build_dir))
 
@@ -800,9 +802,6 @@ setuptools.setup(
             extra_link_args=EXT_LDFLAGS),
     ],
     rust_extensions=rust_extensions,
-    install_requires=(
-        # BUILD_DEPS are needed until pypa/pip#5865 is fixed
-        RUNTIME_DEPS + BUILD_DEPS if os.getenv('_EDGEDB_CI_DOWNLOAD') else []
-    ),
+    install_requires=RUNTIME_DEPS,
     extras_require=EXTRA_DEPS,
 )

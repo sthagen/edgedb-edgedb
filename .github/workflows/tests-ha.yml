@@ -38,7 +38,7 @@ jobs:
     - name: Install Python dependencies
       if: steps.venv-cache.outputs.cache-hit != 'true'
       run: |
-        _EDGEDB_CI_DOWNLOAD=1 pip download --use-feature=in-tree-build --dest=$VIRTUAL_ENV/deps .[test,docs]
+        pip download --use-feature=in-tree-build --dest=$VIRTUAL_ENV/deps .[test,docs,build]
         pip install -U --no-index --find-links=$VIRTUAL_ENV/deps $VIRTUAL_ENV/deps/*
 
     # Prepare environment variables and shared artifacts
@@ -107,7 +107,7 @@ jobs:
       id: postgres-cache
       with:
         path: build/postgres/install
-        key: edb-postgres-v1-${{ env.POSTGRES_GIT_REV }}
+        key: edb-postgres-v2-${{ env.POSTGRES_GIT_REV }}
 
     - name: Handle cached Stolon build
       uses: actions/cache@v2
@@ -378,7 +378,7 @@ jobs:
       id: postgres-cache
       with:
         path: build/postgres/install
-        key: edb-postgres-v1-${{ env.POSTGRES_GIT_REV }}
+        key: edb-postgres-v2-${{ env.POSTGRES_GIT_REV }}
 
     - name: Restore cached Stolon build
       uses: actions/cache@v2
