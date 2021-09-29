@@ -6,7 +6,7 @@ SPHINXOPTS:="-W -n"
 
 cython:
 	find edb -name '*.pyx' | xargs touch
-	python setup.py build_ext --inplace
+	BUILD_EXT_MODE=py-only python setup.py build_ext --inplace
 
 
 docs:
@@ -25,7 +25,7 @@ pygments:
 
 casts:
 	out=$$(edb gen-cast-table) && \
-		echo "$$out" > docs/datamodel/scalars/casts.csv
+		echo "$$out" > docs/std/casts.csv
 
 
 build:
