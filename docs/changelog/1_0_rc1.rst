@@ -3,7 +3,7 @@
 ========
 
 This changelog summarizes new features and breaking changes in
-EdgeDB 1.0 RC 1 "Ran".
+EdgeDB 1.0 Release Candidate 1 "Epsilon Eridani".
 
 
 Migrations
@@ -45,8 +45,8 @@ We continue fixing bugs that affect schema definitions and migrations:
   and will effectively force users to pollute queries with pointless
   and expensive :eql:op:`DISTINCT`.
 
-  Here we change EdgeDB behavior to allow multiplicity greater than
-  one in ``multi`` properties.
+  Here we change EdgeDB behavior to allow multiplicity *greater than
+  one* in ``multi`` properties.
 
 * Fix the error when an object function is created alongside its
   object (:eql:gh:`#2834`).
@@ -136,6 +136,10 @@ EdgeQL
 Command-Line Tools
 ==================
 
+* Add the :ref:`cli.toml <ref_cli_edgedb_config>` global configuration
+  file for customizing the CLI and REPL behavior. The location of the
+  file is shown as "Config" by :ref:`ref_cli_edgedb_info`.
+
 * Make SCRAM the default auth method (:eql:gh:`#2848`).
 * Add a server option to specify the default authentication method
   (:eql:gh:`#2936`).
@@ -152,11 +156,12 @@ We've updated the binary protocol to version 0.12 which brings some
 performance and other improvements.
 
 * Support protocol 0.12 features features for `edgedb-python
-  <https://github.com/edgedb/edgedb-python>`_ and release v0.19.0
+  <https://github.com/edgedb/edgedb-python>`_ and release v0.18.0
   driver.
 * Support protocol 0.12 features features for `edgedb-js
-  <https://github.com/edgedb/edgedb-js>`_ and release v0.16.0
+  <https://github.com/edgedb/edgedb-js>`_ and release v0.15.2
   driver.
 * Support protocol 0.12 features features for `edgedb-go
   <https://github.com/edgedb/edgedb-go>`_ and release v0.8.2
   driver.
+
