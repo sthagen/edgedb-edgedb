@@ -618,14 +618,16 @@ def semi_join(
 
 
 def ensure_bond_for_expr(
-        ir_set: irast.Set, stmt: pgast.BaseRelation, *, type: str='int',
-        ctx: context.CompilerContextLevel) -> None:
+    ir_set: irast.Set,
+    stmt: pgast.BaseRelation,
+    *,
+    ctx: context.CompilerContextLevel,
+) -> None:
     if ir_set.path_id.is_objtype_path():
         # ObjectTypes have inherent identity
         return
 
-    ensure_transient_identity_for_path(
-        ir_set.path_id, stmt, type=type, ctx=ctx)
+    ensure_transient_identity_for_path(ir_set.path_id, stmt, ctx=ctx)
 
 
 def apply_volatility_ref(
@@ -647,23 +649,19 @@ def apply_volatility_ref(
 
 
 def ensure_transient_identity_for_path(
-        path_id: irast.PathId, stmt: pgast.BaseRelation, *,
-        ctx: context.CompilerContextLevel, type: str='int') -> None:
+    path_id: irast.PathId,
+    stmt: pgast.BaseRelation,
+    *,
+    ctx: context.CompilerContextLevel,
+) -> None:
 
-    if type == 'uuid':
-        id_expr = pgast.FuncCall(
-            name=('edgedbext', 'uuid_generate_v1mc',),
-            args=[],
-        )
-    else:
-        id_expr = pgast.FuncCall(
-            name=('row_number',),
-            args=[],
-            over=pgast.WindowDef()
-        )
+    id_expr = pgast.FuncCall(
+        name=('edgedbext', 'uuid_generate_v4',),
+        args=[],
+    )
 
-    pathctx.put_path_identity_var(stmt, path_id,
-                                  id_expr, force=True, env=ctx.env)
+    pathctx.put_path_identity_var(
+        stmt, path_id, id_expr, force=True, env=ctx.env)
     pathctx.put_path_bond(stmt, path_id)
 
     if isinstance(stmt, pgast.SelectStmt):
@@ -1221,13 +1219,7 @@ def range_for_material_objtype(
         set_ops.append(('union', qry))
 
         for op, cte, cte_path_id in overlays:
-            rvar = pgast.RelRangeVar(
-                relation=cte,
-                typeref=typeref,
-                alias=pgast.Alias(
-                    aliasname=env.aliases.get(hint=cte.name or '')
-                )
-            )
+            rvar = rvar_for_rel(cte, typeref=typeref, ctx=ctx)
 
             qry = pgast.SelectStmt(
                 from_clause=[rvar],
@@ -1585,12 +1577,7 @@ def range_for_ptrref(
                     qry, path_id, table, env=ctx.env)
 
             for op, cte, cte_path_id in overlays:
-                rvar = pgast.RelRangeVar(
-                    relation=cte,
-                    alias=pgast.Alias(
-                        aliasname=ctx.env.aliases.get(cte.name or '')
-                    )
-                )
+                rvar = rvar_for_rel(cte, ctx=ctx)
 
                 qry = pgast.SelectStmt(
                     target_list=[
