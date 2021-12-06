@@ -42,10 +42,12 @@ from edb.edgeql import ast as qlast
 from edb.edgeql import parser as qlparser
 
 from edb.common.ast import visitor as ast_visitor
+from edb.common import ordered
 
 from . import astutils
 from . import context
 from . import dispatch
+from . import eta_expand
 from . import inference
 from . import options as coptions
 from . import pathctx
@@ -99,6 +101,7 @@ def init_context(
     ctx.implicit_tid_in_shapes = options.implicit_tid_in_shapes
     ctx.implicit_tname_in_shapes = options.implicit_tname_in_shapes
     ctx.implicit_limit = options.implicit_limit
+    ctx.expr_exposed = context.Exposure.EXPOSED
 
     return ctx
 
@@ -108,6 +111,8 @@ def fini_expression(
     *,
     ctx: context.ContextLevel,
 ) -> irast.Command:
+
+    ir = eta_expand.eta_expand_ir(ir, toplevel=True, ctx=ctx)
 
     if (
         isinstance(ir, irast.Set)
@@ -136,6 +141,10 @@ def fini_expression(
     _rewrite_weak_namespaces(ir, ctx)
 
     ctx.path_scope.validate_unique_ids()
+
+    # Infer cardinalities of type rewrites
+    for rw in ctx.type_rewrites.values():
+        inference.infer_cardinality(rw, scope_tree=ctx.path_scope, ctx=inf_ctx)
 
     # ConfigSet and ConfigReset don't like being part of a Set
     if isinstance(ir.expr, (irast.ConfigSet, irast.ConfigReset)):
@@ -243,6 +252,7 @@ def fini_expression(
         ),
         type_rewrites={s.typeref.id: s for s in ctx.type_rewrites.values()},
         dml_exprs=ctx.env.dml_exprs,
+        singletons=ctx.env.singletons,
     )
     return result
 
@@ -256,7 +266,7 @@ def _fixup_materialized_sets(
     for nobe in ctx.source_map.values():
         if nobe.irexpr:
             children += ast_visitor.find_children(nobe.irexpr, flt)
-    for stmt in set(children):
+    for stmt in ordered.OrderedSet(children):
         if not stmt.materialized_sets:
             continue
         for key in list(stmt.materialized_sets):
@@ -494,7 +504,7 @@ def declare_view(
     factoring_fence: bool=False,
     fully_detached: bool=False,
     must_be_used: bool=False,
-    is_for_view: bool=False,
+    binding_kind: irast.BindingKind,
     path_id_namespace: Optional[FrozenSet[str]]=None,
     ctx: context.ContextLevel,
 ) -> irast.Set:
@@ -547,7 +557,7 @@ def declare_view(
         ctx.path_scope_map[view_set] = context.ScopeInfo(
             path_scope=subctx.path_scope,
             pinned_path_id_ns=pinned_pid_ns,
-            is_for_view=is_for_view,
+            binding_kind=binding_kind,
         )
 
         if not fully_detached:
@@ -576,13 +586,14 @@ def declare_view_from_schema(
         return vc
 
     with ctx.detached() as subctx:
-        subctx.expr_exposed = False
+        subctx.expr_exposed = context.Exposure.UNEXPOSED
         view_expr = viewcls.get_expr(ctx.env.schema)
         assert view_expr is not None
         view_ql = qlparser.parse(view_expr.text)
         viewcls_name = viewcls.get_name(ctx.env.schema)
         assert isinstance(view_ql, qlast.Expr), 'expected qlast.Expr'
         view_set = declare_view(view_ql, alias=viewcls_name,
+                                binding_kind=irast.BindingKind.With,
                                 fully_detached=True, ctx=subctx)
         # The view path id _itself_ should not be in the nested namespace.
         view_set.path_id = view_set.path_id.replace_namespace(

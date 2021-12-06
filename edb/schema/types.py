@@ -190,6 +190,9 @@ class Type(
     def is_object_type(self) -> bool:
         return False
 
+    def is_free_object_type(self, schema: s_schema.Schema) -> bool:
+        return False
+
     def is_union_type(self, schema: s_schema.Schema) -> bool:
         return False
 
@@ -216,6 +219,9 @@ class Type(
 
     def contains_any(self, schema: s_schema.Schema) -> bool:
         return self.is_any(schema)
+
+    def contains_object(self, schema: s_schema.Schema) -> bool:
+        return self.is_object_type()
 
     def contains_json(self, schema: s_schema.Schema) -> bool:
         return False
@@ -472,16 +478,17 @@ class InheritingType(so.DerivableInheritingObject, QualifiedType):
         if self == other:
             return 0
 
-        ancestor = utils.get_class_nearest_common_ancestor(
+        ancestors = utils.get_class_nearest_common_ancestors(
             schema, [self, other])
 
-        if ancestor is None:
+        if not ancestors:
             return -1
-        elif ancestor == self:
+        elif self in ancestors:
             return 0
         else:
-            ancestors = list(self.get_ancestors(schema).objects(schema))
-            return ancestors.index(ancestor) + 1
+            all_ancestors = list(self.get_ancestors(schema).objects(schema))
+            return min(
+                all_ancestors.index(ancestor) + 1 for ancestor in ancestors)
 
 
 class TypeShell(so.ObjectShell[TypeT_co]):
@@ -852,8 +859,7 @@ class Collection(Type, s_abc.Collection):
 
     def contains_object(self, schema: s_schema.Schema) -> bool:
         return any(
-            st.contains_object(schema) if isinstance(st, Collection)
-            else st.is_object_type()
+            st.contains_object(schema)
             for st in self.get_subtypes(schema)
         )
 
@@ -2195,33 +2201,82 @@ class InheritingTypeCommand(
     TypeCommand[InheritingTypeT],
     inheriting.InheritingObjectCommand[InheritingTypeT],
 ):
-    pass
+    def _validate_bases(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        bases: so.ObjectList[InheritingTypeT],
+        shells: Mapping[s_name.QualName, TypeShell[InheritingTypeT]],
+        is_derived: bool,
+    ) -> None:
+        for base in bases.objects(schema):
+            if (
+                base.contains_any(schema)
+                or (base.is_free_object_type(schema) and not is_derived)
+            ):
+                base_type_name = base.get_displayname(schema)
+                shell = shells.get(base.get_name(schema))
+                raise errors.SchemaError(
+                    f"{base_type_name!r} cannot be a parent type",
+                    context=shell.sourcectx if shell is not None else None,
+                )
 
 
 class CreateInheritingType(
     InheritingTypeCommand[InheritingTypeT],
     inheriting.CreateInheritingObject[InheritingTypeT],
 ):
-
     def validate_create(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> None:
-
         super().validate_create(schema, context)
 
+        shells = self.get_attribute_value('bases')
+        if isinstance(shells, so.ObjectList):
+            # XXX: fix set_attribute_value shell hygiene
+            shells = shells.as_shell(schema)
+        shell_map = {s.get_name(schema): s for s in shells}
         bases = self.get_resolved_attribute_value(
             'bases',
             schema=schema,
             context=context,
         )
-        if bases:
-            for base in bases.objects(schema):
-                if base.contains_any(schema):
-                    base_type_name = base.get_displayname(schema)
-                    raise errors.SchemaError(
-                        f"{base_type_name!r} cannot be a parent type")
+        self._validate_bases(
+            schema,
+            context,
+            bases,
+            shell_map,
+            is_derived=self.get_attribute_value('is_derived') or False,
+        )
+
+
+class RebaseInheritingType(
+    InheritingTypeCommand[InheritingTypeT],
+    inheriting.RebaseInheritingObject[InheritingTypeT],
+):
+    def validate_alter(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> None:
+        super().validate_alter(schema, context)
+        shell_map = {}
+        for base_shells, _ in self.added_bases:
+            shell_map.update({s.get_name(schema): s for s in base_shells})
+        bases = self.get_resolved_attribute_value(
+            'bases',
+            schema=schema,
+            context=context,
+        )
+        self._validate_bases(
+            schema,
+            context,
+            bases,
+            shell_map,
+            is_derived=self.scls.get_is_derived(schema),
+        )
 
 
 class CollectionTypeCommandContext(sd.ObjectCommandContext[Collection]):

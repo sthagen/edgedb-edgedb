@@ -59,6 +59,7 @@ class TestIntrospection(tb.QueryTestCase):
                     .name;
             """,
             [
+                {'name': 'default::BooleanTest'},
                 {'name': 'default::Comment'},
                 {'name': 'default::Dictionary'},
                 {'name': 'default::File'},
@@ -193,7 +194,8 @@ class TestIntrospection(tb.QueryTestCase):
                         name,
                         cardinality,
                         target: {
-                            name
+                            name,
+                            compound_type,
                         }
                     } ORDER BY .name
                 }
@@ -203,19 +205,31 @@ class TestIntrospection(tb.QueryTestCase):
                 'name': 'default::Comment',
                 'links': [{
                     'name': '__type__',
-                    'target': {'name': 'schema::Type'},
+                    'target': {
+                        'name': 'schema::Type',
+                        'compound_type': False,
+                    },
                     'cardinality': 'One',
                 }, {
                     'name': 'issue',
-                    'target': {'name': 'default::Issue'},
+                    'target': {
+                        'name': 'default::Issue',
+                        'compound_type': False,
+                    },
                     'cardinality': 'One',
                 }, {
                     'name': 'owner',
-                    'target': {'name': 'default::User'},
+                    'target': {
+                        'name': 'default::User',
+                        'compound_type': False,
+                    },
                     'cardinality': 'One',
                 }, {
                     'name': 'parent',
-                    'target': {'name': 'default::Comment'},
+                    'target': {
+                        'name': 'default::Comment',
+                        'compound_type': False,
+                    },
                     'cardinality': 'One',
                 }]
             }]
@@ -587,7 +601,7 @@ class TestIntrospection(tb.QueryTestCase):
                             {
                                 'name': 'std::max_len_value',
                                 'expr': '(__subject__ <= max)',
-                                'annotations': {},
+                                'annotations': [],
                                 'subject': {'name': 'body'},
                                 'params': [
                                     {
@@ -610,9 +624,9 @@ class TestIntrospection(tb.QueryTestCase):
                             {
                                 'name': 'std::exclusive',
                                 'expr': 'std::_is_exclusive(__subject__)',
-                                'annotations': {},
+                                'annotations': [],
                                 'subject': {'name': 'id'},
-                                'params': {},
+                                'params': [],
                                 'return_typemod': 'SingletonType',
                                 'return_type': {'name': 'std::bool'},
                                 'errmessage':
@@ -657,7 +671,7 @@ class TestIntrospection(tb.QueryTestCase):
                     {
                         'name': 'std::one_of',
                         'expr': 'std::contains(vals, __subject__)',
-                        'annotations': {},
+                        'annotations': [],
                         'subject': {'name': 'default::EmulatedEnum'},
                         'params': [
                             {
@@ -1328,6 +1342,7 @@ class TestIntrospection(tb.QueryTestCase):
                     .name;
             """,
             [
+                {'name': 'default::BooleanTest', 'count': 0},
                 {'name': 'default::Comment', 'count': 0},
                 {'name': 'default::Dictionary', 'count': 0},
                 {'name': 'default::File', 'count': 0},

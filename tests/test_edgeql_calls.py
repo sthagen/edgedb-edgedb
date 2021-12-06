@@ -561,22 +561,22 @@ class TestEdgeQLFuncCalls(tb.DDLTestCase):
 
         await self.assert_query_result(
             r'''SELECT call13('aaa');''',
-            [{}],
+            [1],
         )
 
         await self.assert_query_result(
             r'''SELECT call13(b'aaaa');''',
-            [{}],
+            [1],
         )
 
         await self.assert_query_result(
             r'''SELECT call13([1, 2, 3, 4, 5]);''',
-            [{}],
+            [1],
         )
 
         await self.assert_query_result(
             r'''SELECT call13(['a', 'b']);''',
-            [{}],
+            [1],
         )
 
         await self.con.execute('''
@@ -773,7 +773,7 @@ class TestEdgeQLFuncCalls(tb.DDLTestCase):
 
         await self.assert_query_result(
             r'''SELECT call18(2);''',
-            [{}],
+            [1],
         )
 
         await self.assert_query_result(
@@ -987,7 +987,7 @@ class TestEdgeQLFuncCalls(tb.DDLTestCase):
 
         await self.assert_query_result(
             r'''SELECT call26(['aaa']);''',
-            [{}],
+            [1],
         )
 
         await self.assert_query_result(
@@ -1131,7 +1131,7 @@ class TestEdgeQLFuncCalls(tb.DDLTestCase):
 
         await self.assert_query_result(
             r'''SELECT call31([1, 2])[0];''',
-            [{}],
+            [1],
         )
 
         await self.assert_query_result(
@@ -1161,17 +1161,17 @@ class TestEdgeQLFuncCalls(tb.DDLTestCase):
 
         await self.assert_query_result(
             r'''SELECT call31((a:=[(x:=1)])).a[0].x;''',
-            [{}],
+            [1],
         )
 
         await self.assert_query_result(
             r'''SELECT call31((a:=[(x:=1)])).0[0].x;''',
-            [{}],
+            [1],
         )
 
         await self.assert_query_result(
             r'''SELECT call31((a:=[(x:=1)])).0[0].0;''',
-            [{}],
+            [1],
         )
 
         await self.assert_query_result(
@@ -1659,3 +1659,31 @@ class TestEdgeQLFuncCalls(tb.DDLTestCase):
                     fight(Scorpion, SubZero);SELECT area(Shape)
                 """,
             )
+
+    async def test_edgeql_calls_obj_04(self):
+        await self.con.execute("""
+            CREATE FUNCTION thing(s: schema::Constraint) -> str
+                USING (s.name ++ s.expr);
+
+            CREATE FUNCTION frob(s: schema::Object) -> str
+                USING ("ahhhh");
+            CREATE FUNCTION frob(s: schema::Constraint) -> str
+                USING (s.name ++ s.expr);
+            CREATE FUNCTION frob(s: schema::Pointer) -> str
+                USING (s.name ++ <str>s.required);
+        """)
+
+    async def test_edgeql_call_builtin_obj(self):
+        await self.con.execute(
+            r"""
+                CREATE FUNCTION get_obj(name: str) ->
+                  SET OF schema::Object USING (
+                    SELECT schema::Object FILTER .name = name);
+            """,
+        )
+
+        res = await self.con._fetchall("""
+            SELECT get_obj('std::BaseObject')
+        """, __typenames__=True)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0].__tname__, "schema::ObjectType")

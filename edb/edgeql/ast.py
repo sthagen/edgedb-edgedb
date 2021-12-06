@@ -281,6 +281,10 @@ class BinOp(Expr):
     right: Expr
 
 
+class SetConstructorOp(BinOp):
+    op: str = 'UNION'
+
+
 class WindowSpec(Clause, OrderByMixin):
     orderby: typing.List[SortExpr]
     partition: typing.List[Expr]
@@ -450,24 +454,6 @@ class Set(Expr):
     elements: typing.List[Expr]
 
 
-# Expressions used only in statements
-#
-
-class ByExprBase(Base):
-    '''Abstract parent of all grouping sets.'''
-    __abstract_node__ = True
-
-
-class ByExpr(ByExprBase):
-    each: bool
-    expr: Expr
-
-
-class GroupBuiltin(ByExprBase):
-    name: str
-    elements: typing.List[ByExpr]
-
-
 # Statements
 #
 
@@ -490,7 +476,6 @@ class SubjectMixin(Base):
 class ReturningMixin(Base):
     __abstract_node__ = True
     result: Expr
-    result_alias: typing.Optional[str] = None
 
 
 class SelectClauseMixin(OrderByMixin, OffsetLimitMixin, FilterMixin):
@@ -535,7 +520,7 @@ class Query(Statement):
 
 
 class SelectQuery(Query, ReturningMixin, SelectClauseMixin):
-    pass
+    result_alias: typing.Optional[str] = None
 
 
 class GroupQuery(SelectQuery, SubjectMixin):
@@ -1224,7 +1209,6 @@ class ConfigOp(Expr):
     __abstract_node__ = True
     name: ObjectRef
     scope: qltypes.ConfigScope
-    backend_setting: str
 
 
 class ConfigSet(ConfigOp):

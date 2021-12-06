@@ -52,6 +52,15 @@ if TYPE_CHECKING:
     from edb.schema import sources as s_sources
 
 
+class Exposure(enum.IntEnum):
+    UNEXPOSED = 0
+    BINDING = 1
+    EXPOSED = 2
+
+    def __bool__(self) -> bool:
+        return self == self.EXPOSED
+
+
 class ContextSwitchMode(enum.Enum):
     NEW = enum.auto()
     SUBQUERY = enum.auto()
@@ -88,8 +97,8 @@ class ViewRPtr:
 @dataclasses.dataclass
 class ScopeInfo:
     path_scope: irast.ScopeTreeNode
+    binding_kind: irast.BindingKind
     pinned_path_id_ns: Optional[FrozenSet[str]] = None
-    is_for_view: bool = False
 
 
 class PointerRefCache(Dict[irtyputils.PtrRefCacheKey, irast.BasePointerRef]):
@@ -564,7 +573,7 @@ class ContextLevel(compiler.ContextLevel):
             self.iterator_path_ids = frozenset()
             self.scope_id_ctr = compiler.SimpleCounter()
             self.view_scls = None
-            self.expr_exposed = False
+            self.expr_exposed = Exposure.UNEXPOSED
 
             self.partial_path_prefix = None
 
@@ -711,6 +720,13 @@ class ContextLevel(compiler.ContextLevel):
 
     def detached(self) -> compiler.CompilerContextManager[ContextLevel]:
         return self.new(ContextSwitchMode.DETACHED)
+
+    def create_anchor(self, ir: irast.Set, name: str='v') -> qlast.Path:
+        alias = self.aliases.get(name)
+        self.anchors[alias] = ir
+        return qlast.Path(
+            steps=[qlast.ObjectRef(name=alias)],
+        )
 
 
 class CompilerContext(compiler.CompilerContext[ContextLevel]):

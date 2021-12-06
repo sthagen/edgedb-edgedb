@@ -32,6 +32,7 @@ from edb import errors
 
 from edb import edgeql
 from edb import _edgeql_rust
+from edb.ir import statypes
 from edb.edgeql import ast as qlast
 
 from edb.common import context as parser_context
@@ -59,6 +60,7 @@ from edb.pgsql import common as pg_common
 from edb.pgsql import dbops
 from edb.pgsql import delta as delta_cmds
 from edb.pgsql import metaschema
+from edb.pgsql import params as pgparams
 from edb.pgsql.common import quote_ident as qi
 from edb.pgsql.common import quote_literal as ql
 
@@ -134,7 +136,7 @@ async def _ensure_edgedb_supergroup(
         name=pg_role_name,
         superuser=bool(
             instance_params.capabilities
-            & pgcluster.BackendCapabilities.SUPERUSER_ACCESS
+            & pgparams.BackendCapabilities.SUPERUSER_ACCESS
         ),
         allow_login=False,
         allow_createdb=True,
@@ -183,7 +185,7 @@ async def _ensure_edgedb_role(
             superuser
             and bool(
                 instance_params.capabilities
-                & pgcluster.BackendCapabilities.SUPERUSER_ACCESS
+                & pgparams.BackendCapabilities.SUPERUSER_ACCESS
             )
         ),
         allow_login=True,
@@ -254,7 +256,7 @@ async def _create_edgedb_template_database(
     instance_params = ctx.cluster.get_runtime_params().instance_params
     capabilities = instance_params.capabilities
     have_c_utf8 = (
-        capabilities & pgcluster.BackendCapabilities.C_UTF8_LOCALE)
+        capabilities & pgparams.BackendCapabilities.C_UTF8_LOCALE)
 
     logger.info('Creating template database...')
     block = dbops.SQLBlock()
@@ -625,7 +627,7 @@ async def _init_stdlib(
     ctx: BootstrapContext,
     testmode: bool,
     global_ids: Mapping[str, uuid.UUID],
-) -> Tuple[StdlibBits, edbcompiler.Compiler]:
+) -> Tuple[StdlibBits, config.Spec, edbcompiler.Compiler]:
     in_dev_mode = devmode.is_in_dev_mode()
     conn = ctx.conn
     cluster = ctx.cluster
@@ -655,9 +657,12 @@ async def _init_stdlib(
     logger.info('Creating the necessary PostgreSQL extensions...')
     await metaschema.create_pg_extensions(conn)
 
+    config_spec = config.load_spec_from_schema(stdlib.stdschema)
+    config.set_settings(config_spec)
+
     if tpldbdump is None:
         logger.info('Populating internal SQL structures...')
-        await metaschema.bootstrap(conn)
+        await metaschema.bootstrap(conn, config_spec)
         logger.info('Executing the standard library...')
         await _execute_ddl(conn, stdlib.sqltext)
 
@@ -719,6 +724,9 @@ async def _init_stdlib(
     else:
         logger.info('Initializing the standard library...')
         await metaschema._execute_sql_script(conn, tpldbdump.decode('utf-8'))
+        # Restore the search_path as the dump might have altered it.
+        await conn.execute(
+            "SELECT pg_catalog.set_config('search_path', 'edgedb', false)")
 
     if not in_dev_mode and testmode:
         # Running tests on a production build.
@@ -728,6 +736,10 @@ async def _init_stdlib(
             stdlib,
         )
         await conn.execute(testmode_sql)
+        # _testmode includes extra config settings, so make sure
+        # those are picked up.
+        config_spec = config.load_spec_from_schema(stdlib.stdschema)
+        config.set_settings(config_spec)
 
     # Make sure that schema backend_id properties are in sync with
     # the database.
@@ -863,7 +875,13 @@ async def _init_stdlib(
         )
         await conn.execute(sql)
 
-    return stdlib, compiler
+    await _store_static_json_cache(
+        ctx,
+        'configspec',
+        config.spec_to_json(config_spec),
+    )
+
+    return stdlib, config_spec, compiler
 
 
 async def _execute_ddl(conn, sql_text):
@@ -934,10 +952,10 @@ async def _populate_data(schema, compiler, conn):
 
 async def _configure(
     ctx: BootstrapContext,
+    config_spec: config.Spec,
     schema: s_schema.Schema,
     compiler: edbcompiler.Compiler,
 ) -> None:
-    config_spec = config.get_settings()
     settings: Mapping[str, config.SettingValue] = {}
 
     config_json = config.to_json(config_spec, settings, include_source=False)
@@ -949,11 +967,37 @@ async def _configure(
 
     await _execute_block(ctx.conn, block)
 
+    instance_params = ctx.cluster.get_runtime_params().instance_params
+    for setname in config_spec:
+        setting = config_spec[setname]
+        if (
+            setting.backend_setting
+            and setting.default is not None
+            and (
+                # Do not attempt to run CONFIGURE INSTANCE on
+                # backends that don't support it.
+                # TODO: this should be replaced by instance-wide
+                #       emulation at backend connection time.
+                instance_params.capabilities
+                & pgparams.BackendCapabilities.CONFIGFILE_ACCESS
+            )
+        ):
+            if isinstance(setting.default, statypes.Duration):
+                val = f'<std::duration>"{setting.default.to_iso8601()}"'
+            else:
+                val = repr(setting.default)
+            script = f'''
+                CONFIGURE INSTANCE SET {setting.name} := {val};
+            '''
+            schema, sql = compile_bootstrap_script(compiler, schema, script)
+            await _execute_ddl(ctx.conn, sql)
+
 
 async def _compile_sys_queries(
     ctx: BootstrapContext,
     schema: s_schema.Schema,
     compiler: edbcompiler.Compiler,
+    config_spec: config.Spec,
 ) -> None:
     queries = {}
 
@@ -1029,10 +1073,43 @@ async def _compile_sys_queries(
 
     queries['backend_tids'] = sql
 
+    report_settings: list[str] = []
+    for setname in config_spec:
+        setting = config_spec[setname]
+        if setting.report:
+            report_settings.append(setname)
+
+    report_configs_query = f'''
+        SELECT assert_single(cfg::Config {{
+            {', '.join(report_settings)}
+        }});
+    '''
+
+    units = compiler._compile(
+        ctx=edbcompiler.new_compiler_context(
+            user_schema=schema,
+            single_statement=True,
+            expected_cardinality_one=True,
+            json_parameters=False,
+            output_format=edbcompiler.IoFormat.BINARY,
+            bootstrap_mode=True,
+        ),
+        source=edgeql.Source.from_string(report_configs_query))
+    assert len(units) == 1 and len(units[0].sql) == 1
+
+    report_configs_typedesc = units[0].out_type_id + units[0].out_type_data
+    queries['report_configs'] = units[0].sql[0].decode()
+
     await _store_static_json_cache(
         ctx,
         'sysqueries',
         json.dumps(queries),
+    )
+
+    await _store_static_bin_cache(
+        ctx,
+        'report_configs_typedesc',
+        report_configs_typedesc,
     )
 
 
@@ -1128,20 +1205,6 @@ async def _create_edgedb_database(
     return objid
 
 
-async def _bootstrap_config_spec(
-    ctx: BootstrapContext,
-    schema: s_schema.Schema,
-) -> None:
-    config_spec = config.load_spec_from_schema(schema)
-    config.set_settings(config_spec)
-
-    await _store_static_json_cache(
-        ctx,
-        'configspec',
-        config.spec_to_json(config_spec),
-    )
-
-
 def _pg_log_listener(conn, msg):
     if msg.severity_en == 'WARNING':
         level = logging.WARNING
@@ -1209,8 +1272,8 @@ async def _check_catalog_compatibility(
         )
 
         if datadir_major != expected_ver.major:
-            if ctx.args.status_sink is not None:
-                ctx.args.status_sink(f'INCOMPATIBLE={json.dumps(status)}')
+            for status_sink in ctx.args.status_sinks:
+                status_sink(f'INCOMPATIBLE={json.dumps(status)}')
             raise errors.ConfigurationError(
                 'database instance incompatible with this version of EdgeDB',
                 details=(
@@ -1226,8 +1289,8 @@ async def _check_catalog_compatibility(
             )
 
         if datadir_catver != expected_catver:
-            if ctx.args.status_sink is not None:
-                ctx.args.status_sink(f'INCOMPATIBLE={json.dumps(status)}')
+            for status_sink in ctx.args.status_sinks:
+                status_sink(f'INCOMPATIBLE={json.dumps(status)}')
             raise errors.ConfigurationError(
                 'database instance incompatible with this version of EdgeDB',
                 details=(
@@ -1306,7 +1369,7 @@ async def _bootstrap(
 
         await _populate_misc_instance_data(tpl_ctx)
 
-        stdlib, compiler = await _init_stdlib(
+        stdlib, config_spec, compiler = await _init_stdlib(
             tpl_ctx,
             testmode=args.testmode,
             global_ids={
@@ -1314,8 +1377,12 @@ async def _bootstrap(
                 edbdef.EDGEDB_TEMPLATE_DB: new_template_db_id,
             }
         )
-        await _bootstrap_config_spec(tpl_ctx, stdlib.stdschema)
-        await _compile_sys_queries(tpl_ctx, stdlib.reflschema, compiler)
+        await _compile_sys_queries(
+            tpl_ctx,
+            stdlib.reflschema,
+            compiler,
+            config_spec,
+        )
 
         schema = s_schema.FlatSchema()
         schema = await _init_defaults(schema, compiler, conn)
@@ -1343,6 +1410,7 @@ async def _bootstrap(
         conn.add_log_listener(_pg_log_listener)
         await _configure(
             ctx._replace(conn=conn),
+            config_spec=config_spec,
             schema=schema,
             compiler=compiler,
         )

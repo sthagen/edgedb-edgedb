@@ -3060,6 +3060,8 @@ aa';
         SELECT x;
         """
 
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  r"Unexpected ':='", hint=None, line=3, col=17)
     def test_edgeql_syntax_selectfor_05(self):
         """
         FOR x IN {1, 2, 3}
@@ -5103,6 +5105,26 @@ aa';
         CONFIGURE INSTANCE RESET Foo FILTER (.bar = 2);
         CONFIGURE SESSION RESET Foo FILTER (.bar = 2);
         CONFIGURE CURRENT DATABASE RESET Foo FILTER (.bar = 2);
+        """
+
+    @tb.must_fail(
+        errors.EdgeQLSyntaxError,
+        r"'CONFIGURE DATABASE' is invalid syntax. "
+        r"Did you mean 'CONFIGURE CURRENT DATABASE'?",
+        line=2, col=19)
+    def test_edgeql_syntax_configure_02(self):
+        """
+        CONFIGURE DATABASE SET foo := (SELECT User);
+        """
+
+    @tb.must_fail(
+        errors.EdgeQLSyntaxError,
+        r"'configure database' is invalid syntax. "
+        r"Did you mean 'configure current database'?",
+        line=2, col=19)
+    def test_edgeql_syntax_configure_03(self):
+        """
+        configure database set foo := (SELECT User);
         """
 
     def test_edgeql_syntax_ddl_alias_01(self):

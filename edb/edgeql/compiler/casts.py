@@ -39,6 +39,7 @@ from edb.schema import types as s_types
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes as ft
 
+from . import astutils
 from . import context
 from . import dispatch
 from . import pathctx
@@ -91,6 +92,9 @@ def compile_cast(
             f'`...[IS {new_stype.get_displayname(ctx.env.schema)}]` instead',
             context=srcctx)
 
+    json_t = ctx.env.get_track_schema_type(
+        sn.QualName('std', 'json'))
+
     if isinstance(ir_set.expr, irast.Array):
         return _cast_array_literal(
             ir_set, orig_stype, new_stype, srcctx=srcctx, ctx=ctx)
@@ -123,8 +127,6 @@ def compile_cast(
             cardinality_mod=cardinality_mod, ctx=ctx)
 
     else:
-        json_t = ctx.env.get_track_schema_type(
-            sn.QualName('std', 'json'))
         if (new_stype.issubclass(ctx.env.schema, json_t) and
                 ir_set.path_id.is_objtype_path()):
             # JSON casts of objects are special: we want the full shape
@@ -399,8 +401,7 @@ def _cast_json_to_tuple(
 
     with ctx.new() as subctx:
         subctx.anchors = subctx.anchors.copy()
-        source_alias = subctx.aliases.get('a')
-        subctx.anchors[source_alias] = ir_set
+        source_path = subctx.create_anchor(ir_set, 'a')
 
         # TODO: try using jsonb_to_record instead of a bunch of
         # json_get calls and see if that is faster.
@@ -409,7 +410,7 @@ def _cast_json_to_tuple(
             val_e = qlast.FunctionCall(
                 func=('__std__', 'json_get'),
                 args=[
-                    qlast.Path(steps=[qlast.ObjectRef(name=source_alias)]),
+                    source_path,
                     qlast.StringConstant(value=new_el_name),
                 ],
             )
@@ -550,16 +551,11 @@ def _cast_array(
 
         with ctx.new() as subctx:
             subctx.anchors = subctx.anchors.copy()
-            source_alias = subctx.aliases.get('a')
-            subctx.anchors[source_alias] = ir_set
+            source_path = subctx.create_anchor(ir_set, 'a')
 
             unpacked = qlast.FunctionCall(
                 func=('__std__', 'array_unpack'),
-                args=[
-                    qlast.Path(
-                        steps=[qlast.ObjectRef(name=source_alias)],
-                    ),
-                ],
+                args=[source_path],
             )
 
             enumerated = dispatch.compile(
@@ -570,27 +566,14 @@ def _cast_array(
                 ctx=subctx,
             )
 
-            enumerated_alias = subctx.aliases.get('e')
-            subctx.anchors[enumerated_alias] = enumerated
-            enumerated_ref = qlast.Path(
-                steps=[qlast.ObjectRef(name=enumerated_alias)],
-            )
+            enumerated_ref = subctx.create_anchor(enumerated, 'e')
 
             elements = qlast.FunctionCall(
                 func=('__std__', 'array_agg'),
                 args=[
                     qlast.SelectQuery(
                         result=qlast.TypeCast(
-                            expr=qlast.Path(
-                                steps=[
-                                    enumerated_ref,
-                                    qlast.Ptr(
-                                        ptr=qlast.ObjectRef(
-                                            name='1',
-                                        ),
-                                    ),
-                                ],
-                            ),
+                            expr=astutils.extend_path(enumerated_ref, '1'),
                             type=typegen.type_to_ql_typeref(
                                 el_type,
                                 ctx=subctx,
@@ -599,16 +582,7 @@ def _cast_array(
                         ),
                         orderby=[
                             qlast.SortExpr(
-                                path=qlast.Path(
-                                    steps=[
-                                        enumerated_ref,
-                                        qlast.Ptr(
-                                            ptr=qlast.ObjectRef(
-                                                name='0',
-                                            ),
-                                        ),
-                                    ],
-                                ),
+                                path=astutils.extend_path(enumerated_ref, '0'),
                                 direction=qlast.SortOrder.Asc,
                             ),
                         ],
@@ -653,8 +627,15 @@ def _cast_array_literal(
                 context=srcctx) from None
         assert isinstance(new_stype, s_types.Array)
         el_type = new_stype.get_subtypes(ctx.env.schema)[0]
+        intermediate_stype = orig_stype
+
     else:
         el_type = new_stype
+        ctx.env.schema, intermediate_stype = s_types.Array.from_subtypes(
+            ctx.env.schema, [el_type])
+
+    intermediate_typeref = typegen.type_to_typeref(
+        intermediate_stype, env=ctx.env)
 
     casted_els = []
     for el in ir_set.expr.elements:
@@ -664,12 +645,12 @@ def _cast_array_literal(
         casted_els.append(el)
 
     new_array = setgen.ensure_set(
-        irast.Array(elements=casted_els, typeref=orig_typeref),
+        irast.Array(elements=casted_els, typeref=intermediate_typeref),
         ctx=ctx)
 
     if direct_cast is not None:
         return _cast_to_ir(
-            new_array, direct_cast, orig_stype, new_stype, ctx=ctx)
+            new_array, direct_cast, intermediate_stype, new_stype, ctx=ctx)
 
     else:
         cast_ir = irast.TypeCast(

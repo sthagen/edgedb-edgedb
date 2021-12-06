@@ -648,6 +648,13 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
         MANY
         """
 
+    def test_edgeql_ir_card_inference_71b(self):
+        """
+        SELECT ((1, Card {name}),).0
+% OK %
+        MANY
+        """
+
     def test_edgeql_ir_card_inference_72(self):
         """
         SELECT {a := 42}
@@ -857,4 +864,18 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
         SELECT (Card.name ?? "N/A", Card.element ?? "N/A")
 % OK %
         AT_LEAST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_99(self):
+        """
+        SELECT {1, 2} LIMIT 1
+% OK %
+        ONE
+        """
+
+    def test_edgeql_ir_card_inference_100(self):
+        """
+        SELECT assert_exists(User) LIMIT 1
+% OK %
+        ONE
         """

@@ -54,6 +54,20 @@ class TestInsert(tb.QueryTestCase):
                 };
             ''')
 
+    async def test_edgeql_insert_fail_3(self):
+        with self.assertRaisesRegex(
+            edgedb.QueryError,
+            r"modification of computed property"
+            r" 'name' of object type 'default::Person2b' is prohibited",
+        ):
+            await self.con.execute('''
+                INSERT Person2b {
+                    first := "foo",
+                    last := "bar",
+                    name := "something else",
+                };
+            ''')
+
     async def test_edgeql_insert_simple_01(self):
         await self.con.execute(r"""
             INSERT InsertTest {
@@ -856,7 +870,7 @@ class TestInsert(tb.QueryTestCase):
             ''',
             [{
                 'name': 'test',
-                'subject': {'id': {}},
+                'subject': {'id': str},
             }],
         )
 
@@ -1879,7 +1893,7 @@ class TestInsert(tb.QueryTestCase):
             """,
             [{
                 'l2': 99,
-                'subordinates': {},
+                'subordinates': [],
             }],
         )
 
@@ -1915,6 +1929,16 @@ class TestInsert(tb.QueryTestCase):
                 _position=23):
             await self.con.execute("""\
                 INSERT Foo;
+            """)
+
+    async def test_edgeql_insert_free_obj(self):
+        with self.assertRaisesRegex(
+            edgedb.QueryError,
+            r"free objects cannot be inserted",
+            _position=23,
+        ):
+            await self.con.execute("""\
+                INSERT std::FreeObject;
             """)
 
     async def test_edgeql_insert_selfref_01(self):
@@ -3886,7 +3910,7 @@ class TestInsert(tb.QueryTestCase):
                 }
                 UNLESS CONFLICT ON .name ELSE (SELECT Obj);
             ''',
-            [{"id": {}}]
+            [{"id": str}]
         )
 
         await self.assert_query_result(
@@ -4804,7 +4828,6 @@ class TestInsert(tb.QueryTestCase):
             INSERT Person { name := "asdf", multi_prop := "a" };
         ''')
 
-    @test.xfail("Returns an empty set??")
     async def test_edgeql_insert_enumerate_01(self):
         await self.assert_query_result(
             r"""
@@ -4817,4 +4840,38 @@ class TestInsert(tb.QueryTestCase):
             [
                 [0, {}, {}],
             ]
+        )
+
+    async def test_edgeql_insert_nested_and_with_01(self):
+        await self.assert_query_result(
+            r"""
+                WITH
+                    New := (
+                        INSERT Person {
+                            name := "test",
+                            notes := (INSERT Note { name := "test" })
+                         }
+                    ),
+                SELECT (
+                    INSERT Person2a {
+                        first := New.name, last := "!", bff := New,
+                    }
+                ) {
+                    first,
+                    bff: {
+                        name,
+                        notes: { name }
+                    }
+                };
+            """,
+            [
+                {
+                    "first": "test",
+                    "bff": {
+                        "name": "test",
+                        "notes": [{"name": "test"}]
+                    },
+                }
+            ]
+
         )

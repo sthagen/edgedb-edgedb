@@ -204,13 +204,6 @@ def get_set_rvar(
                 subctx.path_scope[path_id] = scope_stmt
             relctx.update_scope(ir_set, stmt, ctx=subctx)
 
-        # If the set is a binding, we need to treat it as exposed
-        # because we don't know at this point whether it will be
-        # reused in an exposed context.
-        # (We could avoid this with some more analysis, probably.)
-        if ir_set.is_binding:
-            subctx.expr_exposed = None
-
         rvars = _get_set_rvar(ir_set, ctx=subctx)
 
         if optional_wrapping:
@@ -403,6 +396,9 @@ def _get_set_rvar(
         elif isinstance(expr, irast.ConstantSet):
             # {<const>[, <const> ...]}
             rvars = process_set_as_const_set(ir_set, stmt, ctx=ctx)
+
+        elif isinstance(expr, irast.OperatorCall):
+            rvars = process_set_as_oper_expr(ir_set, stmt, ctx=ctx)
 
         else:
             # All other expressions.
@@ -788,6 +784,7 @@ def process_set_as_path_type_intersection(
     if (not source_is_visible
             and ir_source.rptr is not None
             and not ir_source.path_id.is_type_intersection_path()
+            and not ir_source.rptr.ptrref.is_computable
             and (
                 ptrref.is_subtype
                 or pg_types.get_ptrref_storage_info(
@@ -1125,7 +1122,12 @@ def process_set_as_subquery(
             source_is_visible = outer_fence.is_visible(ir_source.path_id)
 
         if source_is_visible:
-            get_set_rvar(ir_set.rptr.source, ctx=ctx)
+            get_set_rvar(ir_source, ctx=ctx)
+            # Force a source rvar so that trivial computed pointers
+            # on erroneous objects (like a bad array deref) fail.
+            # (Most sensible computables will end up requiring the
+            # source rvar anyway.)
+            ensure_source_rvar(ir_source, ctx.rel, ctx=ctx)
     else:
         ir_source = None
         source_is_visible = False
@@ -1165,6 +1167,8 @@ def process_set_as_subquery(
                 with newctx.subrel() as _, _.newscope() as subctx:
                     get_set_rvar(ir_source, ctx=subctx)
                     subrvar = relctx.rvar_for_rel(subctx.rel, ctx=subctx)
+                    # Force a source rvar. See above.
+                    ensure_source_rvar(ir_source, subctx.rel, ctx=subctx)
 
                 relctx.include_rvar(
                     stmt, subrvar, ir_source.path_id, ctx=ctx)
@@ -1426,6 +1430,7 @@ def process_set_as_ifelse(
 
     else:
         with ctx.subrel() as _, _.newscope() as subctx:
+            subctx.expr_exposed = False
             larg = subctx.rel
             pathctx.put_path_id_map(larg, ir_set.path_id, if_expr.path_id)
             dispatch.visit(if_expr, ctx=subctx)
@@ -1436,6 +1441,7 @@ def process_set_as_ifelse(
             )
 
         with ctx.subrel() as _, _.newscope() as subctx:
+            subctx.expr_exposed = False
             rarg = subctx.rel
             pathctx.put_path_id_map(rarg, ir_set.path_id, else_expr.path_id)
             dispatch.visit(else_expr, ctx=subctx)
@@ -1680,10 +1686,26 @@ def process_set_as_tuple(
         for element in expr.elements:
             assert element.path_id
             path_id = element.path_id
-            if path_id != element.val.path_id:
-                pathctx.put_path_id_map(stmt, path_id, element.val.path_id)
 
-            tvar = dispatch.compile(element.val, ctx=subctx)
+            # We compile in a subrel *solely* so that we can map
+            # each element individually. It would be nice to have
+            # a way to do this that doesn't actually affect the output!
+            with ctx.subrel() as newctx:
+                if path_id != element.val.path_id:
+                    pathctx.put_path_id_map(
+                        newctx.rel, path_id, element.val.path_id)
+                dispatch.visit(element.val, ctx=newctx)
+
+            el_rvar = relctx.new_rel_rvar(ir_set, newctx.rel, ctx=ctx)
+            aspects = pathctx.list_path_aspects(
+                newctx.rel, element.val.path_id, env=ctx.env)
+            # update_mask=False because we are doing this solely to remap
+            # elements individually and don't want to affect the mask.
+            relctx.include_rvar(
+                stmt, el_rvar, path_id,
+                update_mask=False, aspects=aspects, ctx=ctx)
+            tvar = pathctx.get_path_value_var(stmt, path_id, env=subctx.env)
+
             elements.append(pgast.TupleElementBase(path_id=path_id))
 
             # We need to filter out NULLs at tuple creation time, to
@@ -1718,7 +1740,10 @@ def process_set_as_tuple(
     # wrong one to be output. (See test_edgeql_scope_shape_03 for an example
     # where this can come up.)
     # (We only do it for objects as an optimization.)
-    if any(irtyputils.is_object(x) for x in ir_set.typeref.subtypes):
+    if (
+        output.in_serialization_ctx(ctx)
+        and any(irtyputils.is_object(x) for x in ir_set.typeref.subtypes)
+    ):
         pathctx.get_path_serialized_output(stmt, ir_set.path_id, env=ctx.env)
 
     return new_stmt_set_rvar(
@@ -1733,7 +1758,17 @@ def process_set_as_tuple_indirection(
     tuple_set = rptr.source
 
     with ctx.new() as subctx:
-        subctx.expr_exposed = False
+        # Usually the LHS is is not exposed, but when we are directly
+        # projecting from an explicit tuple, and the result is a
+        # collection, keep it exposed. This behavior is needed for our
+        # eta-expansion of arrays to work, since it generates that
+        # idiom in a place where it needs the output to be exposed.
+        if not (
+            not tuple_set.is_binding
+            and isinstance(tuple_set.expr, irast.Tuple)
+            and ir_set.path_id.is_collection_path()
+        ):
+            subctx.expr_exposed = False
         rvar = get_set_rvar(tuple_set, ctx=subctx)
 
         # Check if unpack_rvar has found our answer for us.
@@ -1801,7 +1836,7 @@ def process_set_as_type_cast(
             if serialized is not None:
                 if irtyputils.is_collection(inner_set.typeref):
                     serialized = output.serialize_expr_to_json(
-                        serialized, path_id=inner_set.path_id,
+                        serialized, styperef=inner_set.path_id.target,
                         env=subctx.env)
 
                 pathctx.put_path_value_var(
@@ -1866,6 +1901,24 @@ def process_set_as_const_set(
 
     vals_rvar = relctx.new_rel_rvar(ir_set, vals_rel, ctx=ctx)
     relctx.include_rvar(stmt, vals_rvar, ir_set.path_id, ctx=ctx)
+
+    return new_stmt_set_rvar(ir_set, stmt, ctx=ctx)
+
+
+def process_set_as_oper_expr(
+        ir_set: irast.Set, stmt: pgast.SelectStmt, *,
+        ctx: context.CompilerContextLevel) -> SetRVars:
+    expr = ir_set.expr
+    assert isinstance(expr, irast.OperatorCall)
+
+    # XXX: do we need a subrel?
+    with ctx.new() as newctx:
+        newctx.expr_exposed = False
+        args = _compile_call_args(ir_set, ctx=newctx)
+        oper_expr = exprcomp.compile_operator(expr, args, ctx=newctx)
+
+    pathctx.put_path_value_var_if_not_exists(
+        stmt, ir_set.path_id, oper_expr, env=ctx.env)
 
     return new_stmt_set_rvar(ir_set, stmt, ctx=ctx)
 
@@ -2002,6 +2055,7 @@ def process_set_as_existence_assertion(
     with ctx.subrel() as newctx:
         # The solution to assert_exists() is as simple as
         # calling raise_on_null().
+        newctx.expr_exposed = False
         newctx.force_optional.add(ir_arg_set.path_id)
         pathctx.put_path_id_map(newctx.rel, ir_set.path_id, ir_arg_set.path_id)
         arg_ref = dispatch.compile(ir_arg_set, ctx=newctx)
@@ -2257,6 +2311,8 @@ def process_set_as_enumerate(
 
     aspects = pathctx.list_path_aspects(
         newctx.rel, ir_arg.path_id, env=ctx.env)
+
+    pathctx.put_path_id_map(newctx.rel, expr.tuple_path_ids[1], ir_arg.path_id)
 
     func_rvar = relctx.new_rel_rvar(ir_set, newctx.rel, ctx=ctx)
     relctx.include_rvar(stmt, func_rvar, ir_set.path_id,
@@ -2573,20 +2629,34 @@ def _compile_func_epilogue(
     return new_stmt_set_rvar(ir_set, stmt, aspects=aspects, ctx=ctx)
 
 
-def _compile_func_args(
+def _compile_call_args(
         ir_set: irast.Set, *,
         ctx: context.CompilerContextLevel
 ) -> List[pgast.BaseExpr]:
     expr = ir_set.expr
-    assert isinstance(expr, irast.FunctionCall)
+    assert isinstance(expr, irast.Call)
 
     args = []
 
-    for ir_arg in expr.args:
+    for ir_arg, typemod in zip(expr.args, expr.params_typemods):
         arg_ref = dispatch.compile(ir_arg.expr, ctx=ctx)
         args.append(output.output_as_value(arg_ref, env=ctx.env))
+        if (
+            not expr.impl_is_strict
+            and ir_arg.cardinality.can_be_zero()
+            and not ir_arg.is_default
+            and arg_ref.nullable
+            and typemod == qltypes.TypeModifier.SingletonType
+        ):
+            ctx.rel.where_clause = astutils.extend_binop(
+                ctx.rel.where_clause,
+                pgast.NullTest(arg=arg_ref, negated=True)
+            )
 
-        if ir_arg.expr_type_path_id is not None:
+        if (
+            isinstance(expr, irast.FunctionCall)
+            and ir_arg.expr_type_path_id is not None
+        ):
             # Object type arguments are represented by two
             # SQL arguments: object id and object type id.
             # The latter is needed for proper overload
@@ -2600,7 +2670,11 @@ def _compile_func_args(
             )
             args.append(type_ref)
 
-    if expr.has_empty_variadic and expr.variadic_param_type is not None:
+    if (
+        isinstance(expr, irast.FunctionCall)
+        and expr.has_empty_variadic
+        and expr.variadic_param_type is not None
+    ):
         var = pgast.TypeCast(
             arg=pgast.ArrayExpr(elements=[]),
             type_name=pgast.TypeName(
@@ -2640,7 +2714,7 @@ def process_set_as_func_enumerate(
     with ctx.subrel() as newctx:
         with newctx.new() as newctx2:
             newctx2.expr_exposed = False
-            args = _compile_func_args(inner_func_set, ctx=newctx2)
+            args = _compile_call_args(inner_func_set, ctx=newctx2)
         func_name = get_func_call_backend_name(inner_func, ctx=newctx)
 
         set_expr = _process_set_func_with_ordinality(
@@ -2664,7 +2738,7 @@ def process_set_as_func_expr(
 
     with ctx.subrel() as newctx:
         newctx.expr_exposed = False
-        args = _compile_func_args(ir_set, ctx=newctx)
+        args = _compile_call_args(ir_set, ctx=newctx)
         name = get_func_call_backend_name(expr, ctx=newctx)
 
         if expr.typemod is qltypes.TypeModifier.SetOfType:

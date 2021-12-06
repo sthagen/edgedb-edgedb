@@ -35,7 +35,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
     SETUP = os.path.join(os.path.dirname(__file__), 'schemas',
                          'cards_setup.edgeql')
 
-    async def test_edgeql_scope_sort_01(self):
+    async def test_edgeql_scope_sort_01a(self):
         await self.assert_query_result(
             r'''
                 WITH
@@ -50,6 +50,51 @@ class TestEdgeQLScope(tb.QueryTestCase):
                 [{'name': 'Alice'}, 1],
                 [{'name': 'Bob'}, 2],
                 [{'name': 'Alice'}, 2],
+            ]
+        )
+
+    async def test_edgeql_scope_sort_01b(self):
+        # Make sure it works when we need to eta-expand it also
+        await self.assert_query_result(
+            r'''
+            SELECT assert_exists((
+                WITH
+                    A := {1, 2},
+                    U := (SELECT User FILTER User.name IN {'Alice', 'Bob'})
+                SELECT _ := (U{name}, A)
+                # specifically test the ORDER clause
+                ORDER BY _.1 THEN _.0.name DESC
+            ));
+            ''',
+            [
+                [{'name': 'Bob'}, 1],
+                [{'name': 'Alice'}, 1],
+                [{'name': 'Bob'}, 2],
+                [{'name': 'Alice'}, 2],
+            ]
+        )
+
+    async def test_edgeql_scope_sort_01c(self):
+        # Make sure it works when we need to eta-expand it after
+        # array_agg()ing it
+        await self.assert_query_result(
+            r'''
+            SELECT assert_exists(array_agg((
+                WITH
+                    A := {1, 2},
+                    U := (SELECT User FILTER User.name IN {'Alice', 'Bob'})
+                SELECT _ := (U{name}, A)
+                # specifically test the ORDER clause
+                ORDER BY _.1 THEN _.0.name DESC
+            )));
+            ''',
+            [
+                [
+                    [{'name': 'Bob'}, 1],
+                    [{'name': 'Alice'}, 1],
+                    [{'name': 'Bob'}, 2],
+                    [{'name': 'Alice'}, 2],
+                ]
             ]
         )
 
@@ -386,7 +431,64 @@ class TestEdgeQLScope(tb.QueryTestCase):
         await self.assert_query_result(query, res)
         await self.assert_query_result(query, res, implicit_limit=100)
 
-    async def test_edgeql_scope_tuple_05(self):
+    @test.xfail("Eta-expansion breaks somehow with link properties")
+    async def test_edgeql_scope_tuple_04f(self):
+        # Similar to above tests, but forcing use of eta-expansion
+        query = r'''
+            SELECT _ := [(
+                User.friends {name},
+                User {
+                    name,
+                    friends: {
+                        @nickname
+                    }
+                },
+            )][0]
+            ORDER BY _.1.name THEN _.0.name;
+        '''
+        res = [
+            [
+                {
+                    'name': 'Bob',
+                },
+                {
+                    'name': 'Alice',
+                    'friends': [{'@nickname': 'Swampy'}],
+                },
+            ],
+            [
+                {
+                    'name': 'Carol',
+                },
+                {
+                    'name': 'Alice',
+                    'friends': [{'@nickname': 'Firefighter'}],
+                },
+            ],
+            [
+                {
+                    'name': 'Dave',
+                },
+                {
+                    'name': 'Alice',
+                    'friends': [{'@nickname': 'Grumpy'}],
+                },
+            ],
+            [
+                {
+                    'name': 'Bob',
+                },
+                {
+                    'name': 'Dave',
+                    'friends': [{'@nickname': None}],
+                },
+            ],
+        ]
+
+        await self.assert_query_result(query, res)
+        await self.assert_query_result(query, res, implicit_limit=100)
+
+    async def test_edgeql_scope_tuple_05a(self):
         await self.assert_query_result(
             r'''
                 # Same as above, but with a computable instead of real
@@ -400,6 +502,64 @@ class TestEdgeQLScope(tb.QueryTestCase):
                     },
                     User.friends {name}
                 )
+                ORDER BY _.0.name THEN _.1.name;
+            ''',
+            [
+                [
+                    {
+                        'name': 'Alice',
+                        'fr': {'@nickname': 'Swampy'},
+                    },
+                    {
+                        'name': 'Bob',
+                    },
+                ],
+                [
+                    {
+                        'name': 'Alice',
+                        'fr': {'@nickname': 'Firefighter'},
+                    },
+                    {
+                        'name': 'Carol',
+                    },
+                ],
+                [
+                    {
+                        'name': 'Alice',
+                        'fr': {'@nickname': 'Grumpy'},
+                    },
+                    {
+                        'name': 'Dave',
+                    },
+                ],
+                [
+                    {
+                        'name': 'Dave',
+                        'fr': {'@nickname': None},
+                    },
+                    {
+                        'name': 'Bob',
+                    },
+                ],
+            ]
+        )
+
+    @test.xfail("Eta-expansion breaks somehow with link properties")
+    async def test_edgeql_scope_tuple_05b(self):
+        # Similar to above tests, but forcing use of eta-expansion
+        await self.assert_query_result(
+            r'''
+                # Same as above, but with a computable instead of real
+                # "friends"
+                SELECT _ := [(
+                    User {
+                        name,
+                        fr := User.friends {
+                            @nickname
+                        }
+                    },
+                    User.friends {name}
+                )][0]
                 ORDER BY _.0.name THEN _.1.name;
             ''',
             [
@@ -2494,7 +2654,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
                 SELECT (U.cards.a.name, U.cards.a.id, U.cards) LIMIT 1;
             """,
             [
-                [{}, {}, {"id": {}}],
+                [str, str, {"id": str}],
             ],
         )
 
@@ -2687,6 +2847,18 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ],
         )
 
+    async def test_edgeql_scope_link_narrow_computable_01(self):
+        await self.assert_query_result(
+            """
+                SELECT Card {
+                    owners[IS Bot]: {name}
+                } FILTER .name = 'Sprite'
+            """,
+            [
+                {"owners": [{"name": "Dave"}]},
+            ],
+        )
+
     async def test_edgeql_scope_branch_01(self):
         await self.assert_query_result(
             """
@@ -2790,6 +2962,56 @@ class TestEdgeQLScope(tb.QueryTestCase):
                     ]
                 }
             ],
+        )
+
+    async def test_edgeql_scope_3x_nested_materialized_01(self):
+        # Having a doubly nested thing needing materialization
+        # caused trouble previously.
+        await self.assert_query_result(
+            """
+                SELECT User {
+                    name,
+                    avatar: {
+                        name,
+                        awards: {
+                            name,
+                            nonce := random(),
+                        },
+                    }
+                }
+                FILTER EXISTS User.avatar.awards AND User.name = 'Alice';
+            """,
+            [
+                {
+                    "avatar": {"awards": [{"name": "1st"}], "name": "Dragon"},
+                    "name": "Alice"
+                }
+            ]
+        )
+
+    async def test_edgeql_scope_3x_nested_materialized_02(self):
+        # Having a doubly nested thing needing materialization
+        # caused trouble previously.
+        await self.assert_query_result(
+            """
+                SELECT User {
+                    name,
+                    avatar: {
+                        name,
+                        awd := (SELECT .awards {
+                            name,
+                            nonce := random(),
+                        } FILTER .name = '1st'),
+                    }
+                }
+                FILTER EXISTS User.avatar.awd AND User.name = 'Alice';
+            """,
+            [
+                {
+                    "avatar": {"awd": {"name": "1st"}, "name": "Dragon"},
+                    "name": "Alice"
+                }
+            ]
         )
 
     async def test_edgeql_scope_source_rebind_01(self):
@@ -3119,5 +3341,42 @@ class TestEdgeQLScope(tb.QueryTestCase):
                 [{"z": {"name": "Dave"}}, "Dave"],
                 [{"z": None}, "n/a"],
                 [{"z": None}, "n/a"]
+            ]
+        )
+
+    async def test_edgeql_scope_tuple_correlate_03(self):
+        await self.assert_query_result(
+            """
+                WITH X := (User, User.friends)
+                SELECT count(X.0.friends.name ++ X.1.name);
+            """,
+            [10]
+        )
+
+    async def test_edgeql_scope_tuple_correlate_04(self):
+        # The friends in the first element of the tuple should correlate
+        # with User.friends on the right, which means that when it is
+        # accessed, it should only have the one element.
+        await self.assert_query_result(
+            """
+                WITH X := (User { friends }, User.friends)
+                SELECT count(X.0.friends.name ++ X.1.name);
+            """,
+            [4]
+        )
+
+    async def test_edgeql_scope_tuple_correlate_05(self):
+        await self.assert_query_result(
+            """
+                WITH X := (User {friends}, User.friends.name ?? 'n/a')
+                SELECT _ := (X.0 {friends: {name}}, X.1) ORDER BY _.1;
+            """,
+            [
+                [{"friends": [{"name": "Bob"}]}, "Bob"],
+                [{"friends": [{"name": "Bob"}]}, "Bob"],
+                [{"friends": [{"name": "Carol"}]}, "Carol"],
+                [{"friends": [{"name": "Dave"}]}, "Dave"],
+                [{"friends": []}, "n/a"],
+                [{"friends": []}, "n/a"],
             ]
         )

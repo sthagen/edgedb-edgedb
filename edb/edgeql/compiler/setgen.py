@@ -95,7 +95,7 @@ def new_set(
             qry.where = astutils.extend_binop(qry.where, f.qlast)
 
         with ctx.detached() as subctx:
-            subctx.expr_exposed = False
+            subctx.expr_exposed = context.Exposure.UNEXPOSED
             subctx.path_scope = subctx.env.path_scope.root
             # Put a placeholder to prevent recursion.
             subctx.type_rewrites[stype] = irast.Set()  # type: ignore
@@ -289,16 +289,12 @@ def compile_path(expr: qlast.Path, *, ctx: context.ContextLevel) -> irast.Set:
                 view_set = ctx.view_sets.get(stype)
                 if view_set is not None:
                     view_scope_info = ctx.path_scope_map[view_set]
-                    is_binding = (
-                        irast.BindingKind.For if view_scope_info.is_for_view
-                        else irast.BindingKind.With
-                    )
                     path_tip = new_set_from_set(
                         view_set,
                         preserve_scope_ns=(
                             view_scope_info.pinned_path_id_ns is not None
                         ),
-                        is_binding=is_binding,
+                        is_binding=view_scope_info.binding_kind,
                         ctx=ctx,
                     )
 
@@ -1346,7 +1342,7 @@ def computable_ptr_set(
         # a similar check on is_mutation in _normalize_view_ptr_expr.
         if (source_scls.get_expr_type(ctx.env.schema)
                 != s_types.ExprType.Select):
-            subctx.expr_exposed = True
+            subctx.expr_exposed = context.Exposure.EXPOSED
 
         comp_ir_set = dispatch.compile(qlexpr, ctx=subctx)
 
@@ -1430,7 +1426,6 @@ def _get_computable_ctx(
             if source_scls.is_view(ctx.env.schema):
                 scls_name = source_stype.get_name(ctx.env.schema)
                 subctx.aliased_views[scls_name] = None
-            subctx.source_map = qlctx.source_map.copy()
             subctx.view_nodes = qlctx.view_nodes.copy()
             subctx.view_map = ctx.view_map.new_child()
 

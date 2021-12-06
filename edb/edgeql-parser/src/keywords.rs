@@ -44,7 +44,6 @@ pub const UNRESERVED_KEYWORDS: &[&str] = &[
     "named",
     "object",
     "of",
-    "on",
     "only",
     "onto",
     "operator",
@@ -114,6 +113,7 @@ pub const FUTURE_RESERVED_KEYWORDS: &[&str] = &[
     "match",
     "move",
     "notify",
+    "on",
     "over",
     "prepare",
     "partition",
@@ -125,6 +125,7 @@ pub const FUTURE_RESERVED_KEYWORDS: &[&str] = &[
     "single",
     "when",
     "window",
+    "never",
     // Keep in sync with `tokenizer::is_keyword`
 ];
 

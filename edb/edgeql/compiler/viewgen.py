@@ -44,6 +44,7 @@ from edb.edgeql import qltypes
 from . import astutils
 from . import context
 from . import dispatch
+from . import eta_expand
 from . import inference
 from . import pathctx
 from . import schemactx
@@ -445,7 +446,7 @@ def _compile_qlexpr(
         shape_expr_ctx.partial_path_prefix = source_set
 
         if is_mutation and ptrcls is not None:
-            shape_expr_ctx.expr_exposed = True
+            shape_expr_ctx.expr_exposed = context.Exposure.EXPOSED
             shape_expr_ctx.empty_result_type_hint = \
                 ptrcls.get_target(ctx.env.schema)
 
@@ -454,6 +455,9 @@ def _compile_qlexpr(
             source_set.path_id, source_set, ctx=shape_expr_ctx)
 
         irexpr = dispatch.compile(qlexpr, ctx=shape_expr_ctx)
+
+    if ctx.expr_exposed:
+        irexpr = eta_expand.eta_expand_ir(irexpr, ctx=ctx)
 
     return irexpr, shape_expr_ctx.view_rptr
 
@@ -641,6 +645,10 @@ def _normalize_view_ptr_expr(
 
         ptr_required = base_required
         ptr_cardinality = base_cardinality
+        if shape_el.where:
+            # If the shape has a filter on it, we need to force a reinference
+            # of the cardinality, to produce an error if needed.
+            ptr_cardinality = None
         if ptr_cardinality is None or not ptr_cardinality.is_known():
             # We do not know the parent's pointer cardinality yet.
             ctx.env.pointer_derivation_map[base_ptrcls].append(ptrcls)
@@ -676,6 +684,12 @@ def _normalize_view_ptr_expr(
             # If this is a mutation, the pointer must exist.
             ptrcls = setgen.resolve_ptr(
                 ptrsource, ptrname, track_ref=lexpr, ctx=ctx)
+            if ptrcls.is_pure_computable(ctx.env.schema):
+                ptr_vn = ptrcls.get_verbosename(ctx.env.schema,
+                                                with_parent=True)
+                raise errors.QueryError(
+                    f'modification of computed {ptr_vn} is prohibited',
+                    context=shape_el.context)
 
             base_ptrcls = ptrcls.get_bases(
                 ctx.env.schema).first(ctx.env.schema)
@@ -788,17 +802,15 @@ def _normalize_view_ptr_expr(
                         expr=compexpr,
                     ))
                     ptr_target = base_target
-
                     # We also need to compile the cast to IR.
-                    source_alias = ctx.aliases.get('a')
-                    cast_qlexpr = astutils.ensure_qlstmt(qlast.TypeCast(
-                        type=typegen.type_to_ql_typeref(base_target, ctx=ctx),
-                        expr=qlast.Path(
-                            steps=[qlast.ObjectRef(name=source_alias)]),
-                    ))
                     with ctx.new() as subctx:
                         subctx.anchors = subctx.anchors.copy()
-                        subctx.anchors[source_alias] = irexpr
+                        source_path = subctx.create_anchor(irexpr, 'a')
+                        cast_qlexpr = astutils.ensure_qlstmt(qlast.TypeCast(
+                            type=typegen.type_to_ql_typeref(
+                                base_target, ctx=ctx),
+                            expr=source_path,
+                        ))
 
                         old_rptr = irexpr.rptr
                         irexpr.rptr = None
@@ -1199,6 +1211,10 @@ def _inline_type_computable(
     ctx: context.ContextLevel,
 ) -> None:
     assert isinstance(stype, s_objtypes.ObjectType)
+    # Injecting into non-view objects /almost/ works, but it fails if the
+    # object is in the std library, and is dodgy always.
+    # Prevent it in general to find bugs faster.
+    assert stype.is_view(ctx.env.schema)
 
     ptr: Optional[s_pointers.Pointer]
     try:
