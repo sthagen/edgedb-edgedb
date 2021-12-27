@@ -851,6 +851,7 @@ pub fn is_keyword(s: &str) -> bool {
         | "and"
         | "anytuple"
         | "anytype"
+        | "by"
         | "commit"
         | "configure"
         | "create"

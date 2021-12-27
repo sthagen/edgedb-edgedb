@@ -330,22 +330,40 @@ class CreateGlobalSchemaVersion(
         ver_id = str(self.scls.id)
         ver_name = str(self.scls.get_name(schema))
         tenant_id = self._get_tenant_id(context)
-        self.pgops.add(
-            dbops.UpdateMetadataSection(
-                dbops.Database(name=common.get_database_backend_name(
-                    edbdef.EDGEDB_TEMPLATE_DB, tenant_id=tenant_id)),
-                section='GlobalSchemaVersion',
-                metadata={
-                    ver_id: {
-                        'id': ver_id,
-                        'name': ver_name,
-                        'version': str(self.scls.get_version(schema)),
-                        'builtin': self.scls.get_builtin(schema),
-                        'internal': self.scls.get_internal(schema),
-                    }
-                }
+
+        ctx_backend_params = context.backend_runtime_params
+        if ctx_backend_params is not None:
+            backend_params = cast(
+                params.BackendRuntimeParams, ctx_backend_params)
+        else:
+            backend_params = params.get_default_runtime_params()
+
+        metadata = {
+            ver_id: {
+                'id': ver_id,
+                'name': ver_name,
+                'version': str(self.scls.get_version(schema)),
+                'builtin': self.scls.get_builtin(schema),
+                'internal': self.scls.get_internal(schema),
+            }
+        }
+        if backend_params.has_create_database:
+            self.pgops.add(
+                dbops.UpdateMetadataSection(
+                    dbops.Database(name=common.get_database_backend_name(
+                        edbdef.EDGEDB_TEMPLATE_DB, tenant_id=tenant_id)),
+                    section='GlobalSchemaVersion',
+                    metadata=metadata
+                )
             )
-        )
+        else:
+            self.pgops.add(
+                dbops.UpdateSingleDBMetadataSection(
+                    edbdef.EDGEDB_TEMPLATE_DB,
+                    section='GlobalSchemaVersion',
+                    metadata=metadata
+                )
+            )
 
         return schema
 
@@ -371,14 +389,24 @@ class AlterGlobalSchemaVersion(
         else:
             backend_params = params.get_default_runtime_params()
 
-        instance_params = backend_params.instance_params
-        capabilities = instance_params.capabilities
-        tenant_id = instance_params.tenant_id
-
         tpl_db_name = common.get_database_backend_name(
-            edbdef.EDGEDB_TEMPLATE_DB, tenant_id=tenant_id)
+            edbdef.EDGEDB_TEMPLATE_DB, tenant_id=backend_params.tenant_id)
 
-        if capabilities & params.BackendCapabilities.SUPERUSER_ACCESS:
+        if not backend_params.has_create_database:
+            key = f'{edbdef.EDGEDB_TEMPLATE_DB}metadata'
+            lock = dbops.Query(
+                f'''
+                SELECT
+                    json
+                FROM
+                    edgedbinstdata.instdata
+                WHERE
+                    key = {ql(key)}
+                FOR UPDATE
+                INTO _dummy_text
+            '''
+            )
+        elif backend_params.has_superuser_access:
             # Only superusers are generally allowed to make an UPDATE
             # lock on shared catalogs.
             lock = dbops.Query(
@@ -457,21 +485,31 @@ class AlterGlobalSchemaVersion(
         )
         self.pgops.add(check)
 
-        self.pgops.add(
-            dbops.UpdateMetadataSection(
-                dbops.Database(name=tpl_db_name),
-                section='GlobalSchemaVersion',
-                metadata={
-                    ver_id: {
-                        'id': ver_id,
-                        'name': ver_name,
-                        'version': str(self.scls.get_version(schema)),
-                        'builtin': self.scls.get_builtin(schema),
-                        'internal': self.scls.get_internal(schema),
-                    }
-                }
+        metadata = {
+            ver_id: {
+                'id': ver_id,
+                'name': ver_name,
+                'version': str(self.scls.get_version(schema)),
+                'builtin': self.scls.get_builtin(schema),
+                'internal': self.scls.get_internal(schema),
+            }
+        }
+        if backend_params.has_create_database:
+            self.pgops.add(
+                dbops.UpdateMetadataSection(
+                    dbops.Database(name=tpl_db_name),
+                    section='GlobalSchemaVersion',
+                    metadata=metadata
+                )
             )
-        )
+        else:
+            self.pgops.add(
+                dbops.UpdateSingleDBMetadataSection(
+                    edbdef.EDGEDB_TEMPLATE_DB,
+                    section='GlobalSchemaVersion',
+                    metadata=metadata
+                )
+            )
 
         return schema
 
@@ -2099,7 +2137,7 @@ class AlterScalarType(ScalarTypeMetaCommand, adapts=s_scalars.AlterScalarType):
         for prop, new_typ in props:
             try:
                 cmd.add(new_typ.as_create_delta(schema))
-            except NotImplementedError:
+            except errors.UnsupportedFeatureError:
                 pass
 
             delta_alter, cmd_alter, alter_context = prop.init_delta_branch(
@@ -2562,7 +2600,9 @@ class CompositeMetaCommand(MetaCommand):
                 self.alter_inhview(schema, context, new_base)
 
         for old_base in orig_bases - bases:
-            if has_table(old_base, schema):
+            if has_table(old_base, schema) and not context.is_deleting(
+                old_base
+            ):
                 self.alter_inhview(
                     schema, context, old_base,
                     exclude_children=frozenset((obj,)))
@@ -2576,7 +2616,7 @@ class CompositeMetaCommand(MetaCommand):
         exclude_children: FrozenSet[s_sources.Source] = frozenset(),
     ) -> None:
         for base in obj.get_ancestors(schema).objects(schema):
-            if has_table(base, schema):
+            if has_table(base, schema) and not context.is_deleting(base):
                 self.alter_inhview(
                     schema,
                     context,
@@ -5096,10 +5136,12 @@ class UpdateEndpointDeleteActions(MetaCommand):
                 if target_is_affected and current_target is not None:
                     affected_targets.add(current_target)
             else:
-                if source.is_view(schema):
+                if source.is_view(eff_schema):
                     continue
 
-                affected_sources.add(source)
+                current_source = schema.get_by_id(source.id, None)
+                if current_source:
+                    affected_sources.add(current_source)
 
                 if target_is_affected:
                     affected_targets.add(target)
@@ -5313,12 +5355,33 @@ class DeleteModule(ModuleMetaCommand, adapts=s_mod.DeleteModule):
     pass
 
 
-class CreateDatabase(MetaCommand, adapts=s_db.CreateDatabase):
+class DatabaseMixin:
+    def ensure_has_create_database(self, backend_params):
+        if not backend_params.has_create_database:
+            self.pgops.add(
+                dbops.Query(
+                    f'''
+                    SELECT
+                        edgedb.raise(
+                            NULL::uuid,
+                            msg => 'operation is not supported by the backend',
+                            exc => 'feature_not_supported'
+                        )
+                    INTO _dummy_text
+                    '''
+                )
+            )
+
+
+class CreateDatabase(MetaCommand, DatabaseMixin, adapts=s_db.CreateDatabase):
     def apply(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
+        backend_params = self._get_backend_params(context)
+        self.ensure_has_create_database(backend_params)
+
         schema = super().apply(schema, context)
         db = self.scls
         tenant_id = self._get_tenant_id(context)
@@ -5343,12 +5406,15 @@ class CreateDatabase(MetaCommand, adapts=s_db.CreateDatabase):
         return schema
 
 
-class DropDatabase(MetaCommand, adapts=s_db.DropDatabase):
+class DropDatabase(MetaCommand, DatabaseMixin, adapts=s_db.DropDatabase):
     def apply(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
+        backend_params = self._get_backend_params(context)
+        self.ensure_has_create_database(backend_params)
+
         schema = super().apply(schema, context)
         tenant_id = self._get_tenant_id(context)
         db_name = common.get_database_backend_name(
@@ -5357,12 +5423,33 @@ class DropDatabase(MetaCommand, adapts=s_db.DropDatabase):
         return schema
 
 
-class CreateRole(MetaCommand, adapts=s_roles.CreateRole):
+class RoleMixin:
+    def ensure_has_create_role(self, backend_params):
+        if not backend_params.has_create_role:
+            self.pgops.add(
+                dbops.Query(
+                    f'''
+                    SELECT
+                        edgedb.raise(
+                            NULL::uuid,
+                            msg => 'operation is not supported by the backend',
+                            exc => 'feature_not_supported'
+                        )
+                    INTO _dummy_text
+                    '''
+                )
+            )
+
+
+class CreateRole(MetaCommand, RoleMixin, adapts=s_roles.CreateRole):
     def apply(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
+        backend_params = self._get_backend_params(context)
+        self.ensure_has_create_role(backend_params)
+
         schema = super().apply(schema, context)
         role = self.scls
 
@@ -5374,20 +5461,16 @@ class CreateRole(MetaCommand, adapts=s_roles.CreateRole):
 
         role_name = str(role.get_name(schema))
 
-        backend_params = self._get_backend_params(context)
-        capabilities = backend_params.instance_params.capabilities
-        tenant_id = backend_params.instance_params.tenant_id
+        instance_params = backend_params.instance_params
+        tenant_id = instance_params.tenant_id
 
         if role.get_superuser(schema):
             membership.append(edbdef.EDGEDB_SUPERGROUP)
 
             # If the cluster is not exposing an explicit superuser role,
             # we will make the created Postgres role superuser if we can
-            if not backend_params.instance_params.base_superuser:
-                superuser_flag = (
-                    capabilities
-                    & params.BackendCapabilities.SUPERUSER_ACCESS
-                )
+            if not instance_params.base_superuser:
+                superuser_flag = backend_params.has_superuser_access
 
         if backend_params.session_authorization_role is not None:
             # When we connect to the backend via a proxy role, we
@@ -5416,7 +5499,7 @@ class CreateRole(MetaCommand, adapts=s_roles.CreateRole):
         return schema
 
 
-class AlterRole(MetaCommand, adapts=s_roles.AlterRole):
+class AlterRole(MetaCommand, RoleMixin, adapts=s_roles.AlterRole):
     def apply(
         self,
         schema: s_schema.Schema,
@@ -5426,9 +5509,8 @@ class AlterRole(MetaCommand, adapts=s_roles.AlterRole):
         role = self.scls
 
         backend_params = self._get_backend_params(context)
-        capabilities = backend_params.instance_params.capabilities
-        tenant_id = backend_params.instance_params.tenant_id
         instance_params = backend_params.instance_params
+        tenant_id = instance_params.tenant_id
         role_name = str(role.get_name(schema))
 
         kwargs = {}
@@ -5446,6 +5528,7 @@ class AlterRole(MetaCommand, adapts=s_roles.AlterRole):
         pg_role_name = common.get_role_backend_name(
             role_name, tenant_id=tenant_id)
         if self.has_attribute_value('superuser'):
+            self.ensure_has_create_role(backend_params)
             membership = list(role.get_bases(schema).names(schema))
             membership.append(edbdef.EDGEDB_SUPERGROUP)
             self.pgops.add(
@@ -5464,25 +5547,28 @@ class AlterRole(MetaCommand, adapts=s_roles.AlterRole):
             # If the cluster is not exposing an explicit superuser role,
             # we will make the modified Postgres role superuser if we can
             if not instance_params.base_superuser:
-                superuser_flag = (
-                    capabilities
-                    & params.BackendCapabilities.SUPERUSER_ACCESS
-                )
+                superuser_flag = backend_params.has_superuser_access
 
             kwargs['superuser'] = superuser_flag
 
-        dbrole = dbops.Role(name=pg_role_name, **kwargs)
+        if backend_params.has_create_role:
+            dbrole = dbops.Role(name=pg_role_name, **kwargs)
+        else:
+            dbrole = dbops.SingleRole(**kwargs)
         self.pgops.add(dbops.AlterRole(dbrole))
 
         return schema
 
 
-class RebaseRole(MetaCommand, adapts=s_roles.RebaseRole):
+class RebaseRole(MetaCommand, RoleMixin, adapts=s_roles.RebaseRole):
     def apply(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
+        backend_params = self._get_backend_params(context)
+        self.ensure_has_create_role(backend_params)
+
         schema = super().apply(schema, context)
         role = self.scls
 
@@ -5508,12 +5594,15 @@ class RebaseRole(MetaCommand, adapts=s_roles.RebaseRole):
         return schema
 
 
-class DeleteRole(MetaCommand, adapts=s_roles.DeleteRole):
+class DeleteRole(MetaCommand, RoleMixin, adapts=s_roles.DeleteRole):
     def apply(
         self,
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
+        backend_params = self._get_backend_params(context)
+        self.ensure_has_create_role(backend_params)
+
         schema = super().apply(schema, context)
         tenant_id = self._get_tenant_id(context)
         self.pgops.add(dbops.DropRole(
@@ -5540,27 +5629,45 @@ class CreateExtensionPackage(
         version = self.scls.get_version(schema)._asdict()
         version['stage'] = version['stage'].name.lower()
 
-        tenant_id = self._get_tenant_id(context)
-        tpl_db_name = common.get_database_backend_name(
-            edbdef.EDGEDB_TEMPLATE_DB, tenant_id=tenant_id)
+        metadata = {
+            ext_id: {
+                'id': ext_id,
+                'name': name,
+                'name__internal': name__internal,
+                'script': self.scls.get_script(schema),
+                'version': version,
+                'builtin': self.scls.get_builtin(schema),
+                'internal': self.scls.get_internal(schema),
+            }
+        }
 
-        self.pgops.add(
-            dbops.UpdateMetadataSection(
-                dbops.Database(name=tpl_db_name),
-                section='ExtensionPackage',
-                metadata={
-                    ext_id: {
-                        'id': ext_id,
-                        'name': name,
-                        'name__internal': name__internal,
-                        'script': self.scls.get_script(schema),
-                        'version': version,
-                        'builtin': self.scls.get_builtin(schema),
-                        'internal': self.scls.get_internal(schema),
-                    }
-                }
+        ctx_backend_params = context.backend_runtime_params
+        if ctx_backend_params is not None:
+            backend_params = cast(
+                params.BackendRuntimeParams, ctx_backend_params)
+        else:
+            backend_params = params.get_default_runtime_params()
+
+        if backend_params.has_create_database:
+            tenant_id = self._get_tenant_id(context)
+            tpl_db_name = common.get_database_backend_name(
+                edbdef.EDGEDB_TEMPLATE_DB, tenant_id=tenant_id)
+
+            self.pgops.add(
+                dbops.UpdateMetadataSection(
+                    dbops.Database(name=tpl_db_name),
+                    section='ExtensionPackage',
+                    metadata=metadata
+                )
             )
-        )
+        else:
+            self.pgops.add(
+                dbops.UpdateSingleDBMetadataSection(
+                    edbdef.EDGEDB_TEMPLATE_DB,
+                    section='ExtensionPackage',
+                    metadata=metadata
+                )
+            )
 
         return schema
 
@@ -5577,19 +5684,37 @@ class DeleteExtensionPackage(
     ) -> s_schema.Schema:
         schema = super().apply(schema, context)
 
-        tenant_id = self._get_tenant_id(context)
-        tpl_db_name = common.get_database_backend_name(
-            edbdef.EDGEDB_TEMPLATE_DB, tenant_id=tenant_id)
+        ctx_backend_params = context.backend_runtime_params
+        if ctx_backend_params is not None:
+            backend_params = cast(
+                params.BackendRuntimeParams, ctx_backend_params)
+        else:
+            backend_params = params.get_default_runtime_params()
+
         ext_id = str(self.scls.id)
-        self.pgops.add(
-            dbops.UpdateMetadataSection(
-                dbops.Database(name=tpl_db_name),
-                section='ExtensionPackage',
-                metadata={
-                    ext_id: None
-                }
+        metadata = {
+            ext_id: None
+        }
+
+        if backend_params.has_create_database:
+            tenant_id = self._get_tenant_id(context)
+            tpl_db_name = common.get_database_backend_name(
+                edbdef.EDGEDB_TEMPLATE_DB, tenant_id=tenant_id)
+            self.pgops.add(
+                dbops.UpdateMetadataSection(
+                    dbops.Database(name=tpl_db_name),
+                    section='ExtensionPackage',
+                    metadata=metadata
+                )
             )
-        )
+        else:
+            self.pgops.add(
+                dbops.UpdateSingleDBMetadataSection(
+                    edbdef.EDGEDB_TEMPLATE_DB,
+                    section='ExtensionPackage',
+                    metadata=metadata
+                )
+            )
 
         return schema
 

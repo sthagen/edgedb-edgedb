@@ -464,6 +464,44 @@ class TestSchema(tb.BaseSchemaLoadTest):
             type Foo3 extending Foo0;
         """
 
+    @tb.must_fail(errors.UnsupportedFeatureError,
+                  "unsupported type intersection in schema")
+    def test_schema_bad_type_11(self):
+        """
+            type Foo;
+            type Bar;
+            type Spam {
+                multi link foobar := Foo[IS Bar];
+            }
+        """
+
+    @tb.must_fail(errors.SchemaError,
+                  "invalid type: pseudotype 'anytype' is a generic type")
+    def test_schema_bad_type_12(self):
+        """
+            type Foo {
+                property val -> anytype;
+            }
+        """
+
+    @tb.must_fail(errors.SchemaError,
+                  "invalid type: pseudotype 'anytype' is a generic type")
+    def test_schema_bad_type_13(self):
+        """
+            type Foo {
+                link val -> anytype;
+            }
+        """
+
+    @tb.must_fail(errors.SchemaError,
+                  "invalid type: pseudotype 'anytuple' is a generic type")
+    def test_schema_bad_type_14(self):
+        """
+            type Foo {
+                property val -> anytuple;
+            }
+        """
+
     def test_schema_computable_cardinality_inference_01(self):
         schema = self.load_schema("""
             type Object {
@@ -1708,7 +1746,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
             self.run_ddl(schema, r'''
                 ALTER FUNCTION foo(v: int64) USING (
                     # This is very broken now
-                    1 + (SELECT Foo LIMIT 1).val
+                    assert_exists(1 + (SELECT Foo LIMIT 1).val)
                 );
             ''')
 
@@ -1718,7 +1756,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
                 property val := 1;
             }
 
-            function foo(v: int64) -> int64 using (
+            function foo(v: int64) -> optional int64 using (
                 1 + (SELECT Foo LIMIT 1).val
             );
         ''', modname='default')
@@ -2553,7 +2591,8 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
 
     def test_schema_get_migration_35(self):
         schema = r'''
-            function bar() -> str using(SELECT <str>Object.id LIMIT 1);
+            function bar() -> optional str using(
+                SELECT <str>Object.id LIMIT 1);
         '''
 
         self._assert_migration_consistency(schema)
@@ -2741,8 +2780,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 property comp := count((
                     # Use an alias in WITH block in a computable
                     WITH x := .val
-                    # Use an alias in UPDATE in a computable
-                    UPDATE y := Bar FILTER x = y.val
+                    UPDATE Bar FILTER x = Bar.val
                     SET {
                         val := 'foo'
                     }
@@ -2769,8 +2807,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 property comp := count((
                     # Use an alias in WITH block in a computable
                     WITH x := .val
-                    # Use an alias in DELETE in a computable
-                    DELETE y := Bar FILTER x = y.val
+                    DELETE Bar FILTER x = Bar.val
                 ))
             }
 
@@ -4537,7 +4574,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 property bar -> array<int64>;
             };
 
-            function hello16() -> int64
+            function hello16() -> optional int64
                 using (
                     SELECT len((SELECT Foo LIMIT 1).bar)
                 )
@@ -4546,7 +4583,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 property bar -> array<float64>;
             };
 
-            function hello16() -> int64
+            function hello16() -> optional int64
                 using (
                     SELECT len((SELECT Foo LIMIT 1).bar)
                 )
@@ -4561,7 +4598,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
 
             type Bar;
 
-            function hello17() -> Bar
+            function hello17() -> optional Bar
                 using (
                     SELECT Bar
                     OFFSET len((SELECT Foo.bar LIMIT 1)) ?? 0
@@ -4574,7 +4611,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
 
             type Bar;
 
-            function hello17() -> Bar
+            function hello17() -> optional Bar
                 using (
                     SELECT Bar
                     OFFSET len((SELECT Foo.bar LIMIT 1)) ?? 0
@@ -4766,7 +4803,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                     property val := 1;
                 }
 
-                function foo(v: int64) -> int64 using (
+                function foo(v: int64) -> optional int64 using (
                     1 + (SELECT Foo LIMIT 1).val
                 );
             """, r"""
@@ -4775,7 +4812,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                     property val := foo(1);
                 }
 
-                function foo(v: int64) -> int64 using (
+                function foo(v: int64) -> optional int64 using (
                     1 + (SELECT Foo LIMIT 1).val
                 );
             """])
@@ -6629,6 +6666,18 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             scalar type foo extending enum<Foo, Bar>;
         """, r"""
             scalar type foo extending enum<Foo, Bar, Baz>;
+        """])
+
+    def test_schema_to_empty_01(self):
+        self._assert_migration_equivalence([r"""
+            type A {
+                property name -> str;
+            }
+            type B {
+                property name -> str;
+            }
+            type C extending A, B {
+            }
         """])
 
     def test_schema_migrations_union_01(self):

@@ -154,10 +154,12 @@ def _sd_notify(message):
         notify_socket = '\0' + notify_socket[1:]
 
     sd_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    sd_sock.connect(notify_socket)
 
     try:
+        sd_sock.connect(notify_socket)
         sd_sock.sendall(message.encode())
+    except Exception as e:
+        logger.info('Could not send systemd notification: %s', e)
     finally:
         sd_sock.close()
 
@@ -451,19 +453,23 @@ async def run_server(
             abort(
                 f'the length of the specified path for server run state '
                 f'exceeds the maximum of {defines.MAX_RUNSTATE_DIR_PATH} '
-                f'bytes: {runstate_dir_str!r} ({runstate_dir_str_len} bytes)'
+                f'bytes: {runstate_dir_str!r} ({runstate_dir_str_len} bytes)',
+                exit_code=11,
             )
 
-        if args.data_dir:
-            cluster, args = await _get_local_pgcluster(
-                args, runstate_dir, tenant_id)
-        elif args.backend_dsn:
-            cluster, args = await _get_remote_pgcluster(args, tenant_id)
-        else:
-            # This should have been checked by main() already,
-            # but be extra careful.
-            abort('neither the data directory nor the remote Postgres DSN '
-                  'have been specified')
+        try:
+            if args.data_dir:
+                cluster, args = await _get_local_pgcluster(
+                    args, runstate_dir, tenant_id)
+            elif args.backend_dsn:
+                cluster, args = await _get_remote_pgcluster(args, tenant_id)
+            else:
+                # This should have been checked by main() already,
+                # but be extra careful.
+                abort('neither the data directory nor the remote Postgres DSN '
+                      'have been specified')
+        except pgcluster.ClusterError as e:
+            abort(str(e))
 
         try:
             pg_cluster_init_by_us = await cluster.ensure_initialized()
@@ -579,7 +585,7 @@ def server_main(**kwargs):
 
     try:
         server_args = srvargs.parse_args(**kwargs)
-    except srvargs.FatalConfigurationError as e:
+    except srvargs.InvalidUsageError as e:
         abort(e.args[0], exit_code=e.args[1])
 
     if kwargs['background']:

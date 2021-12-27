@@ -17,6 +17,7 @@
 #
 
 import decimal
+import os
 import re
 import textwrap
 import uuid
@@ -306,6 +307,10 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             }]
         )
 
+    @test.xfail(
+        "Known collation issue on Heroku Postgres",
+        unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
+    )
     async def test_edgeql_ddl_rename_type_and_add_01(self):
         await self.con.execute("""
 
@@ -354,6 +359,10 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             };
         """)
 
+    @test.xfail(
+        "Known collation issue on Heroku Postgres",
+        unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
+    )
     async def test_edgeql_ddl_rename_type_and_add_02(self):
         await self.con.execute("""
 
@@ -1963,6 +1972,22 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 ALTER TYPE Foo ALTER PROPERTY b RESET TYPE;
             ''')
 
+    async def test_edgeql_ddl_link_target_bad_04(self):
+        await self.con.execute('''
+            CREATE TYPE Foo;
+            CREATE TYPE Bar;
+        ''')
+
+        with self.assertRaisesRegex(
+            edgedb.UnsupportedFeatureError,
+            "unsupported type intersection in schema"
+        ):
+            await self.con.execute('''
+                CREATE TYPE Spam {
+                    CREATE MULTI LINK foobar := Foo[IS Bar]
+                };
+            ''')
+
     async def test_edgeql_ddl_link_target_merge_01(self):
         await self.con.execute('''
 
@@ -3438,7 +3463,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 $$;
 
             CREATE FUNCTION my_edgeql_func2(s: std::str)
-                -> schema::ObjectType
+                -> OPTIONAL schema::ObjectType
                 USING EdgeQL $$
                     SELECT
                         schema::ObjectType
@@ -4299,6 +4324,19 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             }],
         )
 
+    async def test_edgeql_ddl_function_34(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidFunctionDefinitionError,
+            r"return cardinality mismatch"
+        ):
+            await self.con.execute(r"""
+                CREATE FUNCTION broken_edgeql_func25(
+                    a: std::int64) -> std::int64
+                USING EdgeQL $$
+                    SELECT a FILTER a > 0
+                $$;
+            """)
+
     async def test_edgeql_ddl_function_rename_01(self):
         await self.con.execute("""
             CREATE FUNCTION foo(s: str) -> str {
@@ -4656,7 +4694,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
 
     async def test_edgeql_ddl_function_volatility_09(self):
         await self.con.execute('''
-            CREATE TYPE FuncVol { CREATE PROPERTY i -> int64 };
+            CREATE TYPE FuncVol { CREATE REQUIRED PROPERTY i -> int64 };
             CREATE FUNCTION obj_func(obj: FuncVol) -> int64 {
                 USING (obj.i)
             };
@@ -6901,6 +6939,9 @@ type default::Foo {
             """)
 
     async def test_edgeql_ddl_role_01(self):
+        if not self.has_create_role:
+            self.skipTest("create role is not supported by the backend")
+
         await self.con.execute(r"""
             CREATE ROLE foo_01;
         """)
@@ -6921,6 +6962,9 @@ type default::Foo {
         )
 
     async def test_edgeql_ddl_role_02(self):
+        if not self.has_create_role:
+            self.skipTest("create role is not supported by the backend")
+
         await self.con.execute(r"""
             CREATE SUPERUSER ROLE foo2 {
                 SET password := 'secret';
@@ -6961,6 +7005,9 @@ type default::Foo {
         self.assertIsNone(role.password)
 
     async def test_edgeql_ddl_role_03(self):
+        if not self.has_create_role:
+            self.skipTest("create role is not supported by the backend")
+
         await self.con.execute(r"""
             CREATE SUPERUSER ROLE foo3 {
                 SET password := 'secret';
@@ -7033,6 +7080,9 @@ type default::Foo {
         )
 
     async def test_edgeql_ddl_role_04(self):
+        if not self.has_create_role:
+            self.skipTest("create role is not supported by the backend")
+
         await self.con.execute(r"""
             CREATE SUPERUSER ROLE foo5 IF NOT EXISTS {
                 SET password := 'secret';
@@ -7070,6 +7120,9 @@ type default::Foo {
         )
 
     async def test_edgeql_ddl_describe_roles(self):
+        if not self.has_create_role:
+            self.skipTest("create role is not supported by the backend")
+
         await self.con.execute("""
             CREATE SUPERUSER ROLE base1;
             CREATE SUPERUSER ROLE `base 2`;
@@ -10334,7 +10387,7 @@ type default::Foo {
     async def test_edgeql_ddl_rename_ref_function_01(self):
         await self._simple_rename_ref_tests(
             """
-            CREATE FUNCTION foo(x: Note) ->  str {
+            CREATE FUNCTION foo(x: Note) -> OPTIONAL str {
                 USING (SELECT ('Note note ' ++ x.note ++
                                (SELECT Note.note LIMIT 1)))
             }
@@ -10358,7 +10411,7 @@ type default::Foo {
                 CREATE PROPERTY name -> str;
             };
 
-            CREATE FUNCTION foo(x: Note, y: Name) -> str {
+            CREATE FUNCTION foo(x: Note, y: Name) -> OPTIONAL str {
                 USING (SELECT (x.note ++ " " ++ y.name))
             };
         """)
@@ -10400,7 +10453,7 @@ type default::Foo {
     async def test_edgeql_ddl_rename_ref_function_03(self):
         await self._simple_rename_ref_tests(
             """
-            CREATE FUNCTION foo(x: str) -> Note {
+            CREATE FUNCTION foo(x: str) -> OPTIONAL Note {
                 USING (SELECT Note FILTER .note = x LIMIT 1)
             }
             """,
@@ -10411,7 +10464,7 @@ type default::Foo {
     async def test_edgeql_ddl_rename_ref_function_04(self):
         await self._simple_rename_ref_tests(
             """
-            CREATE FUNCTION foo(x: str) -> Note {
+            CREATE FUNCTION foo(x: str) -> OPTIONAL Note {
                 USING (SELECT Note FILTER .note = x LIMIT 1)
             }
             """,
@@ -12244,6 +12297,39 @@ type default::Foo {
                     CREATE INDEX ON (@z);
                     CREATE PROPERTY y := @z ++ "!";
                 };
+            };
+        """)
+
+    async def test_edgeql_ddl_drop_parent_multi_link(self):
+        await self.con.execute(r"""
+            CREATE TYPE C;
+            CREATE TYPE D {
+                CREATE MULTI LINK multi_link -> C;
+            };
+            CREATE TYPE E EXTENDING D
+        """)
+
+        await self.con.execute(r"""
+            ALTER TYPE D {
+                DROP LINK multi_link;
+            };
+        """)
+
+    async def test_edgeql_ddl_drop_multi_parent_multi_link(self):
+        await self.con.execute(r"""
+            CREATE TYPE C;
+            CREATE TYPE D {
+                CREATE MULTI LINK multi_link -> C;
+            };
+            CREATE TYPE E {
+                CREATE MULTI LINK multi_link -> C;
+            };
+            CREATE TYPE F EXTENDING D, E;
+        """)
+
+        await self.con.execute(r"""
+            ALTER TYPE D {
+                DROP LINK multi_link;
             };
         """)
 

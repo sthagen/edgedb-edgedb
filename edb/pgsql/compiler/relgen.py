@@ -907,9 +907,10 @@ def process_set_as_path(
     if is_linkprop:
         backtrack_src = ir_source
         ctx.disable_semi_join.add(backtrack_src.path_id)
-        assert ir_source.rptr is not None
+
+        assert backtrack_src.rptr
         while backtrack_src.path_id.is_type_intersection_path():
-            backtrack_src = ir_source.rptr.source
+            backtrack_src = backtrack_src.rptr.source
             ctx.disable_semi_join.add(backtrack_src.path_id)
 
     semi_join = (
@@ -1193,17 +1194,16 @@ def process_set_as_subquery(
         if inner_id != outer_id:
             pathctx.put_path_id_map(ctx.rel, outer_id, inner_id)
 
-        if (isinstance(ir_set.expr, irast.MutatingStmt)
-                and ir_set.expr in ctx.dml_stmts):
+        if isinstance(expr, irast.MutatingStmt) and expr in ctx.dml_stmts:
             # The DML table-routing logic may result in the same
             # DML subquery to be visited twice, such as in the case
             # of a nested INSERT declaring link properties, so guard
             # against generating a duplicate DML CTE.
             with newctx.substmt() as subrelctx:
-                dml_cte = ctx.dml_stmts[ir_set.expr]
-                dml.wrap_dml_cte(ir_set.expr, dml_cte, ctx=subrelctx)
+                dml_cte = ctx.dml_stmts[expr]
+                dml.wrap_dml_cte(expr, dml_cte, ctx=subrelctx)
         else:
-            dispatch.visit(ir_set.expr, ctx=newctx)
+            dispatch.visit(expr, ctx=newctx)
 
         if semi_join:
             set_rvar = relctx.new_root_rvar(ir_set, ctx=newctx)
@@ -1221,7 +1221,21 @@ def process_set_as_subquery(
             stmt.where_clause = astutils.extend_binop(
                 stmt.where_clause, cond_expr)
 
-    return _new_subquery_stmt_set_rvar(ir_set, stmt, ctx=ctx)
+    rvars = _new_subquery_stmt_set_rvar(ir_set, stmt, ctx=ctx)
+    # If the inner set also exposes a pointer path source, we need to
+    # also expose a pointer path source. See tests like
+    # test_edgeql_select_linkprop_rebind_01
+    if pathctx.maybe_get_path_rvar(
+            stmt, inner_id.ptr_path(), aspect='source', env=ctx.env):
+        rvars.new.append(
+            SetRVar(
+                rvars.main.rvar,
+                outer_id.ptr_path(),
+                aspects=('source',),
+            )
+        )
+
+    return rvars
 
 
 def process_set_as_membership_expr(
@@ -1849,7 +1863,7 @@ def process_set_as_type_cast(
 
             subctx.env.output_format = orig_output_format
         else:
-            set_expr = dispatch.compile(ir_set.expr, ctx=ctx)
+            set_expr = dispatch.compile(expr, ctx=ctx)
 
             # A proper path var mapping way would be to wrap
             # the inner expression in a subquery, but that
@@ -1928,6 +1942,7 @@ def process_set_as_expr(
         ctx: context.CompilerContextLevel) -> SetRVars:
     with ctx.new() as newctx:
         newctx.expr_exposed = False
+        assert ir_set.expr is not None
         set_expr = dispatch.compile(ir_set.expr, ctx=newctx)
 
     pathctx.put_path_value_var_if_not_exists(
@@ -2796,16 +2811,6 @@ def process_set_as_agg_expr_inner(
         agg_filter = None
         agg_sort = []
 
-        if ctx.group_by_rels:
-            for (path_id, s_path_id), group_rel in ctx.group_by_rels.items():
-                group_rvar = relctx.rvar_for_rel(group_rel, ctx=ctx)
-                relctx.include_rvar(stmt, group_rvar, path_id=path_id, ctx=ctx)
-                ref = pathctx.get_path_identity_var(stmt, path_id, env=ctx.env)
-                if stmt.group_clause is None:
-                    stmt.group_clause = []
-                stmt.group_clause.append(ref)
-                newctx.path_scope[s_path_id] = stmt
-
         with newctx.new() as argctx:
             # We want array_agg() (and similar) to do the right
             # thing with respect to output format, so, barring
@@ -2951,6 +2956,7 @@ def process_set_as_agg_expr_inner(
 
     if expr.func_initial_value is not None:
         iv_ir = expr.func_initial_value.expr
+        assert iv_ir is not None
 
         if serialization_safe and aspect == 'serialized':
             # Serialization has changed the output type.

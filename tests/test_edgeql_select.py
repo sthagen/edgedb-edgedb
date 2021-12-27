@@ -1509,6 +1509,10 @@ class TestEdgeQLSelect(tb.QueryTestCase):
             ],
         )
 
+    @test.xfail(
+        "Known collation issue on Heroku Postgres",
+        unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
+    )
     async def test_edgeql_select_polymorphic_09(self):
         # Test simultaneous type intersection on source and target
         # of a shape element.
@@ -1585,7 +1589,7 @@ class TestEdgeQLSelect(tb.QueryTestCase):
                     INSERT Publication {
                         title := 'Introduction to EdgeDB',
                         authors := (
-                            FOR v IN {enumerate({'Yury', 'Elvis'})}
+                            FOR v IN enumerate({'Yury', 'Elvis'})
                             UNION (
                                 SELECT User { @list_order := v.0 }
                                 FILTER .name = v.1
@@ -5796,7 +5800,7 @@ class TestEdgeQLSelect(tb.QueryTestCase):
             r'''
                 SELECT Issue {
                     asdf := (
-                        FOR z IN {.due_date} UNION (1)
+                        FOR z IN .due_date UNION (1)
                     )
                 }
                 FILTER .name = 'Release EdgeDB';
@@ -6347,6 +6351,10 @@ class TestEdgeQLSelect(tb.QueryTestCase):
             ["Elvis", "Yury"],
         )
 
+    @test.xfail(
+        "Known collation issue on Heroku Postgres",
+        unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
+    )
     async def test_edgeql_select_expr_objects_04(self):
         await self.assert_query_result(
             r'''
