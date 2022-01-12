@@ -21,9 +21,9 @@
 
 
 from __future__ import annotations
+from typing import *
 
 import contextlib
-from typing import *
 
 from edb import errors
 
@@ -441,7 +441,7 @@ def ensure_source_rvar(
         scope_stmt = relctx.maybe_get_scope_stmt(ir_set.path_id, ctx=ctx)
         if scope_stmt is None:
             scope_stmt = ctx.rel
-        rvar = relctx.new_root_rvar(ir_set, ctx=ctx)
+        rvar = relctx.new_root_rvar(ir_set, lateral=True, ctx=ctx)
         relctx.include_rvar(scope_stmt, rvar, path_id=ir_set.path_id, ctx=ctx)
         pathctx.put_path_rvar(
             stmt, ir_set.path_id, rvar, aspect='source', env=ctx.env)
@@ -827,6 +827,7 @@ def process_set_as_path_type_intersection(
         poly_rvar = relctx.range_for_typeref(
             target_typeref,
             path_id=ir_set.path_id,
+            lateral=True,
             ctx=ctx,
         )
 
@@ -1041,7 +1042,7 @@ def process_set_as_path(
 
         # Target set range.
         if irtyputils.is_object(ir_set.typeref):
-            target_rvar = relctx.new_root_rvar(ir_set, ctx=ctx)
+            target_rvar = relctx.new_root_rvar(ir_set, lateral=True, ctx=ctx)
 
             main_rvar = SetRVar(
                 target_rvar,
@@ -1255,49 +1256,66 @@ def process_set_as_membership_expr(
         # then use the ANY/ALL array comparison operator directly,
         # since that has a higher chance of using the indexes.
         right_expr = right_arg.expr
-        if (isinstance(right_expr, irast.FunctionCall)
-                and str(right_expr.func_shortname) == 'std::array_unpack'):
+        if (
+            isinstance(right_expr, irast.FunctionCall)
+            and str(right_expr.func_shortname) == 'std::array_unpack'
+            and not right_expr.args[0].cardinality.is_multi()
+        ):
             is_array_unpack = True
             right_arg = right_expr.args[0].expr
         else:
             is_array_unpack = False
 
-        # We compile `x [NOT] IN y` into essentially
-        # `[NOT] EXISTS (SELECT ... WHERE x = y)`.
-        # We use this approach instead of using ANY/ALL or IN directly
-        # because those subquery-based approaches are finnicky in
-        # their treatment of tuples, which this approach sidesteps.
+        left_is_row_expr = astutils.is_row_expr(left_out)
 
         with newctx.subrel() as _, _.newscope() as subctx:
-            right_out = dispatch.compile(right_arg, ctx=subctx)
+            dispatch.compile(right_arg, ctx=subctx)
+            right_rel = subctx.rel
+            right_out = pathctx.get_path_value_var(
+                right_rel, right_arg.path_id, env=subctx.env)
+            right_out = output.output_as_value(right_out, env=ctx.env)
+
+            if (
+                left_is_row_expr
+                and right_arg.path_id.is_tuple_path()
+            ):
+                # When the RHS is an opaque tuple, we must unpack
+                # it using the (...).* indirection syntax, otherwise
+                # we get "subquery has too few columns".
+                right_out = pgast.Indirection(
+                    arg=right_out,
+                    indirection=[pgast.Star()],
+                )
+
+            right_rel.target_list = [pgast.ResTarget(val=right_out)]
 
             if is_array_unpack:
-                right_out = pgast.SubLink(
-                    type=pgast.SubLinkType.ANY,
-                    expr=pgast.TypeCast(
-                        arg=right_out,
-                        type_name=pgast.TypeName(
-                            name=pg_types.pg_type_from_ir_typeref(
-                                right_arg.typeref)
-                        )
+                right_rel = pgast.TypeCast(
+                    arg=right_rel,
+                    type_name=pgast.TypeName(
+                        name=pg_types.pg_type_from_ir_typeref(
+                            right_arg.typeref)
                     )
                 )
 
-            cond = exprcomp.compile_operator(
+            negated = str(expr.func_shortname) == 'std::NOT IN'
+            sublink_type = (
+                pgast.SubLinkType.ALL if negated else pgast.SubLinkType.ANY)
+
+            set_expr = exprcomp.compile_operator(
                 expr,
-                [left_out, right_out],
-                ctx=subctx,
+                [
+                    left_out,
+                    pgast.SubLink(
+                        type=sublink_type,
+                        expr=right_rel,
+                    ),
+                ],
+                ctx=ctx,
             )
 
-            subctx.rel.where_clause = astutils.extend_binop(
-                subctx.rel.where_clause, cond)
-
-    negated = str(expr.func_shortname) == 'std::NOT IN'
-    cmd = 'NOT EXISTS' if negated else 'EXISTS'
-    set_expr = astutils.new_unop(cmd, subctx.rel)
-
-    pathctx.put_path_value_var_if_not_exists(
-        stmt, ir_set.path_id, set_expr, env=ctx.env)
+            pathctx.put_path_value_var_if_not_exists(
+                stmt, ir_set.path_id, set_expr, env=ctx.env)
 
     return new_stmt_set_rvar(ir_set, stmt, ctx=ctx)
 
