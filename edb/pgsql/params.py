@@ -23,6 +23,9 @@ import locale
 from edb import buildmeta
 
 
+BackendVersion = buildmeta.BackendVersion
+
+
 class BackendCapabilities(enum.IntFlag):
 
     NONE = 0
@@ -51,6 +54,7 @@ ALL_BACKEND_CAPABILITIES = (
 class BackendInstanceParams(NamedTuple):
 
     capabilities: BackendCapabilities
+    version: BackendVersion
     tenant_id: str
     base_superuser: Optional[str] = None
     max_connections: int = 500
@@ -113,6 +117,11 @@ def get_default_runtime_params(
     if 'tenant_id' not in instance_params:
         instance_params = dict(
             tenant_id=buildmeta.get_default_tenant_id(),
+            **instance_params,
+        )
+    if 'version' not in instance_params:
+        instance_params = dict(
+            version=buildmeta.get_pg_version(),
             **instance_params,
         )
 

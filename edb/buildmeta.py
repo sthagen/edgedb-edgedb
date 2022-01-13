@@ -20,6 +20,9 @@
 from __future__ import annotations
 from typing import *
 
+# DO NOT put any imports here other than from stdlib
+# or modules from edb.common that themselves have only stdlib imports.
+
 import base64
 import datetime
 import hashlib
@@ -35,7 +38,6 @@ import subprocess
 import sys
 import tempfile
 
-
 from edb.common import debug
 from edb.common import devmode
 from edb.common import verutils
@@ -47,6 +49,15 @@ EDGEDB_CATALOG_VERSION = 2022_01_07_00_00
 
 class MetadataError(Exception):
     pass
+
+
+class BackendVersion(NamedTuple):
+    major: int
+    minor: int
+    micro: int
+    releaselevel: str
+    serial: int
+    string: str
 
 
 class VersionMetadata(TypedDict):
@@ -70,32 +81,75 @@ def get_build_metadata_value(prop: str) -> str:
             f'could not find {prop} in EdgeDB distribution metadata') from None
 
 
-def get_pg_config_path() -> pathlib.Path:
-    if devmode.is_in_dev_mode():
-        root = pathlib.Path(__file__).parent.parent
-        pg_config = (root / 'build' / 'postgres' /
-                     'install' / 'bin' / 'pg_config').resolve()
-        if not pg_config.is_file():
-            try:
-                pg_config = pathlib.Path(
-                    get_build_metadata_value('PG_CONFIG_PATH'))
-            except MetadataError:
-                pass
+def _get_devmode_pg_config_path() -> pathlib.Path:
+    root = pathlib.Path(__file__).parent.parent.resolve()
+    pg_config = root / 'build' / 'postgres' / 'install' / 'bin' / 'pg_config'
+    if not pg_config.is_file():
+        try:
+            pg_config = pathlib.Path(
+                get_build_metadata_value('PG_CONFIG_PATH'))
+        except MetadataError:
+            pass
 
-        if not pg_config.is_file():
-            raise MetadataError('DEV mode: Could not find PostgreSQL build, '
-                                'run `pip install -e .`')
-
-    else:
-        pg_config = pathlib.Path(
-            get_build_metadata_value('PG_CONFIG_PATH'))
-
-        if not pg_config.is_file():
-            raise MetadataError(
-                f'invalid pg_config path: {pg_config!r}: file does not exist '
-                f'or is not a regular file')
+    if not pg_config.is_file():
+        raise MetadataError('DEV mode: Could not find PostgreSQL build, '
+                            'run `pip install -e .`')
 
     return pg_config
+
+
+def get_pg_config_path() -> pathlib.Path:
+    if devmode.is_in_dev_mode():
+        pg_config = _get_devmode_pg_config_path()
+    else:
+        try:
+            pg_config = pathlib.Path(
+                get_build_metadata_value('PG_CONFIG_PATH'))
+        except MetadataError:
+            pg_config = _get_devmode_pg_config_path()
+        else:
+            if not pg_config.is_file():
+                raise MetadataError(
+                    f'invalid pg_config path: {pg_config!r}: file does not '
+                    f'exist or is not a regular file')
+
+    return pg_config
+
+
+_bundled_pg_version = None
+
+
+def get_pg_version() -> BackendVersion:
+    global _bundled_pg_version
+    if _bundled_pg_version is not None:
+        return _bundled_pg_version
+
+    from asyncpg import serverversion
+
+    pg_config = subprocess.run(
+        [get_pg_config_path()],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    for line in pg_config.stdout.splitlines():
+        k, eq, v = line.partition('=')
+        if eq and k.strip().lower() == 'version':
+            v = v.strip()
+            parsed_ver = serverversion.split_server_version_string(v)
+            _bundled_pg_version = BackendVersion(
+                major=parsed_ver.major,
+                minor=parsed_ver.minor,
+                micro=parsed_ver.micro,
+                releaselevel=parsed_ver.releaselevel,
+                serial=parsed_ver.serial,
+                string=v,
+            )
+            return _bundled_pg_version
+    else:
+        raise MetadataError(
+            "could not find version information in pg_config output")
 
 
 def get_runstate_path(data_dir: pathlib.Path) -> pathlib.Path:
