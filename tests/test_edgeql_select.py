@@ -7019,3 +7019,44 @@ class TestEdgeQLSelect(tb.QueryTestCase):
                 {'lol': None}
             ],
         )
+
+    async def test_edgeql_select_nested_order_01(self):
+        await self.assert_query_result(
+            r'''
+                SELECT
+                  Issue {
+                    key := (WITH c := Issue.name,
+                            SELECT { name := c })
+                  }
+                ORDER BY .key.name;
+            ''',
+            [
+                {"key": {"name": "Improve EdgeDB repl output rendering."}},
+                {"key": {"name": "Regression."}},
+                {"key": {"name": "Release EdgeDB"}},
+                {"key": {"name": "Repl tweak."}}
+            ]
+        )
+
+    async def test_edgeql_select_nested_order_02(self):
+        await self.assert_query_result(
+            r'''
+                SELECT
+                  Issue {
+                    key := (WITH n := Issue.number, c := Issue.name,
+                            SELECT { name := c, number := n })
+                  }
+                ORDER BY .key.number THEN .key.name;
+            ''',
+            [
+                {"key": {"name": "Release EdgeDB", "number": "1"}},
+                {
+                    "key": {
+                        "name": "Improve EdgeDB repl output rendering.",
+                        "number": "2"
+                    }
+                },
+                {"key": {"name": "Repl tweak.", "number": "3"}},
+                {"key": {"name": "Regression.", "number": "4"}},
+            ]
+        )

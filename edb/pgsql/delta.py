@@ -4056,8 +4056,9 @@ class LinkMetaCommand(CompositeMetaCommand, PointerMetaCommand):
             condition = dbops.TableExists(name=old_table_name)
             self.pgops.add(
                 dbops.DropTable(name=old_table_name, conditions=[condition]))
-            self.schedule_endpoint_delete_action_update(
-                link, orig_schema, schema, context)
+
+        self.schedule_endpoint_delete_action_update(
+            link, orig_schema, schema, context)
 
 
 class CreateLink(LinkMetaCommand, adapts=s_links.CreateLink):
@@ -5516,7 +5517,9 @@ class AlterRole(MetaCommand, RoleMixin, adapts=s_roles.AlterRole):
         kwargs = {}
         if self.has_attribute_value('password'):
             passwd = self.get_attribute_value('password')
-            kwargs['password'] = passwd
+            if backend_params.has_create_role:
+                # Only modify Postgres password of roles managed by EdgeDB
+                kwargs['password'] = passwd
             kwargs['metadata'] = dict(
                 id=str(role.id),
                 name=role_name,
