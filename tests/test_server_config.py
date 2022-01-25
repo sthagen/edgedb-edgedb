@@ -972,11 +972,15 @@ class TestServerConfig(tb.QueryTestCase):
             conf4 = "CONFIGURE INSTANCE SET memprop := <cfg::memory>'100MiB';"
             await self.con.execute(conf4)
 
+            conf5 = "CONFIGURE INSTANCE SET enumprop := <cfg::TestEnum>'Two';"
+            await self.con.execute(conf5)
+
             res = await self.con.query_single('DESCRIBE INSTANCE CONFIG;')
             self.assertIn(conf1, res)
             self.assertIn(conf2, res)
             self.assertNotIn(conf3, res)
             self.assertIn(conf4, res)
+            self.assertIn(conf5, res)
 
         finally:
             await self.con.execute('''
@@ -1044,6 +1048,16 @@ class TestServerConfig(tb.QueryTestCase):
                     durprop := '12 seconds'
             ''')
 
+    async def test_server_proto_configure_invalid_enum(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            "invalid input value for enum 'cfg::TestEnum': \"foo\"",
+        ):
+            await self.con.execute('''
+                configure session set
+                    enumprop := <cfg::TestEnum>'foo'
+            ''')
+
     async def test_server_proto_configure_compilation(self):
         try:
             await self.con.execute('''
@@ -1105,6 +1119,20 @@ class TestServerConfig(tb.QueryTestCase):
                 await self.con.execute('''
                     CREATE FUNCTION foo() -> Foo USING (INSERT Foo);
                 ''')
+
+            async with self._run_and_rollback():
+                await self.con.execute('''
+                    CONFIGURE SESSION SET allow_bare_ddl :=
+                        cfg::AllowBareDDL.NeverAllow;
+                ''')
+
+                async with self.assertRaisesRegexTx(
+                    edgedb.QueryError,
+                    'bare DDL statements are not allowed in this database'
+                ):
+                    await self.con.execute('''
+                        CREATE FUNCTION intfunc() -> int64 USING (1);
+                    ''')
 
         finally:
             await self.con.execute('''
