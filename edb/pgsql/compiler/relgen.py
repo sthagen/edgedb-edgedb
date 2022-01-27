@@ -190,7 +190,7 @@ def get_set_rvar(
             subctx.scope_tree.is_optional(path_id) or
             new_scope.is_optional(path_id) or
             path_id in subctx.force_optional
-        )
+        ) and not can_omit_optional_wrapper(ir_set, new_scope, ctx=ctx)
 
         optional_wrapping = is_optional and not is_empty_set
 
@@ -490,6 +490,38 @@ def set_as_subquery(
                 rel=wrapper, path_id=ir_set.path_id, env=ctx.env)
 
     return wrapper
+
+
+def can_omit_optional_wrapper(
+        ir_set: irast.Set, new_scope: irast.ScopeTreeNode, *,
+        ctx: context.CompilerContextLevel) -> bool:
+    """Determine whether it is safe to omit the optional wrapper.
+
+    Doing so is safe when the expression is guarenteed to result in
+    a NULL and not an empty set.
+
+    The main such case implemented is a path `foo.bar` where foo
+    is visible and bar is a single non-computed property, which we know
+    will be stored as NULL in the database.
+
+    We also handle trivial SELECTs wrapping such an expression.
+    """
+    if ir_set.expr and irutils.is_trivial_select(ir_set.expr):
+        return can_omit_optional_wrapper(
+            ir_set.expr.result,
+            relctx.get_scope(ir_set.expr.result, ctx=ctx) or new_scope,
+            ctx=ctx,
+        )
+
+    return bool(
+        ir_set.expr is None
+        and not ir_set.path_id.is_objtype_path()
+        and ir_set.rptr
+        and new_scope.is_visible(ir_set.rptr.source.path_id)
+        and not ir_set.rptr.is_inbound
+        and ir_set.rptr.ptrref.out_cardinality.is_single()
+        and not ir_set.rptr.ptrref.is_computable
+    )
 
 
 def prepare_optional_rel(
@@ -907,12 +939,14 @@ def process_set_as_path(
 
     if is_linkprop:
         backtrack_src = ir_source
-        ctx.disable_semi_join.add(backtrack_src.path_id)
+        new_paths = {backtrack_src.path_id}
 
         assert backtrack_src.rptr
         while backtrack_src.path_id.is_type_intersection_path():
             backtrack_src = backtrack_src.rptr.source
-            ctx.disable_semi_join.add(backtrack_src.path_id)
+            new_paths.add(backtrack_src.path_id)
+
+        ctx.disable_semi_join |= new_paths
 
     semi_join = (
         not source_is_visible and
@@ -2089,7 +2123,7 @@ def process_set_as_existence_assertion(
         # The solution to assert_exists() is as simple as
         # calling raise_on_null().
         newctx.expr_exposed = False
-        newctx.force_optional.add(ir_arg_set.path_id)
+        newctx.force_optional |= {ir_arg_set.path_id}
         pathctx.put_path_id_map(newctx.rel, ir_set.path_id, ir_arg_set.path_id)
         arg_ref = dispatch.compile(ir_arg_set, ctx=newctx)
         arg_val = output.output_as_value(arg_ref, env=newctx.env)
