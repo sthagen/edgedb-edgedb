@@ -883,7 +883,6 @@ pub fn is_keyword(s: &str) -> bool {
         | "__std__"
         | "__edgedbsys__"
         | "__edgedbtpl__"
-        | "abort"
         | "alter"
         | "and"
         | "anytuple"
@@ -892,14 +891,12 @@ pub fn is_keyword(s: &str) -> bool {
         | "commit"
         | "configure"
         | "create"
-        | "declare"
         | "delete"
         | "describe"
         | "detached"
         | "distinct"
         | "drop"
         | "else"
-        | "empty"
         | "exists"
         | "extending"
         | "false"
@@ -919,14 +916,9 @@ pub fn is_keyword(s: &str) -> bool {
         | "offset"
         | "optional"
         | "or"
-        | "order"
-        | "populate"
-        | "release"
-        | "reset"
         | "rollback"
         | "select"
         | "set"
-        | "start"
         | "true"
         | "typeof"
         | "update"
@@ -975,4 +967,3 @@ pub fn is_keyword(s: &str) -> bool {
         _ => false,
     }
 }
-
