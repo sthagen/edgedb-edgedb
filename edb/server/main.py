@@ -181,8 +181,10 @@ async def _run_server(
     runstate_dir,
     internal_runstate_dir,
     *,
-    do_setproctitle: bool
+    do_setproctitle: bool,
+    new_instance: bool,
 ):
+
     with signalctl.SignalController(signal.SIGINT, signal.SIGTERM) as sc:
         ss = server.Server(
             cluster=cluster,
@@ -201,6 +203,7 @@ async def _run_server(
             backend_adaptive_ha=args.backend_adaptive_ha,
             default_auth_method=args.default_auth_method,
             testmode=args.testmode,
+            new_instance=new_instance,
         )
         await sc.wait_for(ss.init())
 
@@ -220,7 +223,7 @@ async def _run_server(
             args.tls_cert_file, args.tls_key_file, tls_cert_newly_generated)
 
         if args.bootstrap_only:
-            if args.startup_script:
+            if args.startup_script and new_instance:
                 await sc.wait_for(ss.run_startup_script_and_exit())
             return
 
@@ -531,6 +534,7 @@ async def run_server(
                         runstate_dir,
                         int_runstate_dir,
                         do_setproctitle=do_setproctitle,
+                        new_instance=need_cluster_restart,
                     )
 
         except server.StartupError as e:
@@ -609,6 +613,10 @@ def server_main(**kwargs):
     context_settings=dict(help_option_names=['-h', '--help']))
 @srvargs.server_options
 def main(version=False, **kwargs):
+    if kwargs.get('testmode') and 'EDGEDB_TEST_CATALOG_VERSION' in os.environ:
+        buildmeta.EDGEDB_CATALOG_VERSION = int(
+            os.environ['EDGEDB_TEST_CATALOG_VERSION']
+        )
     if version:
         print(f"edgedb-server, version {buildmeta.get_version()}")
         sys.exit(0)
