@@ -194,11 +194,10 @@ class Constraint(
             self.get_field_value(schema, 'subject'),
         )
 
-    def format_error_message(
+    def format_error(
         self,
         schema: s_schema.Schema,
     ) -> str:
-        errmsg = self.get_errmessage(schema)
         subject = self.get_subject(schema)
         titleattr = subject.get_annotation(schema, sn.QualName('std', 'title'))
 
@@ -208,6 +207,14 @@ class Constraint(
         else:
             subjtitle = titleattr
 
+        return self.format_error_message(schema, subjtitle)
+
+    def format_error_message(
+        self,
+        schema: s_schema.Schema,
+        subjtitle: str,
+    ) -> str:
+        errmsg = self.get_errmessage(schema)
         args = self.get_args(schema)
         if args:
             args_ql: List[qlast.Base] = [
@@ -782,6 +789,17 @@ class ConstraintCommand(
                     rptr = ref.rptr
                     if rptr.dir_cardinality.is_multi():
                         has_multi = True
+
+                    # We don't need to look further than the subject,
+                    # which is always valid. (And which is a singleton
+                    # in a constraint expression if it is itself a
+                    # singleton, regardless of other parts of the path.)
+                    if (
+                        isinstance(rptr.ptrref, ir_ast.PointerRef)
+                        and rptr.ptrref.id == subject_obj.id
+                    ):
+                        break
+
                     if (not isinstance(rptr.ptrref,
                                        ir_ast.TupleIndirectionPointerRef)
                             and rptr.ptrref.source_ptr is None

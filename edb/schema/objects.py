@@ -1462,6 +1462,20 @@ class Object(s_abc.Object, ObjectContainer, metaclass=ObjectMeta):
 
         return schema
 
+    def field_is_computed(
+        self,
+        schema: s_schema.Schema,
+        field_name: str,
+    ) -> bool:
+        return field_name in self.get_computed_fields(schema)
+
+    def field_is_inherited(
+        self,
+        schema: s_schema.Schema,
+        field_name: str,
+    ) -> bool:
+        return False
+
     def del_classref(
         self,
         schema: s_schema.Schema,
@@ -2939,10 +2953,10 @@ class InheritingObject(SubclassableObject):
     def get_base_names(self, schema: s_schema.Schema) -> Collection[sn.Name]:
         return self.get_bases(schema).names(schema)
 
-    def get_topmost_concrete_base(
+    def maybe_get_topmost_concrete_base(
         self: InheritingObjectT,
         schema: s_schema.Schema
-    ) -> InheritingObjectT:
+    ) -> Optional[InheritingObjectT]:
         """Get the topmost non-abstract base."""
         lineage = self.get_ancestors(schema).objects(schema)
         for ancestor in reversed(lineage):
@@ -2952,8 +2966,19 @@ class InheritingObject(SubclassableObject):
         if not self.get_abstract(schema):
             return self
 
-        raise errors.SchemaError(
-            f'{self.get_verbosename(schema)} has no non-abstract ancestors')
+        return None
+
+    def get_topmost_concrete_base(
+        self: InheritingObjectT,
+        schema: s_schema.Schema
+    ) -> InheritingObjectT:
+        """Get the topmost non-abstract base."""
+        base = self.maybe_get_topmost_concrete_base(schema)
+        if not base:
+            raise errors.SchemaError(
+                f'{self.get_verbosename(schema)} has no non-abstract ancestors'
+            )
+        return base
 
     def get_base_for_cast(self, schema: s_schema.Schema) -> Object:
         return self.get_topmost_concrete_base(schema)

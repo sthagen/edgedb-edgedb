@@ -89,6 +89,7 @@ directly_mappable = {
     pgerrors.ERROR_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE: errors.InvalidValueError,
     pgerrors.ERROR_INVALID_ROW_COUNT_IN_RESULT_OFFSET_CLAUSE: (
         errors.InvalidValueError),
+    pgerrors.ERROR_INVALID_REGULAR_EXPRESSION: errors.InvalidValueError,
 }
 
 
@@ -433,8 +434,12 @@ def _interpret_constraint_errors(code, schema, err_details, hint):
 
         constraint = schema.get_by_id(constraint_id)
 
-        return errors.ConstraintViolationError(
-            constraint.format_error_message(schema))
+        msg = constraint.format_error(schema)
+        subject = constraint.get_subject(schema)
+        vname = subject.get_verbosename(schema, with_parent=True)
+        subjtitle = f"value of {vname}"
+        details = constraint.format_error_message(schema, subjtitle)
+        return errors.ConstraintViolationError(msg, details=details)
     elif error_type == 'newconstraint':
         # If we're here, it means that we already validated that
         # schema_name, table_name and column_name all exist.

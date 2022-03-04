@@ -441,10 +441,14 @@ def ensure_source_rvar(
         scope_stmt = relctx.maybe_get_scope_stmt(ir_set.path_id, ctx=ctx)
         if scope_stmt is None:
             scope_stmt = ctx.rel
-        rvar = relctx.new_root_rvar(ir_set, lateral=True, ctx=ctx)
-        relctx.include_rvar(scope_stmt, rvar, path_id=ir_set.path_id, ctx=ctx)
-        pathctx.put_path_rvar(
-            stmt, ir_set.path_id, rvar, aspect='source', env=ctx.env)
+        rvar = relctx.maybe_get_path_rvar(
+            scope_stmt, ir_set.path_id, aspect='source', ctx=ctx)
+        if rvar is None:
+            rvar = relctx.new_root_rvar(ir_set, lateral=True, ctx=ctx)
+            relctx.include_rvar(
+                scope_stmt, rvar, path_id=ir_set.path_id, ctx=ctx)
+            pathctx.put_path_rvar(
+                stmt, ir_set.path_id, rvar, aspect='source', env=ctx.env)
 
     return rvar
 
@@ -1028,7 +1032,7 @@ def process_set_as_path(
         srcrel = srcctx.rel
         src_rvar = relctx.rvar_for_rel(srcrel, lateral=True, ctx=srcctx)
         relctx.include_rvar(stmt, src_rvar, path_id=ir_source.path_id, ctx=ctx)
-        stmt.path_id_mask.add(ir_source.path_id)
+        pathctx.put_path_id_mask(stmt, ir_source.path_id)
 
     # Path is a reference to a link property.
     if is_linkprop:

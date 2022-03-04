@@ -8785,6 +8785,108 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
 
         await self.migrate("")
 
+    async def test_edgeql_migration_reset_optional_01(self):
+        await self.migrate(r'''
+            abstract type Person {
+                required property name -> str;
+            }
+
+            type PC extending Person;
+        ''')
+
+        await self.migrate(r'''
+            abstract type Person {
+                property name -> str;
+            }
+
+            type PC extending Person;
+        ''')
+
+        await self.migrate(r'''
+            abstract type Person {
+                required property name -> str;
+            }
+
+            type PC extending Person;
+        ''', user_input=['""'])
+
+    async def test_edgeql_migration_reset_optional_02(self):
+        await self.migrate(r'''
+            abstract type Person {
+                required property name -> str;
+            }
+
+            type PC extending Person {
+                overloaded required property name -> str;
+            }
+        ''')
+
+        await self.migrate(r'''
+            abstract type Person {
+                property name -> str;
+            }
+
+            type PC extending Person {
+                overloaded property name -> str;
+            }
+        ''')
+
+    async def test_edgeql_migration_reset_optional_03(self):
+        await self.migrate(r'''
+            abstract type Person {
+                required property name -> str;
+            }
+
+            type PC extending Person {
+                overloaded required property name -> str;
+            }
+        ''')
+
+        await self.migrate(r'''
+            abstract type Person {
+                optional property name -> str;
+            }
+
+            type PC extending Person {
+                overloaded optional property name -> str;
+            }
+        ''')
+
+    @test.xfail('''
+        This fails because we try to set the parent as required while the
+        child is still optional.
+
+        For this to work, we need to process the *child* first,
+        but in order for the reverse case above to work we need to
+        process the *parent* first.
+
+        I don't know if there is any way to fix this sort of thing without
+        exposing this kind of semantic understanding to ordering.
+
+        Maybe suppressing some kinds of intermediate-state errors during
+        migrations would be OK?
+    ''')
+    async def test_edgeql_migration_reset_optional_04(self):
+        await self.migrate(r'''
+            abstract type Person {
+                optional property name -> str;
+            }
+
+            type PC extending Person {
+                overloaded optional property name -> str;
+            }
+        ''')
+
+        await self.migrate(r'''
+            abstract type Person {
+                required property name -> str;
+            }
+
+            type PC extending Person {
+                overloaded required property name -> str;
+            }
+        ''', user_input=["''", "''"])
+
     async def test_edgeql_migration_invalid_scalar_01(self):
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
@@ -8796,6 +8898,55 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 };
                 POPULATE MIGRATION;
             """)
+
+    async def test_edgeql_migration_inherited_default_01(self):
+        await self.migrate(r"""
+            abstract type Foo {
+                multi link link -> Obj {
+                    default := ( select Obj filter .name = 'X' )
+                };
+            }
+
+            type Bar extending Foo {}
+
+            type Obj {
+                required property name -> str {
+                    constraint exclusive;
+                }
+            }
+        """)
+
+    async def test_edgeql_migration_inherited_default_02(self):
+        await self.migrate(r"""
+            abstract type Foo {
+                multi link link -> Obj {
+                };
+            }
+
+            type Bar extending Foo {}
+
+            type Obj {
+                required property name -> str {
+                    constraint exclusive;
+                }
+            }
+        """)
+
+        await self.migrate(r"""
+            abstract type Foo {
+                multi link link -> Obj {
+                    default := ( select Obj filter .name = 'X' )
+                };
+            }
+
+            type Bar extending Foo {}
+
+            type Obj {
+                required property name -> str {
+                    constraint exclusive;
+                }
+            }
+        """)
 
     async def test_edgeql_migration_scalar_array_01(self):
         await self.migrate(r"""
@@ -10503,6 +10654,58 @@ class TestEdgeQLDataMigration(tb.DDLTestCase):
                 required link foo -> C {
                     default := (SELECT C FILTER .val2 = 'D00');
                 }
+            }
+        ''')
+
+    async def test_edgeql_migration_fiddly_delete_01(self):
+        await self.migrate(r'''
+            type Document {
+              multi link entries -> Entry {
+                constraint exclusive;
+              }
+              multi link fields := .entries.field;
+              required link form -> Form;
+            }
+
+            type Entry {
+              required link field -> Field;
+              required property value -> str;
+              link form := .field.form;
+            }
+
+            type Field {
+              required property name -> str;
+
+              link form := .<fields[IS Form];
+            }
+
+            type Form {
+              required property name -> str {
+                constraint exclusive;
+              }
+
+              multi link fields -> Field;
+            }
+        ''')
+        await self.migrate(r'''
+            type Entry {
+              required link field -> Field;
+              required property value -> str;
+              link form := .field.form;
+            }
+
+            type Field {
+              required property name -> str;
+
+              link form := .<fields[IS Form];
+            }
+
+            type Form {
+              required property name -> str {
+                constraint exclusive;
+              }
+
+              multi link fields -> Field;
             }
         ''')
 

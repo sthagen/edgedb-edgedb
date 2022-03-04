@@ -279,7 +279,7 @@ def include_specific_rvar(
 
         if not any(scope.path_id == path_id or
                    scope.find_child(path_id) for scope in scopes):
-            stmt.path_id_mask.add(path_id)
+            pathctx.put_path_id_mask(stmt, path_id)
 
     return rvar
 
@@ -580,9 +580,6 @@ def new_rel_rvar(
         ir_set: irast.Set, stmt: pgast.Query, *,
         lateral: bool=True,
         ctx: context.CompilerContextLevel) -> pgast.PathRangeVar:
-    if irutils.is_scalar_view_set(ir_set):
-        ensure_bond_for_expr(ir_set, stmt, ctx=ctx)
-
     return rvar_for_rel(stmt, typeref=ir_set.typeref, lateral=lateral, ctx=ctx)
 
 
@@ -711,7 +708,7 @@ def update_scope(
         parent_scope = scope_tree.parent
         if (parent_scope is None or
                 not parent_scope.is_visible(child_path)):
-            stmt.path_id_mask.add(child_path)
+            pathctx.put_path_id_mask(stmt, child_path)
 
 
 def maybe_get_scope_stmt(

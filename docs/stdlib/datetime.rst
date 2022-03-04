@@ -469,7 +469,7 @@ EdgeDB stores and outputs timezone-aware values in UTC.
                           duration + duration -> duration
                           datetime + cal::relative_duration \
                               -> cal::relative_duration
-                          cal::local_dateiime + cal::relative_duration \
+                          cal::local_datetime + cal::relative_duration \
                               -> cal::relative_duration
                           cal::local_date + cal::relative_duration \
                               -> cal::relative_duration
@@ -556,6 +556,8 @@ EdgeDB stores and outputs timezone-aware values in UTC.
 
 .. eql:function:: std::datetime_current() -> datetime
 
+    :index: now
+
     Return the current server date and time.
 
     .. code-block:: edgeql-repl
@@ -569,6 +571,8 @@ EdgeDB stores and outputs timezone-aware values in UTC.
 
 .. eql:function:: std::datetime_of_transaction() -> datetime
 
+    :index: now
+
     Return the date and time of the start of the current transaction.
 
 
@@ -576,6 +580,8 @@ EdgeDB stores and outputs timezone-aware values in UTC.
 
 
 .. eql:function:: std::datetime_of_statement() -> datetime
+
+    :index: now
 
     Return the date and time of the start of the current statement.
 

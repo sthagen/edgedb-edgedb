@@ -5173,7 +5173,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
-                r'may not have more than one concrete base type'):
+                r'scalar type may not have more than one concrete base type'):
             await self.con.execute('''
                 ALTER SCALAR TYPE myint EXTENDING b;
             ''')
@@ -5186,7 +5186,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
-                r'may not have more than one concrete base type'):
+                r'scalar type may not have more than one concrete base type'):
             await self.con.execute('''
                 ALTER SCALAR TYPE a EXTENDING str;
             ''')
@@ -5282,6 +5282,39 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 r'FINAL is not supported'):
             await self.con.execute('''
                 CREATE FINAL SCALAR TYPE myint EXTENDING std::int64;
+            ''')
+
+    async def test_edgeql_ddl_scalar_10(self):
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r'scalar type must have a concrete base type'):
+            await self.con.execute('''
+                create scalar type Foo;
+            ''')
+
+    async def test_edgeql_ddl_scalar_11(self):
+        await self.con.execute('''
+            create scalar type Foo extending str;
+        ''')
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r'scalar type must have a concrete base type'):
+            await self.con.execute('''
+                alter scalar type Foo drop extending str;
+            ''')
+
+    async def test_edgeql_ddl_scalar_12(self):
+        await self.con.execute('''
+            create scalar type Foo extending str;
+        ''')
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r'cannot change concrete base of a scalar type'):
+            await self.con.execute('''
+                alter scalar type Foo {
+                    drop extending str;
+                    extending int64 LAST;
+                };
             ''')
 
     async def test_edgeql_ddl_cast_01(self):
@@ -8081,7 +8114,7 @@ type default::Foo {
                 """)
 
     @test.xfail('''
-        EXISTS constraint violation not raised for MULTI property.
+        Reports an schema error. Maybe that is exactly what we want?
     ''')
     async def test_edgeql_ddl_constraint_04(self):
         # Test for #1727. Usage of EXISTS in constraints.
@@ -8140,7 +8173,7 @@ type default::Foo {
                 """)
 
     @test.xfail('''
-        EXISTS constraint violation not raised for MULTI links.
+        Reports an schema error. Maybe that is exactly what we want?
     ''')
     async def test_edgeql_ddl_constraint_06(self):
         # Test for #1727. Usage of EXISTS in constraints.
@@ -8305,6 +8338,79 @@ type default::Foo {
         await self.con.execute(r"""
             ALTER TYPE Foo DROP PROPERTY x;
         """)
+
+    async def test_edgeql_ddl_constraint_14(self):
+        # Test for #1727. Usage of EXISTS in constraints.
+        await self.con.execute(r"""
+            CREATE TYPE Foo;
+            CREATE TYPE Bar {
+                CREATE MULTI LINK children -> Foo {
+                    CREATE PROPERTY lprop -> str {
+                        CREATE CONSTRAINT expression ON (EXISTS __subject__)
+                    }
+                }
+            };
+        """)
+
+        await self.con.execute("""
+            INSERT Foo;
+            INSERT Bar {children := (SELECT Foo {@lprop := "test"})};
+        """)
+
+        with self.assertRaisesRegex(
+                edgedb.ConstraintViolationError,
+                r'invalid lprop'):
+            async with self.con.transaction():
+                await self.con.execute("""
+                    INSERT Bar { children := Foo };
+                """)
+
+    async def test_edgeql_ddl_constraint_15(self):
+        # Test for #1727. Usage of ?!= in constraints.
+        await self.con.execute(r"""
+            CREATE TYPE Foo;
+            CREATE TYPE Bar {
+                CREATE MULTI LINK children -> Foo {
+                    CREATE PROPERTY lprop -> str {
+                        CREATE CONSTRAINT expression ON (
+                            __subject__ ?!= <str>{})
+                    }
+                }
+            };
+        """)
+
+        await self.con.execute("""
+            INSERT Foo;
+            INSERT Bar {children := (SELECT Foo {@lprop := "test"})};
+        """)
+
+        with self.assertRaisesRegex(
+                edgedb.ConstraintViolationError,
+                r'invalid lprop'):
+            async with self.con.transaction():
+                await self.con.execute("""
+                    INSERT Bar { children := Foo };
+                """)
+
+    async def test_edgeql_ddl_constraint_16(self):
+        await self.con.execute(r"""
+            create type Foo {
+                create property x -> tuple<x: str, y: str> {
+                    create constraint exclusive;
+                }
+             };
+        """)
+
+        await self.con.execute("""
+            INSERT Foo { x := ('1', '2') };
+        """)
+
+        async with self.assertRaisesRegexTx(
+                edgedb.ConstraintViolationError,
+                r'x violates exclusivity constraint'):
+            await self.con.execute("""
+                INSERT Foo { x := ('1', '2') };
+            """)
 
     async def test_edgeql_ddl_constraint_alter_01(self):
         await self.con.execute(r"""
@@ -12412,6 +12518,67 @@ type default::Foo {
             delete Foo;
         """)
 
+    async def test_edgeql_ddl_switch_link_to_computed(self):
+        await self.con.execute(r"""
+            create type Identity;
+            create type User {
+                create required property name -> str {
+                    create constraint exclusive;
+                };
+                create multi link identities -> Identity {
+                    create constraint exclusive;
+                };
+            };
+            alter type Identity {
+                create link user -> User {
+                    on target delete delete source;
+                };
+            };
+        """)
+
+        await self.con.execute(r"""
+            alter type User {
+                alter link identities {
+                    drop constraint exclusive;
+                };
+                alter link identities {
+                    using (.<user[IS Identity]);
+                };
+            };
+        """)
+
+        await self.con.execute(r"""
+            insert Identity { user := (insert User { name := 'foo' }) }
+        """)
+        await self.con.execute(r"""
+            delete User filter true
+        """)
+
+    async def test_edgeql_ddl_switch_link_target(self):
+        await self.con.execute(r"""
+            create type Foo;
+            create type Bar;
+            create type Ptr { create link p -> Foo; };
+            alter type Ptr { alter link p set type Bar using (<Bar>{}); };
+            insert Ptr { p := (insert Bar) };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.ConstraintViolationError,
+            "prohibited by link target policy",
+        ):
+            await self.con.execute("""
+                delete Bar;
+            """)
+
+        await self.con.execute(r"""
+            drop type Ptr;
+        """)
+        await self.con.execute(r"""
+            insert Foo;
+            delete Foo;
+        """)
+
     async def test_edgeql_ddl_set_multi_with_children_01(self):
         await self.con.execute(r"""
             create type Person { create link lover -> Person; };
@@ -12521,6 +12688,19 @@ type default::Foo {
                 r"may not make non-empty object type 'default::Foo' abstract"):
             await self.con.execute(r"""
                 alter type Foo set abstract;
+            """)
+
+    async def test_edgeql_ddl_no_type_intro_in_default(self):
+        with self.assertRaisesRegex(
+                edgedb.UnsupportedFeatureError,
+                r"type introspection not supported in simple expressions"):
+            await self.con.execute(r"""
+                create scalar type Foo extending sequence;
+                create type Project {
+                    create required property number -> Foo {
+                        set default := sequence_next(introspect Foo);
+                    }
+                };
             """)
 
 
