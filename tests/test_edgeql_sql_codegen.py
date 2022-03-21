@@ -140,3 +140,36 @@ class TestEdgeQLSQLCodegen(tb.BaseEdgeQLCompilerTest):
             child.sort_clause[0].node, pgast.Expr,
             "simple sort clause is not a op expr",
         )
+
+    def test_codegen_update_no_conflict_01(self):
+        # Should have no conflict check because it has no subtypes
+        sql = self._compile('''
+            update User set { name := .name ++ '!' }
+        ''')
+
+        self.assertNotIn(
+            "exclusion_violation", sql,
+            "update has unnecessary conflict check"
+        )
+
+    SCHEMA_constraints = r'''
+        type Foo {
+            required property name -> str;
+            property foo -> str { constraint exclusive; }
+            property bar -> str;
+            constraint exclusive on (.bar);
+            property baz -> str;
+        }
+        type Bar extending Foo;
+    '''
+
+    def test_codegen_update_no_conflict_02(self):
+        # Should have no conflict because baz has no exclusive constraints
+        sql = self._compile('''
+            update constraints::Foo set { baz := '!' }
+        ''')
+
+        self.assertNotIn(
+            "exclusion_violation", sql,
+            "update has unnecessary conflict check"
+        )

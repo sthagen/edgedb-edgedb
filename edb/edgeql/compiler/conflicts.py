@@ -46,6 +46,34 @@ from . import setgen
 from . import typegen
 
 
+def _get_needed_ptrs(
+    subject_typ: s_objtypes.ObjectType,
+    obj_constrs: Sequence[s_constr.Constraint],
+    initial_ptrs: Iterable[str],
+    ctx: context.ContextLevel,
+) -> Tuple[Set[str], Dict[str, qlast.Expr]]:
+    needed_ptrs = set(initial_ptrs)
+    for constr in obj_constrs:
+        subjexpr = constr.get_subjectexpr(ctx.env.schema)
+        assert subjexpr
+        needed_ptrs |= qlutils.find_subject_ptrs(subjexpr.qlast)
+
+    wl = list(needed_ptrs)
+    ptr_anchors = {}
+    while wl:
+        p = wl.pop()
+        ptr = subject_typ.getptr(ctx.env.schema, s_name.UnqualName(p))
+        if expr := ptr.get_expr(ctx.env.schema):
+            assert isinstance(expr.qlast, qlast.Expr)
+            ptr_anchors[p] = expr.qlast
+            for ref in qlutils.find_subject_ptrs(expr.qlast):
+                if ref not in needed_ptrs:
+                    wl.append(ref)
+                    needed_ptrs.add(ref)
+
+    return needed_ptrs, ptr_anchors
+
+
 def _compile_conflict_select(
     stmt: irast.MutatingStmt,
     subject_typ: s_objtypes.ObjectType,
@@ -65,24 +93,9 @@ def _compile_conflict_select(
     `cnstrs` contains the constraints to consider.
     """
     # Find which pointers we need to grab
-    needed_ptrs = set(constrs)
-    for constr in obj_constrs:
-        subjexpr = constr.get_subjectexpr(ctx.env.schema)
-        assert subjexpr
-        needed_ptrs |= qlutils.find_subject_ptrs(subjexpr.qlast)
-
-    wl = list(needed_ptrs)
-    ptr_anchors = {}
-    while wl:
-        p = wl.pop()
-        ptr = subject_typ.getptr(ctx.env.schema, s_name.UnqualName(p))
-        if expr := ptr.get_expr(ctx.env.schema):
-            assert isinstance(expr.qlast, qlast.Expr)
-            ptr_anchors[p] = expr.qlast
-            for ref in qlutils.find_subject_ptrs(expr.qlast):
-                if ref not in needed_ptrs:
-                    wl.append(ref)
-                    needed_ptrs.add(ref)
+    needed_ptrs, ptr_anchors = _get_needed_ptrs(
+        subject_typ, obj_constrs, constrs.keys(), ctx=ctx
+    )
 
     ctx.anchors = ctx.anchors.copy()
 
@@ -175,7 +188,6 @@ def _compile_conflict_select(
         s_utils.name_to_ast_ref(subject_typ.get_name(ctx.env.schema))])
 
     for constr in obj_constrs:
-        # TODO: learn to skip irrelevant ones for UPDATEs at least?
         subjectexpr = constr.get_subjectexpr(ctx.env.schema)
         assert subjectexpr and isinstance(subjectexpr.qlast, qlast.Expr)
         lhs = qlutils.subject_paths_substitute(subjectexpr.qlast, ptr_anchors)
@@ -470,6 +482,9 @@ def compile_insert_unless_conflict_on(
             raise errors.UnsupportedFeatureError(
                 'UNLESS CONFLICT can not use ELSE when constraint is from a '
                 'parent type',
+                details=(
+                    f"The existing object can't be exposed in the ELSE clause "
+                    f"because it may not have type {typ.get_name(schema)}"),
                 context=constraint_spec.context,
             )
 
@@ -508,8 +523,18 @@ def compile_inheritance_conflict_selects(
     beginning at the start of the statement.
     """
     pointers = _get_exclusive_ptr_constraints(typ, ctx=ctx)
-    obj_constrs = typ.get_constraints(ctx.env.schema).objects(
-        ctx.env.schema)
+    exclusive = ctx.env.schema.get('std::exclusive', type=s_constr.Constraint)
+    obj_constrs = [
+        constr for constr in
+        typ.get_constraints(ctx.env.schema).objects(ctx.env.schema)
+        if constr.issubclass(ctx.env.schema, exclusive)
+    ]
+
+    shape_ptrs = set()
+    for elem, op in stmt.subject.shape:
+        assert elem.rptr is not None
+        if op != qlast.ShapeOp.MATERIALIZE:
+            shape_ptrs.add(elem.rptr.ptrref.shortname.name)
 
     # This is a little silly, but for *this* we need to do one per
     # constraint (so that we can properly identify which constraint
@@ -517,10 +542,28 @@ def compile_inheritance_conflict_selects(
     entries: List[Tuple[s_constr.Constraint, ConstraintPair]] = []
     for name, (ptr, ptr_constrs) in pointers.items():
         for ptr_constr in ptr_constrs:
-            if _constr_matters(ptr_constr, ctx):
+            # For updates, we only need to emit the check if we actually
+            # modify a pointer used by the constraint. For inserts, though
+            # everything must be in play, since constraints can depend on
+            # nonexistence also.
+            if (
+                _constr_matters(ptr_constr, ctx)
+                and (
+                    isinstance(stmt, irast.InsertStmt)
+                    or (_get_needed_ptrs(typ, (), [name], ctx)[0] & shape_ptrs)
+                )
+            ):
                 entries.append((ptr_constr, ({name: (ptr, [ptr_constr])}, [])))
     for obj_constr in obj_constrs:
-        if _constr_matters(obj_constr, ctx):
+        # See note above about needed ptrs check
+        if (
+            _constr_matters(obj_constr, ctx)
+            and (
+                isinstance(stmt, irast.InsertStmt)
+                or (_get_needed_ptrs(
+                    typ, [obj_constr], (), ctx)[0] & shape_ptrs)
+            )
+        ):
             entries.append((obj_constr, ({}, [obj_constr])))
 
     # For updates, we need to pull from the actual result overlay,
@@ -562,21 +605,28 @@ def compile_inheritance_conflict_checks(
         return None
 
     assert isinstance(subject_stype, s_objtypes.ObjectType)
-    # TODO: when the conflicting statement is an UPDATE, only
-    # look at things it updated
     modified_ancestors = set()
     base_object = ctx.env.schema.get(
         'std::BaseObject', type=s_objtypes.ObjectType)
 
+    subject_stype = subject_stype.get_nearest_non_derived_parent(
+        ctx.env.schema)
     subject_stypes = [subject_stype]
     # For updates, we need to also consider all descendants, because
     # those could also have interesting constraints of their own.
     if isinstance(stmt, irast.UpdateStmt):
-        subject_stypes.extend(subject_stype.descendants(ctx.env.schema))
+        subject_stypes.extend(
+            desc for desc in subject_stype.descendants(ctx.env.schema)
+            if not desc.is_view(ctx.env.schema)
+        )
 
-    # N.B that for updates, the update itself will be in dml_stmts,
-    # since an update can conflict with itself if there are subtypes.
     for ir in ctx.env.dml_stmts:
+        # N.B that for updates, the update itself will be in dml_stmts,
+        # since an update can conflict with itself if there are subtypes.
+        # If there aren't subtypes, though, skip it.
+        if ir is stmt and len(subject_stypes) == 1:
+            continue
+
         typ = setgen.get_set_type(ir.subject, ctx=ctx)
         assert isinstance(typ, s_objtypes.ObjectType)
         typ = typ.get_nearest_non_derived_parent(ctx.env.schema)
@@ -584,16 +634,13 @@ def compile_inheritance_conflict_checks(
         typs = [typ]
         # As mentioned above, need to consider descendants of updates
         if isinstance(ir, irast.UpdateStmt):
-            typs.extend(typ.descendants(ctx.env.schema))
+            typs.extend(
+                desc for desc in typ.descendants(ctx.env.schema)
+                if not desc.is_view(ctx.env.schema)
+            )
 
         for typ in typs:
-            if typ.is_view(ctx.env.schema):
-                continue
-
             for subject_stype in subject_stypes:
-                if subject_stype.is_view(ctx.env.schema):
-                    continue
-
                 # If the earlier DML has a shared ancestor that isn't
                 # BaseObject and isn't (if it's an insert) the same type,
                 # then we need to see if we need a conflict select

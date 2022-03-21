@@ -190,7 +190,7 @@ def _infer_shape(
 
             ptrref = shape_set.rptr.ptrref
             if (
-                expr_mult is MANY
+                expr_mult.is_many()
                 and shape_op is not qlast.ShapeOp.APPEND
                 and shape_op is not qlast.ShapeOp.SUBTRACT
                 and irtyputils.is_object(ptrref.out_target)
@@ -300,6 +300,14 @@ def _infer_set_inner(
         and irutils.get_path_root(ir).path_id in ctx.distinct_iterators
     ):
         path_mult = dataclasses.replace(path_mult, disjoint_union=True)
+
+    # Mark free object roots
+    if irtyputils.is_free_object(ir.typeref) and not ir.expr:
+        path_mult = dataclasses.replace(path_mult, fresh_free_object=True)
+
+    # Remove free object freshness when we see them through a binding
+    if ir.is_binding == irast.BindingKind.With and path_mult.fresh_free_object:
+        path_mult = dataclasses.replace(path_mult, fresh_free_object=False)
 
     return path_mult
 
@@ -423,7 +431,7 @@ def __infer_oper_call(
         # are actually proportional to the element-wise args in our
         # operators.
         result = _max_multiplicity(mult)
-        if result == MANY:
+        if result.is_many():
             return result
 
         # Even when arguments are of multiplicity ONE, we cannot
@@ -559,7 +567,7 @@ def _infer_for_multiplicity(
     elif itmult.is_many():
         return MANY
     else:
-        if result_mult.disjoint_union:
+        if result_mult.disjoint_union or result_mult.fresh_free_object:
             return result_mult
         else:
             return MANY
@@ -725,9 +733,28 @@ def __infer_tuple(
         infer_multiplicity(el.val, scope_tree=scope_tree, ctx=ctx)
         for el in ir.elements
     )
+    cards = [
+        cardinality.infer_cardinality(el.val, scope_tree=scope_tree, ctx=ctx)
+        for el in ir.elements
+    ]
+
+    num_many = sum(card.is_multi() for card in cards)
+    new_els = []
+    for el, card in zip(els, cards):
+        # If more than one tuple element is many, everything has MANY
+        # multiplicity.
+        if num_many > 1:
+            el = MANY
+        # If exactly one tuple element is many, then *that* element
+        # can keep its underlying multiplicity, while everything else
+        # becomes MANY.
+        elif num_many == 1 and card.is_single():
+            el = MANY
+        new_els.append(el)
+
     return ContainerMultiplicityInfo(
         own=_max_multiplicity(els).own,
-        elements=els,
+        elements=tuple(new_els),
     )
 
 

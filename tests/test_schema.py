@@ -1863,6 +1863,69 @@ class TestSchema(tb.BaseSchemaLoadTest):
             }
         ''', modname='default')
 
+    def test_schema_computed_01(self):
+        # Issue #3499
+        """
+            type Version {
+                multi link fields -> Field {
+                    property position -> int32 {
+                        default := 0;
+                    }
+                }
+                multi link sections :=
+                    (select .ordered_fields filter .type = 'section');
+                multi link ordered_fields :=
+                    (select .fields order by @position);
+            }
+
+            type Field {
+                required property type -> str;
+                multi link versions := .<fields[is Version];
+            }
+        """
+
+    def test_schema_computed_02(self):
+        # Issue #3499
+        """
+            type Version {
+                multi link fields -> Field {
+                    property position -> int32 {
+                        default := 0;
+                    }
+                }
+                multi link ordered_fields :=
+                    (select .fields order by @position);
+                multi link sections :=
+                    (select .ordered_fields filter .type = 'section');
+            }
+
+            type Field {
+                required property type -> str;
+                multi link versions := .<fields[is Version];
+            }
+        """
+
+    def test_schema_computed_03(self):
+        # Issue #3499
+        """
+            type Version {
+                multi link ordered_fields :=
+                    (select .fields order by @position);
+                multi link sections :=
+                    (select .ordered_fields filter .type = 'section');
+                multi link fields -> Field {
+                    property position -> int32 {
+                        default := 0;
+                    }
+                }
+            }
+
+            type Field {
+                required property type -> str;
+                multi link versions := .<fields[is Version];
+            }
+        """
+
 
 class TestGetMigration(tb.BaseSchemaLoadTest):
     """Test migration deparse consistency.
@@ -6820,6 +6883,34 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                         constraint std::exclusive;
                     };
                 };
+            """
+        ])
+
+    def test_schema_migrations_on_target_delete_01(self):
+        self._assert_migration_equivalence([
+            r"""
+                type User {
+                    multi link workspaces -> Workspace {
+                        property title -> str;
+                        on target delete allow;
+                    }
+                }
+
+                type Workspace {
+                    multi link users := .<workspaces[is User];
+                }
+            """,
+            r"""
+                type User {
+                    multi link workspaces := .<users[is Workspace];
+                }
+
+                type Workspace {
+                    multi link users -> User {
+                        property title -> str;
+                        on target delete allow;
+                    }
+                }
             """
         ])
 

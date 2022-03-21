@@ -570,6 +570,14 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
         AT_MOST_ONE
         """
 
+    def test_edgeql_ir_card_inference_60b(self):
+        """
+        SELECT Person
+        FILTER .p = 12 AND .card.name = 'Imp'
+% OK %
+        AT_MOST_ONE
+        """
+
     def test_edgeql_ir_card_inference_61(self):
         """
         SELECT Person FILTER .first = "Phil" OR .last = "Emarg"
@@ -906,4 +914,73 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
         SELECT 1 OFFSET 2
 % OK %
         AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_105(self):
+        """
+        select User
+        filter .avatar.name = 'Dragon'
+% OK %
+        MANY
+        """
+
+    def test_edgeql_ir_card_inference_106(self):
+        """
+        select User
+        filter .unique_avatar.name = 'Dragon'
+% OK %
+        AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_107(self):
+        """
+        WITH
+          __scope_0_Hero := DETACHED default::User
+        UPDATE __scope_0_Hero
+        FILTER (__scope_0_Hero.name = "Spider-Man")
+        SET {
+          name := ("The Amazing " ++ __scope_0_Hero.name)
+        }
+% OK %
+        AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_108(self):
+        """
+        WITH
+          __scope_0_Hero := DETACHED default::User
+        SELECT __scope_0_Hero
+        FILTER (__scope_0_Hero.name = "Spider-Man")
+% OK %
+        AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_109(self):
+        """
+        select User
+        filter (detached (select User limit 1)).name = 'Alice'
+% OK %
+        MANY
+        """
+
+    def test_edgeql_ir_card_inference_110(self):
+        """
+        with z := (select User { asdf := .name })
+        select (
+            even := z.asdf,
+            elements := count(z)
+        )
+% OK %
+        MANY
+        """
+
+    def test_edgeql_ir_card_inference_111(self):
+        """
+        with z := (select User { asdf := {.name} })
+        select (
+            even := z.asdf,
+            elements := count(z)
+        )
+% OK %
+        MANY
         """

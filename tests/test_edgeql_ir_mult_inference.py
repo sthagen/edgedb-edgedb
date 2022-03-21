@@ -344,7 +344,7 @@ class TestEdgeQLMultiplicityInference(tb.BaseEdgeQLCompilerTest):
         """
         SELECT (1, Card.name).0
 % OK %
-        ONE
+        MANY
         """
 
     def test_edgeql_ir_mult_inference_40(self):
@@ -726,4 +726,33 @@ class TestEdgeQLMultiplicityInference(tb.BaseEdgeQLCompilerTest):
         SELECT <str>{}
 % OK %
         ZERO
+        """
+
+    def test_edgeql_ir_mult_inference_76(self):
+        """
+        SELECT (Card, User).1
+% OK %
+        MANY
+        """
+
+    def test_edgeql_ir_mult_inference_77(self):
+        """
+        for x in {1, 2} union { foo := 10 }
+% OK %
+        ONE
+        """
+
+    def test_edgeql_ir_mult_inference_78(self):
+        """
+        with F := { foo := 10 }
+        for x in {1, 2} union F
+% OK %
+        MANY
+        """
+
+    def test_edgeql_ir_mult_inference_79(self):
+        """
+        for x in {1, 2, 3} union (with z := x, select z)
+% OK %
+        ONE
         """
