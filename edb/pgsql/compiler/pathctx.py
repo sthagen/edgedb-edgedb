@@ -793,18 +793,6 @@ def put_path_rvar(
     assert isinstance(path_id, irast.PathId)
     stmt.get_rvar_map(flavor)[path_id, aspect] = rvar
 
-    # Normally, masked paths (i.e paths that are only behind a fence below),
-    # will not be exposed in a query namespace.  However, when the masked
-    # path in the *main* path of a set, it must still be exposed, but no
-    # further than the immediate parent query.
-    try:
-        query = rvar.query
-    except NotImplementedError:
-        pass
-    else:
-        if path_id in query.path_id_mask:
-            put_path_id_mask(stmt, path_id)
-
 
 def put_path_value_rvar(
         stmt: pgast.Query, path_id: irast.PathId, rvar: pgast.PathRangeVar, *,
@@ -1020,7 +1008,8 @@ def _get_rel_path_output(
             raise ValueError(
                 f'could not resolve trailing pointer class for {path_id}')
 
-        assert not ptrref.is_computable
+        if ptrref.is_computable:
+            raise LookupError("can't lookup computable ptrref")
 
         if ptr_info is None:
             ptr_info = pg_types.get_ptrref_storage_info(
