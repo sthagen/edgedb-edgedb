@@ -478,6 +478,7 @@ def set_as_subquery(
     #     )
     with ctx.subrel() as subctx:
         wrapper = subctx.rel
+        wrapper.name = ctx.env.aliases.get('set_as_subquery')
         dispatch.visit(ir_set, ctx=subctx)
 
         if as_value:
@@ -1074,6 +1075,7 @@ def process_set_as_path(
             path_id=ir_set.path_id,
             aspects=['value']
         )
+        rvars = [main_rvar]
 
     elif not semi_join:
         # Link range.
@@ -1199,6 +1201,7 @@ def process_set_as_subquery(
     source_set_rvar = None
     if ir_set.rptr is not None:
         ir_source = ir_set.rptr.source
+
         if not is_objtype_path:
             source_is_visible = True
         else:
@@ -1208,7 +1211,9 @@ def process_set_as_subquery(
             assert outer_fence is not None
             source_is_visible = outer_fence.is_visible(ir_source.path_id)
 
-        if source_is_visible:
+        if source_is_visible and (
+            ir_source.path_id not in ctx.skippable_sources
+        ):
             source_set_rvar = get_set_rvar(ir_source, ctx=ctx)
             # Force a source rvar so that trivial computed pointers
             # on erroneous objects (like a bad array deref) fail.
@@ -1473,9 +1478,7 @@ def process_set_as_distinct(
         subrvar = relctx.rvar_for_rel(
             subqry, typeref=arg.typeref, lateral=True, ctx=subctx)
 
-    aspects = pathctx.list_path_aspects(subqry, arg.path_id, env=ctx.env)
-    relctx.include_rvar(
-        stmt, subrvar, ir_set.path_id, aspects=aspects, ctx=ctx)
+    relctx.include_rvar(stmt, subrvar, ir_set.path_id, ctx=ctx)
 
     value_var = pathctx.get_rvar_path_var(
         subrvar, ir_set.path_id, aspect='value', env=ctx.env)
@@ -1800,6 +1803,7 @@ def process_set_as_tuple(
     assert isinstance(expr, irast.Tuple)
 
     with ctx.new() as subctx:
+        subctx.expr_exposed_tuple_cheat = None
         elements = []
 
         ttypes = {}
@@ -1816,7 +1820,10 @@ def process_set_as_tuple(
             # We compile in a subrel *solely* so that we can map
             # each element individually. It would be nice to have
             # a way to do this that doesn't actually affect the output!
-            with ctx.subrel() as newctx:
+            with subctx.subrel() as newctx:
+                if element is ctx.expr_exposed_tuple_cheat:
+                    newctx.expr_exposed = True
+
                 if path_id != element.val.path_id:
                     pathctx.put_path_id_map(
                         newctx.rel, path_id, element.val.path_id)
@@ -1886,15 +1893,21 @@ def process_set_as_tuple_indirection(
     with ctx.new() as subctx:
         # Usually the LHS is is not exposed, but when we are directly
         # projecting from an explicit tuple, and the result is a
-        # collection, keep it exposed. This behavior is needed for our
+        # collection, arrange to have the element we are projecting
+        # treated as exposed. This behavior is needed for our
         # eta-expansion of arrays to work, since it generates that
         # idiom in a place where it needs the output to be exposed.
-        if not (
-            not tuple_set.is_binding
+        subctx.expr_exposed = False
+        if (
+            ctx.expr_exposed
+            and not tuple_set.is_binding
             and isinstance(tuple_set.expr, irast.Tuple)
             and ir_set.path_id.is_collection_path()
         ):
-            subctx.expr_exposed = False
+            for el in tuple_set.expr.elements:
+                if el.name == rptr.ptrref.shortname.name:
+                    subctx.expr_exposed_tuple_cheat = el
+                    break
         rvar = get_set_rvar(tuple_set, ctx=subctx)
 
         # Check if unpack_rvar has found our answer for us.
@@ -2509,13 +2522,11 @@ def process_set_as_std_min_max(
 
         pathctx.put_path_id_map(newctx.rel, ir_set.path_id, ir_arg.path_id)
 
-    aspects = ('value', 'source')
-
     func_rvar = relctx.new_rel_rvar(ir_set, newctx.rel, ctx=ctx)
     relctx.include_rvar(stmt, func_rvar, ir_set.path_id,
-                        pull_namespace=False, aspects=aspects, ctx=ctx)
+                        pull_namespace=False, ctx=ctx)
 
-    return new_stmt_set_rvar(ir_set, stmt, aspects=aspects, ctx=ctx)
+    return new_stmt_set_rvar(ir_set, stmt, ctx=ctx)
 
 
 def _process_set_func_with_ordinality(
@@ -2933,6 +2944,7 @@ def process_set_as_agg_expr_inner(
         ir_set: irast.Set, stmt: pgast.SelectStmt, *,
         aspect: str,
         wrapper: Optional[pgast.SelectStmt],
+        for_group_by: bool=False,
         ctx: context.CompilerContextLevel) -> SetRVars:
     expr = ir_set.expr
     assert isinstance(expr, irast.FunctionCall)
@@ -2949,7 +2961,8 @@ def process_set_as_agg_expr_inner(
             # the (unacceptable) hardcoding of function names,
             # check if the aggregate accepts a single argument
             # of "any" to determine serialized input safety.
-            serialization_safe = expr.func_polymorphic
+            serialization_safe = (
+                expr.func_polymorphic and aspect == 'serialized')
 
             if not serialization_safe:
                 argctx.expr_exposed = False
@@ -2959,10 +2972,14 @@ def process_set_as_agg_expr_inner(
             for i, (ir_call_arg, typemod) in enumerate(
                     zip(expr.args, expr.params_typemods)):
                 ir_arg = ir_call_arg.expr
-                dispatch.visit(ir_arg, ctx=argctx)
 
                 arg_ref: pgast.BaseExpr
-                if aspect == 'serialized':
+                if for_group_by:
+                    arg_ref = set_as_subquery(
+                        ir_arg, as_value=True, ctx=argctx)
+                elif aspect == 'serialized':
+                    dispatch.visit(ir_arg, ctx=argctx)
+
                     arg_ref = pathctx.get_path_serialized_or_value_var(
                         argctx.rel, ir_arg.path_id, env=argctx.env)
 
@@ -2970,6 +2987,8 @@ def process_set_as_agg_expr_inner(
                         arg_ref = output.serialize_expr(
                             arg_ref, path_id=ir_arg.path_id, env=argctx.env)
                 else:
+                    dispatch.visit(ir_arg, ctx=argctx)
+
                     arg_ref = pathctx.get_path_value_var(
                         argctx.rel, ir_arg.path_id, env=argctx.env)
 
@@ -3038,21 +3057,6 @@ def process_set_as_agg_expr_inner(
 
                         query.sort_clause = []
 
-                if (irtyputils.is_scalar(ir_arg.typeref)
-                        and ir_arg.typeref.base_type is not None):
-                    # Cast scalar refs to the base type in aggregate
-                    # expressions, since PostgreSQL does not create array
-                    # types for custom domains and will fail to process a
-                    # query with custom domains appearing as array
-                    # elements.
-                    #
-                    # XXX: Remove this once we switch to PostgreSQL 11,
-                    #      which supports domain type arrays.
-                    pgtype_name = pg_types.pg_type_from_ir_typeref(
-                        ir_arg.typeref.base_type)
-                    pgtype = pgast.TypeName(name=pgtype_name)
-                    arg_ref = pgast.TypeCast(arg=arg_ref, type_name=pgtype)
-
                 args.append(arg_ref)
 
         name = get_func_call_backend_name(expr, ctx=newctx)
@@ -3060,6 +3064,29 @@ def process_set_as_agg_expr_inner(
         set_expr = pgast.FuncCall(
             name=name, args=args, agg_order=agg_sort, agg_filter=agg_filter,
             ser_safe=serialization_safe and all(x.ser_safe for x in args))
+
+        if for_group_by and not expr.impl_is_strict:
+            # If we are doing this for a GROUP BY, and the function is not
+            # strict in its arguments, we are in trouble!
+
+            # The problem is that we don't have a way to filter the NULLs
+            # out in the subquery in general. The value could be
+            # computed *inside* the subquery, so we can't use an agg_filter,
+            # and we can't filter it inside the subquery because it gets
+            # executed separately for each row and collapses to NULL when
+            # it is empty!
+
+            # Fortunately I think that only array_agg has this property,
+            # so we can just handle that by popping the NULLs out.
+            # If other cases turn up, we could handle it by falling
+            # back to aggregate grouping.
+
+            # TODO: only do this when there might really be a null?
+            assert str(expr.func_shortname) == 'std::array_agg'
+            set_expr = pgast.FuncCall(
+                name=('array_remove',),
+                args=[set_expr, pgast.NullConstant()]
+            )
 
         if expr.error_on_null_result:
             set_expr = pgast.FuncCall(
@@ -3090,7 +3117,7 @@ def process_set_as_agg_expr_inner(
                 )
             )
 
-    if expr.func_initial_value is not None:
+    if expr.func_initial_value is not None and wrapper:
         iv_ir = expr.func_initial_value.expr
         assert iv_ir is not None
 
@@ -3122,6 +3149,12 @@ def process_set_as_agg_expr_inner(
 
     pathctx.put_path_var_if_not_exists(
         stmt, ir_set.path_id, set_expr, aspect=aspect, env=ctx.env)
+    # Cheat a little bit: as discussed above, pretend the serialized
+    # value is also really a value. Eta-expansion should ensure this
+    # only happens when we don't really need the value again.
+    if aspect == 'serialized':
+        pathctx.put_path_var_if_not_exists(
+            stmt, ir_set.path_id, set_expr, aspect='value', env=ctx.env)
 
     return new_stmt_set_rvar(ir_set, stmt, ctx=ctx)
 
@@ -3138,30 +3171,28 @@ def process_set_as_agg_expr(
     if expr.func_initial_value is not None:
         wrapper = stmt
 
-    # When in a serialization context, we need to compute both a value
-    # version and a serialized version of the aggregate function call,
-    # since we may need both (Consider `WITH X := array_agg(User), ...`).
+    # In a serialization context that produces something containing an object,
+    # we produce *only* a serialized value, and we claim it is the value too.
+    # For this to be correct, we need to only have serialized agg expr results
+    # in cases where value can't be used anymore. Our eta-expansion pass
+    # make sure this happens.
+    # (... the only such *function* currently is array_agg.)
+
+    # Though if the result type contains no objects, the value should be good
+    # enough, so don't generate a bunch of unnecessary code to produce
+    # a serialized value when we can use value.
+    serialized = (
+        output.in_serialization_ctx(ctx=ctx)
+        and irtyputils.contains_object(ir_set.typeref)
+    )
 
     cctx = ctx.subrel() if wrapper else ctx.new()
     with cctx as xctx:
-        xctx.expr_exposed = False
+        xctx.expr_exposed = serialized
+        aspect = 'serialized' if serialized else 'value'
         process_set_as_agg_expr_inner(
-            ir_set, xctx.rel, aspect='value', wrapper=wrapper,
+            ir_set, xctx.rel, aspect=aspect, wrapper=wrapper,
             ctx=xctx)
-
-    # Though if the result type is a scalar, the value should be good
-    # enough, so don't generate a bunch of unnessecary code to produce
-    # a serialized value when we can use value.
-    if (
-        output.in_serialization_ctx(ctx=ctx)
-        and not irtyputils.is_scalar(ir_set.typeref)
-    ):
-        cctx = ctx.subrel() if wrapper else ctx.new()
-        with cctx as xctx:
-            xctx.expr_exposed = True
-            process_set_as_agg_expr_inner(
-                ir_set, xctx.rel, aspect='serialized', wrapper=wrapper,
-                ctx=xctx)
 
     return new_stmt_set_rvar(ir_set, stmt, ctx=ctx)
 
@@ -3236,7 +3267,10 @@ def process_set_as_array_expr(
 
     elements = []
     s_elements = []
-    serializing = output.in_serialization_ctx(ctx=ctx)
+    serializing = (
+        output.in_serialization_ctx(ctx=ctx)
+        and irtyputils.contains_object(ir_set.typeref)
+    )
 
     for ir_element in expr.elements:
         element = dispatch.compile(ir_element, ctx=ctx)
@@ -3259,24 +3293,24 @@ def process_set_as_array_expr(
 
             s_elements.append(s_var)
 
-    set_expr = build_array_expr(expr, elements, ctx=ctx)
-
-    pathctx.put_path_value_var_if_not_exists(
-        stmt, ir_set.path_id, set_expr, env=ctx.env)
-
     if serializing:
-        s_set_expr = astutils.safe_array_expr(
+        set_expr = astutils.safe_array_expr(
             s_elements, ser_safe=all(x.ser_safe for x in s_elements))
 
         if irutils.is_empty_array_expr(expr):
-            s_set_expr = pgast.TypeCast(
-                arg=s_set_expr,
+            set_expr = pgast.TypeCast(
+                arg=set_expr,
                 type_name=pgast.TypeName(
                     name=pg_types.pg_type_from_ir_typeref(expr.typeref)
                 )
             )
 
         pathctx.put_path_serialized_var(
-            stmt, ir_set.path_id, s_set_expr, env=ctx.env)
+            stmt, ir_set.path_id, set_expr, env=ctx.env)
+    else:
+        set_expr = build_array_expr(expr, elements, ctx=ctx)
+
+    pathctx.put_path_value_var_if_not_exists(
+        stmt, ir_set.path_id, set_expr, env=ctx.env)
 
     return new_stmt_set_rvar(ir_set, stmt, ctx=ctx)

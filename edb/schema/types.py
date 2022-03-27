@@ -62,6 +62,7 @@ class ExprType(enum.IntEnum):
     Insert = enum.auto()
     Update = enum.auto()
     Delete = enum.auto()
+    Group = enum.auto()
 
     def is_update(self) -> bool:
         return self == ExprType.Update
@@ -70,7 +71,7 @@ class ExprType(enum.IntEnum):
         return self == ExprType.Insert
 
     def is_mutation(self) -> bool:
-        return self != ExprType.Select
+        return self != ExprType.Select and self != ExprType.Group
 
 
 TypeT = typing.TypeVar('TypeT', bound='Type')
@@ -273,6 +274,9 @@ class Type(
     def contains_json(self, schema: s_schema.Schema) -> bool:
         return self.contains_predicate(lambda x: x.is_json(schema), schema)
 
+    def find_array(self, schema: s_schema.Schema) -> Optional[Type]:
+        return self.find_predicate(lambda x: x.is_array(), schema)
+
     def contains_array_of_tuples(self, schema: s_schema.Schema) -> bool:
         return self.contains_predicate(
             lambda x: x.is_array_of_tuples(schema), schema)
@@ -428,7 +432,10 @@ class Type(
     ) -> TypeShell[TypeT]:
         name = typing.cast(s_name.QualName, self.get_name(schema))
 
-        if union_of := self.get_union_of(schema):
+        if (
+            (union_of := self.get_union_of(schema))
+            and not self.is_view(schema)
+        ):
             assert isinstance(self, so.QualifiedObject)
             return UnionTypeShell(
                 components=[
@@ -438,7 +445,10 @@ class Type(
                 opaque=self.get_is_opaque_union(schema),
                 schemaclass=type(self),
             )
-        elif intersection_of := self.get_intersection_of(schema):
+        elif (
+            (intersection_of := self.get_intersection_of(schema))
+            and not self.is_view(schema)
+        ):
             assert isinstance(self, so.QualifiedObject)
             return IntersectionTypeShell(
                 components=[

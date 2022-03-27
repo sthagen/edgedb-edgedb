@@ -124,6 +124,11 @@ class CompilerContextLevel(compiler.ContextLevel):
     #: directly exposed to the output of the statement.
     expr_exposed: Optional[bool]
 
+    #: A hack that indicates a tuple element that should be treated as
+    #: exposed. This enables us to treat 'bar' in (foo, bar).1 as exposed,
+    #: which eta-expansion and some casts rely on.
+    expr_exposed_tuple_cheat: Optional[irast.TupleElement]
+
     #: Expression to use to force SQL expression volatility in this context
     #: (Delayed with a lambda to avoid inserting it when not used.)
     volatility_ref: Tuple[
@@ -140,6 +145,11 @@ class CompilerContextLevel(compiler.ContextLevel):
     #: Paths, which need to be explicitly wrapped into SQL
     #: optionality scaffolding.
     force_optional: FrozenSet[irast.PathId]
+
+    #: Paths that can be ignored when they appear as the source of a
+    # computable. This is key to optimizing away free object sources in
+    # group by aggregates.
+    skippable_sources: FrozenSet[irast.PathId]
 
     #: Specifies that references to a specific Set must be narrowed
     #: by only selecting instances of type specified by the mapping value.
@@ -226,11 +236,13 @@ class CompilerContextLevel(compiler.ContextLevel):
             self.materializing = frozenset()
 
             self.expr_exposed = None
+            self.expr_exposed_tuple_cheat = None
             self.volatility_ref = ()
             self.current_insert_path_id = None
 
             self.disable_semi_join = frozenset()
             self.force_optional = frozenset()
+            self.skippable_sources = frozenset()
             self.intersection_narrowing = {}
 
             self.path_scope = collections.ChainMap()
@@ -262,11 +274,13 @@ class CompilerContextLevel(compiler.ContextLevel):
             self.materializing = prevlevel.materializing
 
             self.expr_exposed = prevlevel.expr_exposed
+            self.expr_exposed_tuple_cheat = prevlevel.expr_exposed_tuple_cheat
             self.volatility_ref = prevlevel.volatility_ref
             self.current_insert_path_id = prevlevel.current_insert_path_id
 
             self.disable_semi_join = prevlevel.disable_semi_join
             self.force_optional = prevlevel.force_optional
+            self.skippable_sources = prevlevel.skippable_sources
             self.intersection_narrowing = prevlevel.intersection_narrowing
 
             self.path_scope = prevlevel.path_scope

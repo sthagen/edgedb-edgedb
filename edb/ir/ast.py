@@ -254,6 +254,10 @@ class BasePointerRef(ImmutableBase):
             res.update(child.descendants())
         return res
 
+    @property
+    def real_material_ptr(self) -> BasePointerRef:
+        return self.material_ptr or self
+
     def __repr__(self) -> str:
         return f'<ir.{type(self).__name__} \'{self.name}\' at 0x{id(self):x}>'
 
@@ -508,12 +512,23 @@ class Param:
     """IR type reference"""
 
 
-class MaterializeVolatile(typing.NamedTuple):
+class MaterializeVolatile(Base):
     pass
 
 
-class MaterializeVisible(typing.NamedTuple):
+class MaterializeVisible(Base):
+    __ast_hidden__ = {'sets'}
     sets: typing.Set[typing.Tuple[PathId, Set]]
+
+
+@markup.serializer.serializer.register(MaterializeVisible)
+def _serialize_to_markup_mat_vis(
+        ir: MaterializeVisible, *, ctx: typing.Any) -> typing.Any:
+    # We want to show the path_ids but *not* to show the full sets
+    node = ast.serialize_to_markup(ir, ctx=ctx)
+    fixed = {(x, y.path_id) for x, y in ir.sets}
+    node.add_child(label='uses', node=markup.serialize(fixed, ctx=ctx))
+    return node
 
 
 MaterializeReason = typing.Union[MaterializeVolatile, MaterializeVisible]
@@ -828,7 +843,7 @@ class MaterializedSet(Base):
 
 
 @markup.serializer.serializer.register(MaterializedSet)
-def _serialize_to_markup(
+def _serialize_to_markup_mat_set(
         ir: MaterializedSet, *, ctx: typing.Any) -> typing.Any:
     # We want to show the path_ids but *not* to show the full uses
     node = ast.serialize_to_markup(ir, ctx=ctx)
@@ -865,11 +880,19 @@ class SelectStmt(FilteredStmt):
     implicit_wrapper: bool = False
 
 
-class GroupStmt(Stmt):
-    subject: Set
-    groupby: typing.List[Set]
-    result: Set
-    group_path_id: PathId
+class GroupStmt(FilteredStmt):
+    subject: Set = EmptySet()  # type: ignore
+    using: typing.Dict[str, typing.Tuple[Set, qltypes.Cardinality]] = (
+        ast.field(factory=dict))
+    by: typing.List[qlast.GroupingElement]
+    result: Set = EmptySet()  # type: ignore
+    group_binding: Set = EmptySet()  # type: ignore
+    grouping_binding: typing.Optional[Set] = None
+    orderby: typing.Optional[typing.List[SortExpr]] = None
+    # Optimization information
+    group_aggregate_sets: typing.Dict[
+        typing.Optional[Set], typing.FrozenSet[PathId]
+    ] = ast.field(factory=dict)
 
 
 class MutatingStmt(Stmt):

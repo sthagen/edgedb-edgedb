@@ -397,6 +397,32 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             )
         )
 
+    async def test_edgeql_functions_array_agg_21(self):
+        await self.assert_query_result(
+            r'''
+            WITH X := array_agg((1, 2)),
+            SELECT X FILTER X[0].0 = 1;
+            ''',
+            [[[1, 2]]],
+        )
+
+    async def test_edgeql_functions_array_agg_22(self):
+        await self.assert_query_result(
+            r'''
+            WITH X := array_agg((foo := 1, bar := 2)),
+            SELECT X FILTER X[0].foo = 1;
+            ''',
+            [[{"bar": 2, "foo": 1}]],
+        )
+
+    async def test_edgeql_functions_array_agg_23(self):
+        await self.assert_query_result(
+            r'''
+            SELECT X := array_agg((foo := 1, bar := 2)) FILTER X[0].foo = 1;
+            ''',
+            [[{"bar": 2, "foo": 1}]],
+        )
+
     async def test_edgeql_functions_array_unpack_01(self):
         await self.assert_query_result(
             r'''SELECT [1, 2];''',
@@ -775,6 +801,14 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
         await self.assert_query_result(
             r'''SELECT array_get([(a:=20, b:=1), (a:=30, b:=2)], 1).b;''',
             [2],
+        )
+
+    async def test_edgeql_functions_array_get_07(self):
+        await self.assert_query_result(
+            r'''
+                SELECT array_get([Issue.number], 0)
+            ''',
+            {'1', '2', '3', '4'},
         )
 
     @test.xfail(
@@ -3057,6 +3091,14 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             SELECT max(User).id = max(User.id);
             ''',
             [True],
+        )
+
+    async def test_edgeql_functions_max_04(self):
+        await self.assert_query_result(
+            r'''
+            select max(array_unpack(array_agg(User))) { name };
+            ''',
+            [{'name': str}],
         )
 
     async def test_edgeql_functions_all_01(self):
