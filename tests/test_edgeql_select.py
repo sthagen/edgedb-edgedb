@@ -2629,6 +2629,40 @@ class TestEdgeQLSelect(tb.QueryTestCase):
         for row in res:
             self.assertNotEqual(row[1].id, None)
 
+    async def test_edgeql_select_setops_23(self):
+        await self.assert_query_result(
+            r"""
+            WITH X := (insert Publication { title := "x" }),
+                 Y := (insert Publication { title := "y" }),
+                 foo := X union Y,
+            select foo { title1 };
+            """,
+            tb.bag([
+                {'title1': 'x'},
+                {'title1': 'y'},
+            ])
+        )
+
+        await self.assert_query_result(
+            r"""
+            WITH X := (select Publication filter .title = 'x'),
+                 Y := (select Publication filter .title = 'y'),
+                 foo := X union Y,
+            select foo { title1 };
+            """,
+            tb.bag([
+                {'title1': 'x'},
+                {'title1': 'y'},
+            ])
+        )
+
+        await self.assert_query_result(
+            r"""
+            SELECT (Issue UNION <Issue>{}).number;
+            """,
+            {'1', '2', '3', '4'},
+        )
+
     async def test_edgeql_select_order_01(self):
         await self.assert_query_result(
             r'''
@@ -6315,6 +6349,25 @@ class TestEdgeQLSelect(tb.QueryTestCase):
         """)
 
         assert len(res) == 100
+
+    async def test_edgeql_select_set_literal_in_order(self):
+        # *Technically speaking*, we don't necessarily promise
+        # semantically that a set literal's elements be returned in
+        # order. In practice, we want to, though.
+
+        # Test for a range of lengths
+        for n in (2, 4, 10, 25):
+            s = list(range(n))
+            await self.assert_query_result(
+                f"SELECT {set(s)}",
+                s
+            )
+
+            us = ' union '.join(str(i) for i in s)
+            await self.assert_query_result(
+                f"SELECT {us}",
+                s
+            )
 
     async def test_edgeql_select_shape_on_scalar(self):
         with self.assertRaisesRegex(
