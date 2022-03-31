@@ -6914,6 +6914,106 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             """
         ])
 
+    def test_schema_migrations_rename_with_stuff_01(self):
+        self._assert_migration_equivalence([
+            r"""
+                type Base {
+                        property x -> str;
+                        property xbang := .x ++ "!";
+                }
+
+                type NamedObject extending Base {
+                        required property foo -> str;
+                }
+            """,
+            r"""
+                type Base {
+                        property x -> str;
+                        property xbang := .x ++ "!";
+                }
+
+                type ReNamedObject extending Base {
+                        required property foo -> str;
+                }
+            """
+        ])
+
+    def test_schema_migrations_rename_with_stuff_02(self):
+        self._assert_migration_equivalence([
+            r"""
+                type Base {
+                        property x -> str;
+                        index on (.x);
+                }
+
+                type NamedObject extending Base {
+                        required property foo -> str;
+                }
+            """,
+            r"""
+                type Base {
+                        property x -> str;
+                        index on (.x);
+                }
+
+                type ReNamedObject extending Base {
+                        required property foo -> str;
+                }
+            """
+        ])
+
+    def test_schema_migrations_rename_with_stuff_03(self):
+        self._assert_migration_equivalence([
+            r"""
+                type Base {
+                        property x -> str;
+                        property z -> str {
+                            constraint expression on (__subject__ != "lol");
+                        };
+                }
+
+                type NamedObject extending Base {
+                        required property foo -> str;
+                }
+            """,
+            r"""
+                type Base {
+                        property x -> str;
+                        property z -> str {
+                            constraint expression on (__subject__ != "lol");
+                        };
+                }
+
+                type ReNamedObject extending Base {
+                        required property foo -> str;
+                }
+            """
+        ])
+
+    def test_schema_migrations_rename_with_stuff_04(self):
+        self._assert_migration_equivalence([
+            r"""
+                type Base {
+                        property x -> str;
+                        constraint expression on ((.x != "lol"));
+                }
+
+                type NamedObject extending Base {
+                        required property foo -> str;
+                }
+            """,
+            r"""
+                type Base {
+                        property x -> str;
+                        constraint expression on ((.x != "lol"));
+                }
+
+                type ReNamedObject extending Base {
+                        required property foo -> str;
+                }
+            """
+        ])
+
 
 class TestDescribe(tb.BaseSchemaLoadTest):
     """Test the DESCRIBE command."""
@@ -8344,6 +8444,55 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             """,
             explicit_modules=True,
         )
+
+    def test_schema_describe_missing_01(self):
+        with self.assertRaisesRegex(
+                errors.InvalidReferenceError, "function 'lol' does not exist"):
+
+            self._assert_describe(
+                """
+                # nothing, whatever
+                """,
+
+                'describe function lol',
+
+                """
+                # we'll error instead of checking this
+                """,
+            )
+
+    def test_schema_describe_missing_02(self):
+        with self.assertRaisesRegex(
+                errors.InvalidReferenceError, "module 'lol' does not exist"):
+
+            self._assert_describe(
+                """
+                # nothing, whatever
+                """,
+
+                'describe module lol',
+
+                """
+                # we'll error instead of checking this
+                """,
+            )
+
+    def test_schema_describe_missing_03(self):
+        with self.assertRaisesRegex(
+                errors.InvalidReferenceError,
+                "object type 'std::lol' does not exist"):
+
+            self._assert_describe(
+                """
+                # nothing, whatever
+                """,
+
+                'describe type lol',
+
+                """
+                # we'll error instead of checking this
+                """,
+            )
 
 
 class TestCreateMigration(tb.BaseSchemaTest):
