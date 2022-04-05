@@ -114,6 +114,8 @@ BUILD_DEPS = [
 RUST_VERSION = '1.53.0'  # Also update docs/internal/dev.rst
 
 EDGEDBCLI_REPO = 'https://github.com/edgedb/edgedb-cli'
+# This can be either a tag or a commit
+EDGEDBCLI_COMMIT = '87cb7e08452f37b97e95475df43006fa6131c0bf'
 
 EXTRA_DEPS = {
     'test': TEST_DEPS,
@@ -366,11 +368,13 @@ def _check_rust():
             f'edgedb from source (see https://rustup.rs/)')
 
 
-def _get_edgedbcli_rev():
+def _get_edgedbcli_rev(name):
     output = subprocess.check_output(
-        ['git', 'ls-remote', EDGEDBCLI_REPO, 'master'],
+        ['git', 'ls-remote', EDGEDBCLI_REPO, name],
         universal_newlines=True,
-    )
+    ).strip()
+    if not output:
+        return None
     rev, _ = output.split()
     return rev
 
@@ -392,9 +396,15 @@ def _compile_cli(build_base, build_temp):
     env = dict(os.environ)
     env['CARGO_TARGET_DIR'] = str(build_temp / 'rust' / 'cli')
     env['PSQL_DEFAULT_PATH'] = build_base / 'postgres' / 'install' / 'bin'
-    git_rev = env.get("EDGEDBCLI_GIT_REV")
+    git_name = env.get("EDGEDBCLI_GIT_REV")
+    if not git_name:
+        git_name = EDGEDBCLI_COMMIT
+    # The name can be a branch or tag, so we attempt to look it up
+    # with ls-remote. If we don't find anything, we assume it's a
+    # commit hash.
+    git_rev = _get_edgedbcli_rev(git_name)
     if not git_rev:
-        git_rev = _get_edgedbcli_rev()
+        git_rev = git_name
 
     subprocess.run(
         [
@@ -416,6 +426,50 @@ def _compile_cli(build_base, build_temp):
         rust_root / 'bin' / 'edgedb',
         ROOT_PATH / 'edb' / 'cli' / 'edgedb',
     )
+
+
+def _build_studio(build_base, build_temp):
+    from edb import buildmeta
+
+    studio_root = build_base / 'edgedb-studio'
+    if not studio_root.exists():
+        subprocess.run(
+            [
+                'git',
+                'clone',
+                'https://github.com/edgedb/edgedb-studio.git',
+                studio_root
+            ],
+            check=True
+        )
+    else:
+        subprocess.run(
+            ['git', 'pull'],
+            check=True,
+            cwd=studio_root
+        )
+
+    dest = buildmeta.get_shared_data_dir_path() / 'studio'
+    if dest.exists():
+        shutil.rmtree(dest)
+
+    # install deps
+    subprocess.run(['yarn'], check=True, cwd=studio_root)
+
+    # run build
+    env = dict(os.environ)
+    # With CI=true (set in GH CI) `yarn build` fails if there are any
+    # warnings. We don't need this check in our build so we're disabling
+    # this behavior.
+    env['CI'] = ''
+    subprocess.run(
+        ['yarn', 'build'],
+        check=True,
+        cwd=studio_root / 'web',
+        env=env
+    )
+
+    shutil.copytree(studio_root / 'web' / 'build', dest)
 
 
 class build(distutils_build.build):
@@ -468,6 +522,11 @@ class build(distutils_build.build):
 class develop(setuptools_develop.develop):
 
     def run(self, *args, **kwargs):
+        from edb.common import devmode
+
+        # buildmeta path resolution needs this
+        devmode.enable_dev_mode()
+
         build = self.get_finalized_command('build')
         build_temp = pathlib.Path(build.build_temp).resolve()
         build_base = pathlib.Path(build.build_base).resolve()
@@ -486,6 +545,7 @@ class develop(setuptools_develop.develop):
 
         _compile_parsers(build_base / 'lib', inplace=True)
         _compile_postgres(build_base)
+        _build_studio(build_base, build_temp)
 
 
 class ci_helper(setuptools.Command):
@@ -543,7 +603,7 @@ class ci_helper(setuptools.Command):
             print(binascii.hexlify(ext_hash).decode())
 
         elif self.type == 'cli':
-            print(_get_edgedbcli_rev())
+            print(EDGEDBCLI_COMMIT)
 
         elif self.type == 'build_temp':
             print(pathlib.Path(build.build_temp).resolve())
@@ -709,6 +769,30 @@ class build_cli(setuptools.Command):
         )
 
 
+class build_studio(setuptools.Command):
+
+    description = "build EdgeDB Studio"
+    user_options: List[str] = []
+
+    def initialize_options(self):
+        pass
+
+    def finalize_options(self):
+        pass
+
+    def run(self, *args, **kwargs):
+        from edb.common import devmode
+
+        # buildmeta path resolution needs this
+        devmode.enable_dev_mode()
+
+        build = self.get_finalized_command('build')
+        _build_studio(
+            pathlib.Path(build.build_base).resolve(),
+            pathlib.Path(build.build_temp).resolve(),
+        )
+
+
 class build_parsers(setuptools.Command):
 
     description = "build the parsers"
@@ -740,6 +824,7 @@ COMMAND_CLASSES = {
     'build_postgres': build_postgres,
     'build_cli': build_cli,
     'build_parsers': build_parsers,
+    'build_studio': build_studio,
     'ci_helper': ci_helper,
 }
 
@@ -856,6 +941,12 @@ setuptools.setup(
         setuptools_extension.Extension(
             "edb.server.protocol.notebook_ext",
             ["edb/server/protocol/notebook_ext.pyx"],
+            extra_compile_args=EXT_CFLAGS,
+            extra_link_args=EXT_LDFLAGS),
+
+        setuptools_extension.Extension(
+            "edb.server.protocol.studio_ext",
+            ["edb/server/protocol/studio_ext.pyx"],
             extra_compile_args=EXT_CFLAGS,
             extra_link_args=EXT_LDFLAGS),
 
