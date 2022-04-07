@@ -114,8 +114,8 @@ BUILD_DEPS = [
 RUST_VERSION = '1.53.0'  # Also update docs/internal/dev.rst
 
 EDGEDBCLI_REPO = 'https://github.com/edgedb/edgedb-cli'
-# This can be either a tag or a commit
-EDGEDBCLI_COMMIT = '87cb7e08452f37b97e95475df43006fa6131c0bf'
+# This can be a branch, tag, or commit
+EDGEDBCLI_COMMIT = 'master'
 
 EXTRA_DEPS = {
     'test': TEST_DEPS,
@@ -422,23 +422,31 @@ def _compile_cli(build_base, build_temp):
         check=True,
     )
 
+    cli_dest = ROOT_PATH / 'edb' / 'cli' / 'edgedb'
+    # Delete the target first, to avoid "Text file busy" errors during
+    # the copy if the CLI is currently running.
+    try:
+        cli_dest.unlink()
+    except FileNotFoundError:
+        pass
+
     shutil.copy(
         rust_root / 'bin' / 'edgedb',
-        ROOT_PATH / 'edb' / 'cli' / 'edgedb',
+        cli_dest,
     )
 
 
-def _build_studio(build_base, build_temp):
+def _build_ui(build_base, build_temp):
     from edb import buildmeta
 
-    studio_root = build_base / 'edgedb-studio'
-    if not studio_root.exists():
+    ui_root = build_base / 'edgedb-studio'
+    if not ui_root.exists():
         subprocess.run(
             [
                 'git',
                 'clone',
                 'https://github.com/edgedb/edgedb-studio.git',
-                studio_root
+                ui_root,
             ],
             check=True
         )
@@ -446,15 +454,15 @@ def _build_studio(build_base, build_temp):
         subprocess.run(
             ['git', 'pull'],
             check=True,
-            cwd=studio_root
+            cwd=ui_root,
         )
 
-    dest = buildmeta.get_shared_data_dir_path() / 'studio'
+    dest = buildmeta.get_shared_data_dir_path() / 'ui'
     if dest.exists():
         shutil.rmtree(dest)
 
     # install deps
-    subprocess.run(['yarn'], check=True, cwd=studio_root)
+    subprocess.run(['yarn'], check=True, cwd=ui_root)
 
     # run build
     env = dict(os.environ)
@@ -465,11 +473,11 @@ def _build_studio(build_base, build_temp):
     subprocess.run(
         ['yarn', 'build'],
         check=True,
-        cwd=studio_root / 'web',
+        cwd=ui_root / 'web',
         env=env
     )
 
-    shutil.copytree(studio_root / 'web' / 'build', dest)
+    shutil.copytree(ui_root / 'web' / 'build', dest)
 
 
 class build(distutils_build.build):
@@ -522,10 +530,14 @@ class build(distutils_build.build):
 class develop(setuptools_develop.develop):
 
     def run(self, *args, **kwargs):
+        from edb import buildmeta
         from edb.common import devmode
 
-        # buildmeta path resolution needs this
-        devmode.enable_dev_mode()
+        try:
+            buildmeta.get_build_metadata_value("SHARED_DATA_DIR")
+        except buildmeta.MetadataError:
+            # buildmeta path resolution needs this
+            devmode.enable_dev_mode()
 
         build = self.get_finalized_command('build')
         build_temp = pathlib.Path(build.build_temp).resolve()
@@ -545,7 +557,7 @@ class develop(setuptools_develop.develop):
 
         _compile_parsers(build_base / 'lib', inplace=True)
         _compile_postgres(build_base)
-        _build_studio(build_base, build_temp)
+        _build_ui(build_base, build_temp)
 
 
 class ci_helper(setuptools.Command):
@@ -603,7 +615,7 @@ class ci_helper(setuptools.Command):
             print(binascii.hexlify(ext_hash).decode())
 
         elif self.type == 'cli':
-            print(EDGEDBCLI_COMMIT)
+            print(_get_edgedbcli_rev(EDGEDBCLI_COMMIT) or EDGEDBCLI_COMMIT)
 
         elif self.type == 'build_temp':
             print(pathlib.Path(build.build_temp).resolve())
@@ -769,9 +781,9 @@ class build_cli(setuptools.Command):
         )
 
 
-class build_studio(setuptools.Command):
+class build_ui(setuptools.Command):
 
-    description = "build EdgeDB Studio"
+    description = "build EdgeDB UI"
     user_options: List[str] = []
 
     def initialize_options(self):
@@ -781,13 +793,17 @@ class build_studio(setuptools.Command):
         pass
 
     def run(self, *args, **kwargs):
+        from edb import buildmeta
         from edb.common import devmode
 
-        # buildmeta path resolution needs this
-        devmode.enable_dev_mode()
+        try:
+            buildmeta.get_build_metadata_value("SHARED_DATA_DIR")
+        except buildmeta.MetadataError:
+            # buildmeta path resolution needs this
+            devmode.enable_dev_mode()
 
         build = self.get_finalized_command('build')
-        _build_studio(
+        _build_ui(
             pathlib.Path(build.build_base).resolve(),
             pathlib.Path(build.build_temp).resolve(),
         )
@@ -824,7 +840,7 @@ COMMAND_CLASSES = {
     'build_postgres': build_postgres,
     'build_cli': build_cli,
     'build_parsers': build_parsers,
-    'build_studio': build_studio,
+    'build_ui': build_ui,
     'ci_helper': ci_helper,
 }
 
@@ -945,8 +961,8 @@ setuptools.setup(
             extra_link_args=EXT_LDFLAGS),
 
         setuptools_extension.Extension(
-            "edb.server.protocol.studio_ext",
-            ["edb/server/protocol/studio_ext.pyx"],
+            "edb.server.protocol.ui_ext",
+            ["edb/server/protocol/ui_ext.pyx"],
             extra_compile_args=EXT_CFLAGS,
             extra_link_args=EXT_LDFLAGS),
 

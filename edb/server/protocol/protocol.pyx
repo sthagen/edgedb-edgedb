@@ -47,7 +47,7 @@ from . import metrics
 from . import server_info
 from . import notebook_ext
 from . import system_api
-from . import studio_ext
+from . import ui_ext
 
 
 HTTPStatus = http.HTTPStatus
@@ -60,7 +60,9 @@ PROTO_MIME = (
 
 
 cdef class HttpRequest:
-    pass
+
+    def __cinit__(self):
+        self.body = b''
 
 
 cdef class HttpResponse:
@@ -198,7 +200,7 @@ cdef class HttpProtocol:
                 self.current_request.accept = value
 
     def on_body(self, body: bytes):
-        self.current_request.body = body
+        self.current_request.body += body
 
     def on_message_begin(self):
         self.current_request = HttpRequest()
@@ -488,7 +490,7 @@ cdef class HttpProtocol:
                 )
                 return
             if path_parts[0] == 'ui' and self.server.is_admin_ui_enabled():
-                await studio_ext.handle_request(
+                await ui_ext.handle_request(
                     request,
                     response,
                     path_parts[1:],
