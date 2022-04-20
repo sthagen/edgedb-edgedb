@@ -696,6 +696,13 @@ class Compiler:
                         array_type_id=array_tid,
                     )
 
+            globals = None
+            if ir.globals:
+                globals = [
+                    (str(glob.global_name), glob.has_present_arg)
+                    for glob in ir.globals
+                ]
+
             if ctx.protocol_version >= (0, 12):
                 in_type_data, in_type_id = \
                     sertypes.TypeSerializer.describe_params(
@@ -733,6 +740,7 @@ class Compiler:
                 sql=(sql_bytes,),
                 sql_hash=sql_hash,
                 cardinality=result_cardinality,
+                globals=globals,
                 in_type_id=in_type_id.bytes,
                 in_type_data=in_type_data,
                 in_type_args=in_type_args,
@@ -746,6 +754,10 @@ class Compiler:
             if ir.params:
                 raise errors.QueryError(
                     'EdgeQL script queries cannot accept parameters')
+
+            if ir.globals:
+                raise errors.QueryError(
+                    'EdgeQL script queries cannot use globals')
 
             return dbstate.SimpleQuery(
                 sql=(sql_bytes,),
@@ -1565,6 +1577,7 @@ class Compiler:
 
         sql = (sql_text.encode(),)
 
+        single_unit = False
         if ql.scope is qltypes.ConfigScope.SESSION:
             config_op = ireval.evaluate_to_config_op(ir, schema=schema)
 
@@ -1583,7 +1596,8 @@ class Compiler:
             )
             current_tx.update_database_config(database_config)
 
-        elif ql.scope is qltypes.ConfigScope.INSTANCE:
+        elif ql.scope in (
+                qltypes.ConfigScope.INSTANCE, qltypes.ConfigScope.GLOBAL):
             try:
                 config_op = ireval.evaluate_to_config_op(ir, schema=schema)
             except ireval.UnsupportedExpressionError:
@@ -1591,6 +1605,7 @@ class Compiler:
                 # op will be produced by the compiler as json.
                 config_op = None
 
+            single_unit = True
         else:
             raise AssertionError(f'unexpected configuration scope: {ql.scope}')
 
@@ -1599,6 +1614,7 @@ class Compiler:
             is_backend_setting=is_backend_setting,
             config_scope=ql.scope,
             requires_restart=requires_restart,
+            single_unit=single_unit,
             config_op=config_op,
         )
 
@@ -1778,6 +1794,7 @@ class Compiler:
                     unit.in_type_data = comp.in_type_data
                     unit.in_type_args = comp.in_type_args
                     unit.in_type_id = comp.in_type_id
+                    unit.globals = comp.globals
 
                     unit.cacheable = comp.cacheable
 
@@ -1876,6 +1893,15 @@ class Compiler:
                             'transaction block')
 
                     unit.system_config = True
+                elif comp.config_scope is qltypes.ConfigScope.GLOBAL:
+                    unit.system_config = True
+                    # FIXME: We want to be able to do this in a block
+                    # with other commands.
+                    if statements_len > 1:
+                        raise errors.UnsupportedFeatureError(
+                            'SET GLOBAL cannot be executed in a block '
+                            'with other commands')
+
                 elif comp.config_scope is qltypes.ConfigScope.DATABASE:
                     unit.database_config = True
 

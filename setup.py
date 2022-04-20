@@ -67,10 +67,11 @@ RUNTIME_DEPS = [
 
 DOCS_DEPS = [
     'docutils~=0.17.0',
-    'lxml~=4.6.3',
+    'lxml~=4.8.0',
     'Pygments~=2.10.0',
     'Sphinx~=4.2.0',
     'sphinxcontrib-asyncio~=0.3.0',
+    'sphinx_code_tabs~=0.5.3',
 ]
 
 TEST_DEPS = [

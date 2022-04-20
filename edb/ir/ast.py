@@ -514,6 +514,20 @@ class Param:
     """IR type reference"""
 
 
+@dataclasses.dataclass(frozen=True)
+class Global(Param):
+    global_name: sn.QualName
+    """The name of the global"""
+
+    has_present_arg: bool
+    """Whether this global needs a companion parameter indicating whether
+    the global is present.
+
+    This is needed when a global has a default but also is optional,
+    and so we need to distinguish "unset" and "set to {}".
+    """
+
+
 class MaterializeVolatile(Base):
     pass
 
@@ -552,6 +566,7 @@ class Statement(Command):
     expr: typing.Union[Set, Expr]
     views: typing.Dict[sn.Name, s_types.Type]
     params: typing.List[Param]
+    globals: typing.List[Global]
     cardinality: qltypes.Cardinality
     volatility: qltypes.Volatility
     multiplicity: typing.Optional[qltypes.Multiplicity]
@@ -645,6 +660,13 @@ class Parameter(ImmutableExpr):
     name: str
     required: bool
     typeref: TypeRef
+    # None means not a global. Otherwise, whether this is an implicitly
+    # created global for a function call.
+    is_implicit_global: typing.Optional[bool] = None
+
+    @property
+    def is_global(self) -> bool:
+        return self.is_implicit_global is not None
 
 
 class TupleElement(ImmutableBase):
@@ -774,6 +796,9 @@ class FunctionCall(Call):
     # Set to the type of the variadic parameter of the bound function
     # (or None, if the function has no variadic parameters.)
     variadic_param_type: typing.Optional[TypeRef] = None
+
+    # Additional arguments representing global variables
+    global_args: typing.Optional[typing.List[Set]] = None
 
 
 class OperatorCall(Call):
@@ -953,6 +978,7 @@ class ConfigCommand(Command, Expr):
 class ConfigSet(ConfigCommand):
 
     expr: Set
+    required: bool
     backend_expr: typing.Optional[Set] = None
 
 

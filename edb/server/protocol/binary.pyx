@@ -17,6 +17,7 @@
 #
 
 import asyncio
+import base64
 import collections
 import hashlib
 import json
@@ -862,7 +863,7 @@ cdef class EdgeConnection:
                 FROM _edgecon_current_savepoint s2;
         ''', ignore_data=False)
 
-        conf = aliases = immutables.Map()
+        conf = aliases = globals = immutables.Map()
         sp_id = None
 
         if ret:
@@ -880,6 +881,15 @@ cdef class EdgeConnection:
                         source='session',
                         scope=qltypes.ConfigScope.SESSION,
                     )
+                elif stype == b'G':
+                    pyval = base64.b64decode(json.loads(svalue))
+                    globals = config.set_value(
+                        globals,
+                        name=sname,
+                        value=pyval,
+                        source='session',
+                        scope=qltypes.ConfigScope.GLOBAL,
+                    )
                 elif stype == b'A':
                     if not sname:
                         sname = None
@@ -894,9 +904,9 @@ cdef class EdgeConnection:
 
         _dbview = self.get_dbview()
         if _dbview.in_tx():
-            _dbview.rollback_tx_to_savepoint(sp_id, aliases, conf)
+            _dbview.rollback_tx_to_savepoint(sp_id, aliases, conf, globals)
         else:
-            _dbview.recover_aliases_and_config(aliases, conf)
+            _dbview.recover_aliases_and_config(aliases, conf, globals)
 
     #############
 
@@ -1623,7 +1633,7 @@ cdef class EdgeConnection:
 
         query_unit = compiled.query_unit
         _dbview = self.get_dbview()
-        if _dbview.in_tx_error():
+        if _dbview.in_tx_error() or query_unit.tx_savepoint_rollback:
             if not (query_unit.tx_savepoint_rollback or query_unit.tx_rollback):
                 _dbview.raise_in_tx_error()
 
@@ -2265,12 +2275,18 @@ cdef class EdgeConnection:
                 f"invalid argument count, "
                 f"expected: {decl_args}, got: {recv_args}")
 
+        num_args = recv_args
         if query.first_extra is not None:
             assert recv_args == query.first_extra, \
                 f"argument count mismatch {recv_args} != {query.first_extra}"
-            out_buf.write_int16(<int16_t>(recv_args + query.extra_count))
-        else:
-            out_buf.write_int16(<int16_t>recv_args)
+            num_args += query.extra_count
+        if query.query_unit.globals:
+            num_args += len(query.query_unit.globals)
+            for _, has_present_arg in query.query_unit.globals:
+                if has_present_arg:
+                    num_args += 1
+
+        out_buf.write_int16(<int16_t>num_args)
 
         if query.query_unit.in_type_args:
             for param in query.query_unit.in_type_args:
@@ -2301,6 +2317,24 @@ cdef class EdgeConnection:
 
         if query.first_extra is not None:
             out_buf.write_bytes(query.extra_blob)
+
+        # Inject any globals variables into the argument stream.
+        if query.query_unit.globals:
+            globs = self.get_dbview().get_globals()
+            for (glob, has_present_arg) in query.query_unit.globals:
+                val = None
+                entry = globs.get(glob)
+                if entry:
+                    val = entry.value
+                if val:
+                    out_buf.write_int32(len(val))
+                    out_buf.write_bytes(val)
+                else:
+                    out_buf.write_int32(-1)
+                if has_present_arg:
+                    out_buf.write_int32(1)
+                    present = b'\x01' if val is not None else b'\x00'
+                    out_buf.write_bytes(present)
 
         # All columns are in binary format
         out_buf.write_int32(0x00010001)
