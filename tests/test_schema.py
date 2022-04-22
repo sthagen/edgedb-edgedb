@@ -5719,6 +5719,41 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             }
         """])
 
+    def test_schema_migrations_equivalence_policies_01(self):
+        self._assert_migration_equivalence([r"""
+            type X {
+                required property x -> str;
+                access policy test
+                    allow all using (.x not like '%redacted%');
+            };
+        """, r"""
+            type X {
+                required property x -> str;
+                access policy asdf
+                    allow all using (.x not like '%redacted%');
+            };
+        """, r"""
+            type X {
+                required property x -> str;
+                access policy asdf
+                    when (true)
+                    allow all using (.x not like '%redacted%');
+            };
+        """])
+
+    def test_schema_migrations_equivalence_policies_02(self):
+        self._assert_migration_equivalence([r"""
+            type Foo {
+                access policy asdf
+                allow all using ((select Bar filter .name = 'X').b ?? false);
+            }
+            type Bar {
+                required property name -> str;
+                property b -> bool;
+                   constraint exclusive on (.name);
+            };
+        """])
+
     def test_schema_migrations_equivalence_globals_01(self):
         self._assert_migration_equivalence([r"""
             global foo -> str;
@@ -5730,6 +5765,36 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             required global foo -> int64 {
                 default := 0;
             }
+        """])
+
+    def test_schema_migrations_equivalence_globals_02(self):
+        self._assert_migration_equivalence([r"""
+            global foo -> str;
+        """, r"""
+            global foo -> str {
+                default := "test";
+            }
+        """, r"""
+            global foo := "test";
+        """, r"""
+            global foo := 10;
+        """, r"""
+            global bar := 10;
+        """, r"""
+            required global bar := 10;
+        """, r"""
+            required multi global bar := 10;
+        """, r"""
+            global bar -> str;
+        """])
+
+    def test_schema_migrations_equivalence_globals_03(self):
+        self._assert_migration_equivalence([r"""
+            global foo := 20;
+        """, r"""
+            alias foo := 20;
+        """, r"""
+            global foo := 20;
         """])
 
     def test_schema_migrations_equivalence_globals_use_01(self):
@@ -8097,6 +8162,11 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                       schema::Type,
                       schema::Source
             {
+                CREATE MULTI LINK access_policies
+                  EXTENDING schema::reference -> schema::AccessPolicy {
+                    ON TARGET DELETE ALLOW;
+                    CREATE CONSTRAINT std::exclusive;
+                };
                 CREATE MULTI LINK intersection_of -> schema::ObjectType;
                 CREATE MULTI LINK union_of -> schema::ObjectType;
                 CREATE PROPERTY compound_type := (
@@ -8122,6 +8192,11 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                     schema::Type,
                     schema::Source
             {
+                multi link access_policies
+                  extending schema::reference -> schema::AccessPolicy {
+                    on target delete allow;
+                    constraint std::exclusive;
+                };
                 multi link intersection_of -> schema::ObjectType;
                 multi link links := (.pointers[IS schema::Link]);
                 multi link properties := (

@@ -5445,6 +5445,115 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             []
         )
 
+    async def test_edgeql_ddl_policies_01(self):
+        await self.con.execute(r"""
+            create required global filtering -> bool { set default := false };
+            create global cur -> str;
+
+            create type User {
+                create required property name -> str;
+                create access policy all_on allow all using (true);
+                create access policy filtering
+                    when (global filtering)
+                    deny read write using (.name ?!= global cur);
+            };
+            create type Bot extending User;
+        """)
+
+        await self.assert_query_result(
+            '''
+                select schema::AccessPolicy {
+                    name, condition, expr, action, access_kind,
+                    sname := .subject.name, root := not exists .bases };
+
+            ''',
+            tb.bag([
+                {
+                    "access_kind": ["All"],
+                    "action": "Allow",
+                    "condition": None,
+                    "expr": "true",
+                    "name": "all_on",
+                    "sname": "default::User",
+                    "root": True,
+                },
+                {
+                    "access_kind": ["Read", "Write"],
+                    "action": "Deny",
+                    "condition": "global default::filtering",
+                    "expr": "(.name ?!= global default::cur)",
+                    "name": "filtering",
+                    "sname": "default::User",
+                    "root": True,
+                },
+                {
+                    "access_kind": ["All"],
+                    "action": "Allow",
+                    "condition": None,
+                    "expr": "true",
+                    "name": "all_on",
+                    "sname": "default::Bot",
+                    "root": False,
+                },
+                {
+                    "access_kind": ["Read", "Write"],
+                    "action": "Deny",
+                    "condition": "global default::filtering",
+                    "expr": "(.name ?!= global default::cur)",
+                    "name": "filtering",
+                    "sname": "default::Bot",
+                    "root": False,
+                },
+            ])
+        )
+
+    async def test_edgeql_ddl_policies_02(self):
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaDefinitionError,
+            r"when expression.* is of invalid type",
+        ):
+            await self.con.execute("""
+                create type X {
+                    create access policy test
+                        when (1)
+                        allow all using (true);
+                };
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaDefinitionError,
+            r"using expression.* is of invalid type",
+        ):
+            await self.con.execute("""
+                create type X {
+                    create access policy test
+                        allow all using (1);
+                };
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaDefinitionError,
+            r"possibly an empty set returned",
+        ):
+            await self.con.execute("""
+                create type X {
+                    create property x -> str;
+                    create access policy test
+                        allow all using (.x not like '%redacted%');
+                };
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaDefinitionError,
+            r"possibly more than one element returned",
+        ):
+            await self.con.execute("""
+                create type X {
+                    create access policy test
+                        allow all using ({true, false});
+                };
+            """)
+
     async def test_edgeql_ddl_global_01(self):
         INTRO_Q = '''
             select schema::Global {
@@ -5730,6 +5839,114 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ["!!"],
         )
 
+    async def test_edgeql_ddl_global_06(self):
+        INTRO_Q = '''
+            select schema::Global {
+                required, cardinality, typ := .target.name,
+                req_comp := contains(.computed_fields, 'required'),
+                card_comp := contains(.computed_fields, 'cardinality'),
+                computed := exists .expr,
+            }
+            filter .name = 'default::foo';
+        '''
+        await self.con.execute('''
+            create global foo := 10;
+        ''')
+
+        await self.assert_query_result(
+            INTRO_Q,
+            [{
+                "computed": True,
+                "card_comp": True,
+                "req_comp": True,
+                "required": True,
+                "cardinality": "One",
+                "typ": "default::foo",
+            }]
+        )
+
+        await self.con.execute('''
+            drop global foo;
+            create optional multi global foo := 10;
+        ''')
+
+        await self.assert_query_result(
+            INTRO_Q,
+            [{
+                "computed": True,
+                "card_comp": False,
+                "req_comp": False,
+                "required": False,
+                "cardinality": "Many",
+                "typ": "default::foo",
+            }]
+        )
+
+        await self.con.execute('''
+            alter global foo reset optionality;
+        ''')
+
+        await self.assert_query_result(
+            INTRO_Q,
+            [{
+                "computed": True,
+                "card_comp": False,
+                "req_comp": True,
+                "required": True,
+                "cardinality": "Many",
+                "typ": "default::foo",
+            }]
+        )
+
+        await self.con.execute('''
+            alter global foo {
+                reset cardinality;
+                reset expression;
+                set type str;
+            };
+        ''')
+
+        await self.assert_query_result(
+            INTRO_Q,
+            [{
+                "computed": False,
+                "card_comp": False,
+                "req_comp": False,
+                "required": False,
+                "cardinality": "One",
+                "typ": "std::str",
+            }]
+        )
+
+    async def test_edgeql_ddl_global_07(self):
+        await self.con.execute('''
+            create global foo := <str>Object.id
+        ''')
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaDefinitionError,
+            r"possibly an empty set returned",
+        ):
+            await self.con.execute("""
+                alter global foo set required;
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaDefinitionError,
+            r"possibly more than one element returned",
+        ):
+            await self.con.execute("""
+                alter global foo set single;
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.UnsupportedFeatureError,
+            r"cannot specify a type and an expression for a global",
+        ):
+            await self.con.execute("""
+                alter global foo set type str;
+            """)
+
     async def test_edgeql_ddl_property_computable_01(self):
         await self.con.execute('''\
             CREATE TYPE CompProp;
@@ -5832,6 +6049,17 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             CREATE TYPE CompPropCircular {
                 CREATE PROPERTY prop := (SELECT count(CompPropCircular))
             };
+        ''')
+
+    async def test_edgeql_ddl_property_computable_add_dep(self):
+        # Make sure things don't get messed up when we add new dependencies
+        await self.con.execute('''
+            create type A {
+                create property foo := "!";
+                create property bar -> str;
+            };
+            alter type A alter property foo using (.bar);
+            create type B extending A;
         ''')
 
     async def test_edgeql_ddl_property_computable_bad_01(self):

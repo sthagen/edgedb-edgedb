@@ -188,6 +188,18 @@ class Multiplicity(s_enum.StrEnum):
         return self is Multiplicity.ZERO
 
 
+class AccessPolicyAction(s_enum.StrEnum):
+    Allow = 'Allow'
+    Deny = 'Deny'
+
+
+class AccessKind(s_enum.StrEnum):
+    All = 'All'
+    Read = 'Read'
+    Write = 'Write'
+    Delete = 'Delete'
+
+
 class DescribeLanguage(s_enum.StrEnum):
     DDL = 'DDL'
     SDL = 'SDL'
@@ -197,6 +209,7 @@ class DescribeLanguage(s_enum.StrEnum):
 
 class SchemaObjectClass(s_enum.StrEnum):
 
+    ACCESS_POLICY = 'ACCESS_POLICY'
     ALIAS = 'ALIAS'
     ANNOTATION = 'ANNOTATION'
     ARRAY_TYPE = 'ARRAY TYPE'
