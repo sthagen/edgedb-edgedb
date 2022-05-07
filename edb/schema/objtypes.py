@@ -25,7 +25,6 @@ import collections
 
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
-from edb.edgeql import parser as qlparser
 
 from . import abc as s_abc
 from . import annos as s_anno
@@ -97,25 +96,6 @@ class ObjectType(
     def get_schema_class_displayname(cls) -> str:
         return 'object type'
 
-    def get_access_policy_filters(
-        self,
-        schema: s_schema.Schema,
-    ) -> Optional[s_expr.ExpressionList]:
-        if (
-            self.get_name(schema).module in {'schema', 'sys'}
-            and self.issubclass(schema,
-                                schema.get('schema::Object', type=ObjectType))
-        ):
-            return s_expr.ExpressionList([
-                s_expr.Expression.from_ast(
-                    qlparser.parse('NOT .internal'),
-                    schema=schema,
-                    modaliases={},
-                )
-            ])
-        else:
-            return None
-
     def is_object_type(self) -> bool:
         return True
 
@@ -130,6 +110,19 @@ class ObjectType(
             return False
         else:
             return self.issubclass(schema, FreeObject)
+
+    def is_fake_object_type(self, schema: s_schema.Schema) -> bool:
+        return (
+            self.get_name(schema).module == 'cfg'
+            or self.is_free_object_type(schema)
+        )
+
+    def is_material_object_type(self, schema: s_schema.Schema) -> bool:
+        return not (
+            self.is_fake_object_type(schema)
+            or self.is_compound_type(schema)
+            or self.is_view(schema)
+        )
 
     def is_union_type(self, schema: s_schema.Schema) -> bool:
         return bool(self.get_union_of(schema))

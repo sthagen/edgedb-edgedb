@@ -537,12 +537,21 @@ def can_omit_optional_wrapper(
     # Our base json casts should all preserve nullity (instead of
     # turning it into an empty set), so allow passing through those
     # cases. This is mainly an optimization for passing globals to
-    # functions, where we need to convert a bunch of optoinal params
-    # to json.
+    # functions, where we need to convert a bunch of optional params
+    # to json, and for casting out of json there and in schema updates.
+    #
+    # (FIXME: This also works around an obscure INSERT bug in which
+    # inserting values into `id` that need optional wrappers break.
+    # Since user code can't specify `id` at all, this is low prio.)
     if (
         isinstance(ir_set.expr, irast.TypeCast)
-        and irtyputils.is_scalar(ir_set.expr.expr.typeref)
-        and irtyputils.is_json(ir_set.expr.to_type)
+        and ((
+            irtyputils.is_scalar(ir_set.expr.expr.typeref)
+            and irtyputils.is_json(ir_set.expr.to_type)
+        ) or (
+            irtyputils.is_json(ir_set.expr.expr.typeref)
+            and irtyputils.is_scalar(ir_set.expr.to_type)
+        ))
     ):
         return can_omit_optional_wrapper(
             ir_set.expr.expr,
@@ -857,7 +866,7 @@ def process_set_as_path_type_intersection(
     if (not source_is_visible
             and ir_source.rptr is not None
             and not ir_source.path_id.is_type_intersection_path()
-            and not ir_source.rptr.ptrref.is_computable
+            and not ir_source.expr
             and (
                 ptrref.is_subtype
                 or pg_types.get_ptrref_storage_info(
@@ -1369,16 +1378,19 @@ def process_set_as_membership_expr(
         newctx.expr_exposed = False
         left_out = dispatch.compile(left_arg, ctx=newctx)
 
-        right_arg = irutils.unwrap_set(right_arg)
+        orig_right_arg = right_arg
+        unwrapped_right_arg = irutils.unwrap_set(right_arg)
         # If the right operand of [NOT] IN is an array_unpack call,
         # then use the ANY/ALL array comparison operator directly,
         # since that has a higher chance of using the indexes.
-        right_expr = right_arg.expr
+        right_expr = unwrapped_right_arg.expr
         needs_coalesce = False
+
         if (
             isinstance(right_expr, irast.FunctionCall)
             and str(right_expr.func_shortname) == 'std::array_unpack'
             and not right_expr.args[0].cardinality.is_multi()
+            and (not expr.sql_operator or len(expr.sql_operator) <= 1)
         ):
             is_array_unpack = True
             right_arg = right_expr.args[0].expr
@@ -1389,6 +1401,11 @@ def process_set_as_membership_expr(
         left_is_row_expr = astutils.is_row_expr(left_out)
 
         with newctx.subrel() as _, _.newscope() as subctx:
+            if is_array_unpack:
+                relctx.update_scope(orig_right_arg, subctx.rel, ctx=subctx)
+                relctx.update_scope(
+                    unwrapped_right_arg, subctx.rel, ctx=subctx)
+
             dispatch.compile(right_arg, ctx=subctx)
             right_rel = subctx.rel
             right_out = pathctx.get_path_value_var(

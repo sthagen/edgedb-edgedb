@@ -526,6 +526,7 @@ class StrToBigint(dbops.Function):
             returns=('edgedb', 'bigint_t'),
             # Stable because it's raising exceptions.
             volatility='stable',
+            strict=True,
             text=self.text)
 
 
@@ -559,6 +560,7 @@ class StrToDecimal(dbops.Function):
             returns=('numeric',),
             # Stable because it's raising exceptions.
             volatility='stable',
+            strict=True,
             text=self.text,
         )
 
@@ -4559,7 +4561,7 @@ def _make_json_caster(
 ) -> Callable[[str], str]:
     cast_expr = qlast.TypeCast(
         expr=qlast.TypeCast(
-            expr=qlast.Parameter(name="__replaceme__", optional=False),
+            expr=qlast.Parameter(name="__replaceme__"),
             type=s_utils.typeref_to_ast(schema, schema.get('std::json')),
         ),
         type=s_utils.typeref_to_ast(schema, stype),

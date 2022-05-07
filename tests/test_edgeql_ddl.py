@@ -4396,6 +4396,19 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 $$;
             """)
 
+    async def test_edgeql_ddl_function_35(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidFunctionDefinitionError,
+            r"return cardinality mismatch"
+        ):
+            await self.con.execute(r"""
+                CREATE FUNCTION broken_edgeql_func35(
+                    a: optional std::int64) -> std::int64
+                USING EdgeQL $$
+                    SELECT a
+                $$;
+            """)
+
     async def test_edgeql_ddl_function_rename_01(self):
         await self.con.execute("""
             CREATE FUNCTION foo(s: str) -> str {
@@ -5464,8 +5477,8 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             '''
                 select schema::AccessPolicy {
                     name, condition, expr, action, access_kinds,
-                    sname := .subject.name, root := not exists .bases };
-
+                    sname := .subject.name, root := not exists .bases }
+                filter .sname like 'default::%'
             ''',
             tb.bag([
                 {
@@ -5549,14 +5562,34 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 };
             """)
 
+        # This is fine though
+        await self.con.execute("""
+            create type X {
+                create access policy test
+                    allow all using ({true, false});
+            };
+        """)
+
+    async def test_edgeql_ddl_policies_03(self):
         async with self.assertRaisesRegexTx(
             edgedb.SchemaDefinitionError,
-            r"possibly more than one element returned",
+            r"dependency cycle between access policies of object type "
+            r"'default::Bar' and object type 'default::Foo'"
         ):
             await self.con.execute("""
-                create type X {
-                    create access policy test
-                        allow all using ({true, false});
+                CREATE TYPE Bar {
+                    CREATE REQUIRED PROPERTY b -> bool;
+                };
+                CREATE TYPE Foo {
+                    CREATE LINK bar -> Bar;
+                    CREATE REQUIRED PROPERTY b -> bool;
+                    CREATE ACCESS POLICY redact
+                        ALLOW ALL USING ((.bar.b ?? false));
+                };
+                ALTER TYPE Bar {
+                    CREATE LINK foo -> Foo;
+                    CREATE ACCESS POLICY redact
+                        ALLOW ALL USING ((.foo.b ?? false));
                 };
             """)
 
@@ -11014,6 +11047,14 @@ type default::Foo {
                 };
             """)
 
+    async def test_edgeql_ddl_index_05(self):
+        await self.con.execute(r"""
+            create type Artist {
+                create property oid -> bigint;
+                create index on (<str>.oid)
+            };
+        """)
+
     async def test_edgeql_ddl_errors_01(self):
         await self.con.execute('''
             CREATE TYPE Err1 {
@@ -13713,6 +13754,14 @@ type default::Foo {
             """,
             [{'target': {'name': 'array<std::uuid>'}}]
         )
+
+    async def test_edgeql_ddl_computed_and_alias(self):
+        await self.con.execute(r"""
+            create type Tgt;
+            create type X { create link foo -> Tgt };
+            create alias Y := X { foo: {id} };
+            alter type X { create link bar := .foo };
+        """)
 
 
 class TestConsecutiveMigrations(tb.DDLTestCase):
