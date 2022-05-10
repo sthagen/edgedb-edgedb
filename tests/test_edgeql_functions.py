@@ -550,6 +550,156 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             [True],
         )
 
+    async def test_edgeql_functions_array_fill_01(self):
+        await self.assert_query_result(
+            r'''select array_fill(0, 5);''',
+            [[0] * 5],
+        )
+
+        await self.assert_query_result(
+            r'''select array_fill('n/a', 5);''',
+            [['n/a'] * 5],
+        )
+
+        await self.assert_query_result(
+            r'''
+                with
+                    date0 := <cal::local_date>'2022-05-01',
+                    date1 := <cal::local_date>'2022-05-01'
+                select array_fill(date0, 5) =
+                    [date1, date1, date1, date1, date1];
+            ''',
+            [True],
+        )
+
+    @test.xfail("""
+        edb.errors.InternalServerError: return type record[] is not supported
+        for SQL functions
+    """)
+    async def test_edgeql_functions_array_fill_02(self):
+        await self.assert_query_result(
+            r'''select array_fill((1, 'hello'), 5);''',
+            [[(1, 'hello')] * 5],
+        )
+
+    @test.xfail("""
+        edb.errors.InternalServerError: return type record[] is not supported
+        for SQL functions
+    """)
+    async def test_edgeql_functions_array_fill_03(self):
+        await self.assert_query_result(
+            r'''select array_fill((a := 1, b := 'hello'), 5);''',
+            # This is not strictly equivalent in Python, but the resulting
+            # array should be equal by value.
+            [[{'a': 1, 'b': 'hello'}] * 5],
+        )
+
+    async def test_edgeql_functions_array_fill_04(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            "array size exceeds the maximum allowed"
+        ):
+            async with self.con.transaction():
+                await self.con.query(r'select array_fill(0, 2147480000);')
+
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            "array size exceeds the maximum allowed"
+        ):
+            async with self.con.transaction():
+                await self.con.query(r'select array_fill(0, 2147483647);')
+
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            "array size exceeds the maximum allowed"
+        ):
+            async with self.con.transaction():
+                await self.con.query(r'select array_fill(0, 12147480000);')
+
+    async def test_edgeql_functions_array_replace_01(self):
+        await self.assert_query_result(
+            r'''select array_replace([1, 1, 2, 3, 5], 1, 99);''',
+            [[99, 99, 2, 3, 5]],
+        )
+
+        await self.assert_query_result(
+            r'''select array_replace([1, 1, 2, 3, 5], 6, 99);''',
+            [[1, 1, 2, 3, 5]],
+        )
+
+    async def test_edgeql_functions_array_replace_02(self):
+        await self.assert_query_result(
+            r'''select array_replace(['h', 'e', 'l', 'l', 'o'], 'l', 'L');''',
+            [['h', 'e', 'L', 'L', 'o']],
+        )
+
+        await self.assert_query_result(
+            r'''select array_replace(['h', 'e', 'l', 'l', 'o'], 'z', '!');''',
+            [['h', 'e', 'l', 'l', 'o']],
+        )
+
+    async def test_edgeql_functions_array_replace_03(self):
+        await self.assert_query_result(
+            r'''
+            select array_replace(
+                [(0, 'a'), (10, 'b'), (3, 'hello'), (0, 'a')],
+                (0, 'a'), (99, '!')
+            );
+            ''',
+            [[(99, '!'), (10, 'b'), (3, 'hello'), (99, '!')]],
+        )
+
+        await self.assert_query_result(
+            r'''
+            select array_replace(
+                [(0, 'a'), (10, 'b'), (3, 'hello'), (0, 'a')],
+                (1, 'a'), (99, '!')
+            );
+            ''',
+            [[(0, 'a'), (10, 'b'), (3, 'hello'), (0, 'a')]],
+        )
+
+    async def test_edgeql_functions_array_replace_04(self):
+        await self.assert_query_result(
+            r'''
+            select array_replace(
+                [
+                    (a := 0, b := 'a'),
+                    (a := 10, b := 'b'),
+                    (a := 3, b := 'hello'),
+                    (a := 0, b := 'a')
+                ],
+                (a := 0, b := 'a'), (a := 99, b := '!')
+            );
+            ''',
+            [[
+                {"a": 99, "b": "!"},
+                {"a": 10, "b": "b"},
+                {"a": 3, "b": "hello"},
+                {"a": 99, "b": "!"}
+            ]],
+        )
+
+        await self.assert_query_result(
+            r'''
+            select array_replace(
+                [
+                    (a := 0, b := 'a'),
+                    (a := 10, b := 'b'),
+                    (a := 3, b := 'hello'),
+                    (a := 0, b := 'a')
+                ],
+                (a := 1, b := 'a'), (a := 99, b := '!')
+            );
+            ''',
+            [[
+                {"a": 0, "b": "a"},
+                {"a": 10, "b": "b"},
+                {"a": 3, "b": "hello"},
+                {"a": 0, "b": "a"}
+            ]],
+        )
+
     async def test_edgeql_functions_enumerate_01(self):
         await self.assert_query_result(
             r'''SELECT [10, 20];''',
@@ -4008,6 +4158,93 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             {''},
         )
 
+    async def test_edgeql_functions_str_replace_01(self):
+        await self.assert_query_result(
+            r'''select str_replace('', '', '');''',
+            {''},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('', 'a', 'b');''',
+            {''},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('', 'a', '');''',
+            {''},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('', '', 'b');''',
+            {''},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('hello world', '', '');''',
+            {'hello world'},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('hello world', 'a', 'b');''',
+            {'hello world'},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('hello world', 'a', '');''',
+            {'hello world'},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('hello world', '', 'b');''',
+            {'hello world'},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('hello world', 'o', '0');''',
+            {'hell0 w0rld'},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('hello world', 'o', 'LETTER_O');''',
+            {'hellLETTER_O wLETTER_Orld'},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('hello world', 'orl', '');''',
+            {'hello wd'},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('hello world', 'orl', '-');''',
+            {'hello w-d'},
+        )
+
+        await self.assert_query_result(
+            r'''select str_replace('hello world', 'orl', '...');''',
+            {'hello w...d'},
+        )
+
+    async def test_edgeql_functions_str_reverse_01(self):
+        await self.assert_query_result(
+            r'''select str_reverse('');''',
+            {''},
+        )
+
+        await self.assert_query_result(
+            r'''select str_reverse('a');''',
+            {'a'},
+        )
+
+        await self.assert_query_result(
+            r'''select str_reverse('aa');''',
+            {'aa'},
+        )
+
+        await self.assert_query_result(
+            r'''select str_reverse('hello');''',
+            {'olleh'},
+        )
+
     async def test_edgeql_functions_math_abs_01(self):
         await self.assert_query_result(
             r'''SELECT math::abs(2);''',
@@ -4825,4 +5062,462 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
                 ('2021-01-01T00:00:00+00:00', '2021-02-16T00:00:00+00:00'),
                 ('2021-02-16T00:00:00+00:00', '2021-03-31T00:00:00+00:00'),
             ],
+        )
+
+    async def test_edgeql_functions_bitwise_01(self):
+        await self.assert_query_result(
+            r'''select bit_and(<int16>6, <int16>12);''',
+            {4},
+        )
+        await self.assert_query_result(
+            r'''select bit_and(<int32>6, <int32>12);''',
+            {4},
+        )
+        await self.assert_query_result(
+            r'''select bit_and(<int64>6, <int64>12);''',
+            {4},
+        )
+
+    async def test_edgeql_functions_bitwise_02(self):
+        await self.assert_query_result(
+            r'''select bit_or(<int16>6, <int16>12);''',
+            {14},
+        )
+        await self.assert_query_result(
+            r'''select bit_or(<int32>6, <int32>12);''',
+            {14},
+        )
+        await self.assert_query_result(
+            r'''select bit_or(<int64>6, <int64>12);''',
+            {14},
+        )
+
+    async def test_edgeql_functions_bitwise_03(self):
+        await self.assert_query_result(
+            r'''select bit_xor(<int16>6, <int16>12);''',
+            {10},
+        )
+        await self.assert_query_result(
+            r'''select bit_xor(<int32>6, <int32>12);''',
+            {10},
+        )
+        await self.assert_query_result(
+            r'''select bit_xor(<int64>6, <int64>12);''',
+            {10},
+        )
+
+    async def test_edgeql_functions_bitwise_04(self):
+        # 1111111111111111 corresponds to -1 int16
+        # Generally the result of logical NOT is expected to be:
+        #   NOT a = (-a - 1)
+        # Because the number and its bitwise negation must add up to -1.
+        await self.assert_query_result(
+            r'''select bit_not(<int16>123);''',
+            {-124},
+        )
+        await self.assert_query_result(
+            r'''select bit_not(<int32>123);''',
+            {-124},
+        )
+        await self.assert_query_result(
+            r'''select bit_not(<int64>123);''',
+            {-124},
+        )
+
+    async def test_edgeql_functions_bitwise_05(self):
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r"bit_lshift.*: cannot shift by negative amount"):
+            async with self.con.transaction():
+                await self.con.query(r'''
+                    select bit_lshift(<int16>5, -2);
+                ''')
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r"bit_lshift.*: cannot shift by negative amount"):
+            async with self.con.transaction():
+                await self.con.query(r'''
+                    select bit_lshift(<int32>5, -2);
+                ''')
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r"bit_lshift.*: cannot shift by negative amount"):
+            async with self.con.transaction():
+                await self.con.query(r'''
+                    select bit_lshift(<int64>5, -2);
+                ''')
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r"bit_rshift.*: cannot shift by negative amount"):
+            async with self.con.transaction():
+                await self.con.query(r'''
+                    select bit_rshift(<int16>5, -2);
+                ''')
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r"bit_rshift.*: cannot shift by negative amount"):
+            async with self.con.transaction():
+                await self.con.query(r'''
+                    select bit_rshift(<int32>5, -2);
+                ''')
+
+        with self.assertRaisesRegex(
+                edgedb.InvalidValueError,
+                r"bit_rshift.*: cannot shift by negative amount"):
+            async with self.con.transaction():
+                await self.con.query(r'''
+                    select bit_rshift(<int64>5, -2);
+                ''')
+
+    async def test_edgeql_functions_bitwise_06(self):
+        await self.assert_query_result(
+            r'''select bit_lshift(<int16>5, 2);''',
+            {20},
+        )
+        await self.assert_query_result(
+            r'''select bit_lshift(<int16>32767, 15);''',
+            {-32768},
+        )
+        await self.assert_query_result(
+            r'''select bit_lshift(<int16>32767, 16);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_lshift(<int16>32767, 32);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_lshift(<int16>32767, 40);''',
+            {0},
+        )
+
+        # Left shift by A bits and then B bits, should be same as bitshifting
+        # by A + B bits.
+        await self.assert_query_result(
+            r'''
+            with
+                val := <int16>1234,
+                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            select bit_lshift(bit_lshift(val, X.0), X.1) =
+                   bit_lshift(val, X.0 + X.1);
+            ''',
+            [True, True, True, True],
+        )
+
+    async def test_edgeql_functions_bitwise_07(self):
+        await self.assert_query_result(
+            r'''select bit_lshift(<int32>5, 2);''',
+            {20},
+        )
+        await self.assert_query_result(
+            r'''select bit_lshift(<int32>2147483647, 31);''',
+            {-2147483648},
+        )
+        await self.assert_query_result(
+            r'''select bit_lshift(<int32>2147483647, 32);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_lshift(<int32>2147483647, 40);''',
+            {0},
+        )
+
+        # Left shift by A bits and then B bits, should be same as bitshifting
+        # by A + B bits.
+        await self.assert_query_result(
+            r'''
+            with
+                val := <int32>1234,
+                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            select bit_lshift(bit_lshift(val, X.0), X.1) =
+                   bit_lshift(val, X.0 + X.1);
+            ''',
+            [True, True, True, True],
+        )
+
+    async def test_edgeql_functions_bitwise_08(self):
+        await self.assert_query_result(
+            r'''select bit_lshift(<int64>5, 2);''',
+            {20},
+        )
+        await self.assert_query_result(
+            r'''select bit_lshift(<int64>9223372036854775807, 31);''',
+            {-2147483648},
+        )
+        await self.assert_query_result(
+            r'''select bit_lshift(<int64>9223372036854775807, 63);''',
+            {-9223372036854775808},
+        )
+        await self.assert_query_result(
+            r'''select bit_lshift(<int64>9223372036854775807, 64);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_lshift(<int64>9223372036854775807, 100);''',
+            {0},
+        )
+
+        # Left shift by A bits and then B bits, should be same as bitshifting
+        # by A + B bits.
+        await self.assert_query_result(
+            r'''
+            with
+                val := <int64>1234,
+                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            select bit_lshift(bit_lshift(val, X.0), X.1) =
+                   bit_lshift(val, X.0 + X.1);
+            ''',
+            [True, True, True, True],
+        )
+
+    async def test_edgeql_functions_bitwise_09(self):
+        # Right shift uses "arithemtic bitshift", which preserves the sign
+        # bit. This means that right shifting works different for positive and
+        # negative values.
+        #
+        # Positive value right bitshift tests.
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>123, 2);''',
+            {30},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>32767, 14);''',
+            {1},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>32767, 15);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>32767, 16);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>32767, 32);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>32767, 40);''',
+            {0},
+        )
+
+        # Right shift by A bits and then B bits, should be same as bitshifting
+        # by A + B bits.
+        await self.assert_query_result(
+            r'''
+            with
+                val := <int16>1234,
+                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            select bit_rshift(bit_rshift(val, X.0), X.1) =
+                   bit_rshift(val, X.0 + X.1);
+            ''',
+            [True, True, True, True],
+        )
+
+    async def test_edgeql_functions_bitwise_10(self):
+        # Right shift uses "arithemtic bitshift", which preserves the sign
+        # bit. This means that right shifting works different for positive and
+        # negative values.
+        #
+        # Positive value right bitshift tests.
+        await self.assert_query_result(
+            r'''select bit_rshift(<int32>123, 2);''',
+            {30},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int32>2147483647, 30);''',
+            {1},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int32>2147483647, 31);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int32>2147483647, 32);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int32>2147483647, 40);''',
+            {0},
+        )
+
+        # Right shift by A bits and then B bits, should be same as bitshifting
+        # by A + B bits.
+        await self.assert_query_result(
+            r'''
+            with
+                val := <int32>1234,
+                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            select bit_rshift(bit_rshift(val, X.0), X.1) =
+                   bit_rshift(val, X.0 + X.1);
+            ''',
+            [True, True, True, True],
+        )
+
+    async def test_edgeql_functions_bitwise_11(self):
+        # Right shift uses "arithemtic bitshift", which preserves the sign
+        # bit. This means that right shifting works different for positive and
+        # negative values.
+        #
+        # Positive value right bitshift tests.
+        await self.assert_query_result(
+            r'''select bit_rshift(<int64>123, 2);''',
+            {30},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int64>9223372036854775807, 62);''',
+            {1},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int64>9223372036854775807, 63);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int64>9223372036854775807, 64);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int64>9223372036854775807, 90);''',
+            {0},
+        )
+
+        # Right shift by A bits and then B bits, should be same as bitshifting
+        # by A + B bits.
+        await self.assert_query_result(
+            r'''
+            with
+                val := <int64>1234,
+                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            select bit_rshift(bit_rshift(val, X.0), X.1) =
+                   bit_rshift(val, X.0 + X.1);
+            ''',
+            [True, True, True, True],
+        )
+
+    async def test_edgeql_functions_bitwise_12(self):
+        # Right shift uses "arithemtic bitshift", which preserves the sign
+        # bit. This means that right shifting works different for positive and
+        # negative values.
+        #
+        # Negative value right bitshift tests.
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>-123, 2);''',
+            {-31},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>-32768, 14);''',
+            {-2},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>-32768, 15);''',
+            {-1},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>-32768, 16);''',
+            {-1},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>-32768, 32);''',
+            {-1},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int16>-32768, 40);''',
+            {-1},
+        )
+
+        # Right shift by A bits and then B bits, should be same as bitshifting
+        # by A + B bits.
+        await self.assert_query_result(
+            r'''
+            with
+                val := <int16>-1234,
+                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            select bit_rshift(bit_rshift(val, X.0), X.1) =
+                   bit_rshift(val, X.0 + X.1);
+            ''',
+            [True, True, True, True],
+        )
+
+    async def test_edgeql_functions_bitwise_13(self):
+        # Right shift uses "arithemtic bitshift", which preserves the sign
+        # bit. This means that right shifting works different for positive and
+        # negative values.
+        #
+        # Negative value right bitshift tests.
+        await self.assert_query_result(
+            r'''select bit_rshift(<int32>-123, 2);''',
+            {-31},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int32>-2147483648, 30);''',
+            {-2},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int32>-2147483648, 31);''',
+            {-1},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int32>-2147483648, 32);''',
+            {-1},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int32>-2147483648, 40);''',
+            {-1},
+        )
+
+        # Right shift by A bits and then B bits, should be same as bitshifting
+        # by A + B bits.
+        await self.assert_query_result(
+            r'''
+            with
+                val := <int32>-1234,
+                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            select bit_rshift(bit_rshift(val, X.0), X.1) =
+                   bit_rshift(val, X.0 + X.1);
+            ''',
+            [True, True, True, True],
+        )
+
+    async def test_edgeql_functions_bitwise_14(self):
+        # Right shift uses "arithemtic bitshift", which preserves the sign
+        # bit. This means that right shifting works different for positive and
+        # negative values.
+        #
+        # Negative value right bitshift tests.
+        await self.assert_query_result(
+            r'''select bit_rshift(<int64>-123, 2);''',
+            {-31},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int64>-9223372036854775808, 62);''',
+            {-2},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int64>-9223372036854775808, 63);''',
+            {-1},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int64>-9223372036854775808, 64);''',
+            {-1},
+        )
+        await self.assert_query_result(
+            r'''select bit_rshift(<int64>-9223372036854775808, 90);''',
+            {-1},
+        )
+
+        # Right shift by A bits and then B bits, should be same as bitshifting
+        # by A + B bits.
+        await self.assert_query_result(
+            r'''
+            with
+                val := <int64>-1234,
+                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            select bit_rshift(bit_rshift(val, X.0), X.1) =
+                   bit_rshift(val, X.0 + X.1);
+            ''',
+            [True, True, True, True],
         )
