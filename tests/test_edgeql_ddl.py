@@ -5482,10 +5482,10 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ''',
             tb.bag([
                 {
-                    "access_kinds": [
+                    "access_kinds": {
                         "Select", "UpdateRead", "UpdateWrite", "Delete",
                         "Insert"
-                    ],
+                    },
                     "action": "Allow",
                     "condition": None,
                     "expr": "true",
@@ -5494,7 +5494,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                     "root": True,
                 },
                 {
-                    "access_kinds": ["Select", "Delete"],
+                    "access_kinds": {"Select", "Delete"},
                     "action": "Deny",
                     "condition": "global default::filtering",
                     "expr": "(.name ?!= global default::cur)",
@@ -5503,10 +5503,10 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                     "root": True,
                 },
                 {
-                    "access_kinds": [
+                    "access_kinds": {
                         "Select", "UpdateRead", "UpdateWrite", "Delete",
                         "Insert"
-                    ],
+                    },
                     "action": "Allow",
                     "condition": None,
                     "expr": "true",
@@ -5515,7 +5515,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                     "root": False,
                 },
                 {
-                    "access_kinds": ["Select", "Delete"],
+                    "access_kinds": {"Select", "Delete"},
                     "action": "Deny",
                     "condition": "global default::filtering",
                     "expr": "(.name ?!= global default::cur)",
@@ -5525,6 +5525,44 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 },
             ])
         )
+
+        await self.con.execute(r"""
+            alter type User {
+                alter access policy filtering {
+                    reset when;
+                    deny select;
+                    using (false);
+                }
+            };
+        """)
+
+        await self.assert_query_result(
+            '''
+                select schema::AccessPolicy {
+                    name, condition, expr, action, access_kinds,
+                    sname := .subject.name, root := not exists .bases }
+                filter .sname = 'default::User' and .name = 'filtering'
+            ''',
+            [
+                {
+                    "access_kinds": {"Select"},
+                    "action": "Deny",
+                    "condition": None,
+                    "expr": "false",
+                    "name": "filtering",
+                    "sname": "default::User",
+                    "root": True,
+                },
+            ]
+        )
+
+        async with self.assertRaisesRegexTx(
+            edgedb.SchemaDefinitionError,
+            r"cannot alter the definition of inherited access policy",
+        ):
+            await self.con.execute('''
+                alter type Bot alter access policy filtering allow all;
+            ''')
 
     async def test_edgeql_ddl_policies_02(self):
         async with self.assertRaisesRegexTx(
@@ -5592,6 +5630,177 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                         ALLOW ALL USING ((.foo.b ?? false));
                 };
             """)
+
+    # A big collection of tests to make sure that functions get
+    # updated when access policies change
+    async def test_edgeql_ddl_func_policies_01(self):
+        await self.con.execute(r"""
+            create type X;
+            insert X;
+            create function get_x() -> set of uuid using (X.id);
+            alter type X {
+                create access policy test allow select using (false) };
+        """)
+
+        await self.assert_query_result(
+            'select get_x()',
+            [],
+        )
+
+    async def test_edgeql_ddl_func_policies_02(self):
+        await self.con.execute(r"""
+            create type Y;
+            create type X extending Y;
+            insert X;
+            create function get_x() -> set of uuid using (X.id);
+            alter type Y {
+                create access policy test allow select using (false) };
+        """)
+
+        await self.assert_query_result(
+            'select get_x()',
+            [],
+        )
+
+    async def test_edgeql_ddl_func_policies_03(self):
+        await self.con.execute(r"""
+            create type X;
+            create type W extending X;
+            insert W;
+            create function get_x() -> set of uuid using (X.id);
+            alter type W {
+                create access policy test allow select using (false) };
+        """)
+
+        await self.assert_query_result(
+            'select get_x()',
+            [],
+        )
+
+    async def test_edgeql_ddl_func_policies_04(self):
+        await self.con.execute(r"""
+            create type Y;
+            create type X;
+            create type W extending X, Y;
+            insert W;
+            create function get_x() -> set of uuid using (X.id);
+            alter type Y {
+                create access policy test allow select using (false) };
+        """)
+
+        await self.assert_query_result(
+            'select get_x()',
+            [],
+        )
+
+    async def test_edgeql_ddl_func_policies_05(self):
+        # links
+        await self.con.execute(r"""
+            create type X;
+            create type T { create link x -> X };
+            insert T { x := (insert X) };
+            create function get_x() -> set of uuid using (T.x.id);
+            alter type X {
+                create access policy test allow select using (false) };
+        """)
+
+        await self.assert_query_result(
+            'select get_x()',
+            [],
+        )
+
+    async def test_edgeql_ddl_func_policies_06(self):
+        # links
+        await self.con.execute(r"""
+            create type T;
+            create type X { create link t -> T };
+
+            insert X { t := (insert T) };
+            create function get_x() -> set of uuid using (T.<t[IS X].id);
+            alter type X {
+                create access policy test allow select using (false) };
+        """)
+
+        await self.assert_query_result(
+            'select get_x()',
+            [],
+        )
+
+    async def test_edgeql_ddl_func_policies_07(self):
+        # links
+        await self.con.execute(r"""
+            create type T;
+            create type X { create link t -> T };
+
+            insert X { t := (insert T) };
+            create function get_x() -> set of uuid using (T.<t.id);
+            alter type X {
+                create access policy test allow select using (false) };
+        """)
+
+        await self.assert_query_result(
+            'select get_x()',
+            [],
+        )
+
+    async def test_edgeql_ddl_func_policies_08(self):
+        # links
+        await self.con.execute(r"""
+            create type X;
+            create type Y;
+            create type T { create link x -> X | Y };
+            insert T { x := (insert X) };
+            create function get_x() -> set of uuid using (T.x.id);
+            alter type X {
+                create access policy test allow select using (false) };
+        """)
+
+        await self.assert_query_result(
+            'select get_x()',
+            [],
+        )
+
+    async def test_edgeql_ddl_func_policies_09(self):
+        await self.con.execute(r"""
+            create type X;
+            insert X;
+            create alias Y := X;
+            create function get_x() -> set of uuid using (Y.id);
+            alter type X {
+                create access policy test allow select using (false) };
+        """)
+
+        await self.assert_query_result(
+            'select get_x()',
+            [],
+        )
+
+    async def test_edgeql_ddl_func_policies_10(self):
+        # Make sure we succesfully update multiple functions to thread
+        # through globals when an access policy is created.
+        await self.con.execute(r"""
+            create type X;
+            insert X;
+            create function get_xi() -> set of uuid using (X.id);
+            create function get_x() -> set of uuid using (get_xi());
+            create required global en -> bool { set default := false };
+            alter type X {
+                create access policy test allow select using (global en) };
+        """)
+
+        await self.assert_query_result(
+            'select get_x()',
+            [],
+        )
+
+        await self.con.execute('''
+            set global en := true;
+        ''')
+
+        await self.assert_query_result(
+            'select get_x()',
+            [str],
+        )
 
     async def test_edgeql_ddl_global_01(self):
         INTRO_Q = '''
@@ -12856,6 +13065,113 @@ type default::Foo {
                     "source": {"name": "default::Bar"}
                 }
             ]),
+        )
+
+    async def test_edgeql_ddl_link_policy_13(self):
+        # Make sure that swapping between delete target and not works
+        await self.con.execute(r"""
+            CREATE TYPE Tgt;
+            CREATE TYPE Foo {
+                CREATE LINK tgt -> Tgt;
+            };
+            ALTER TYPE Foo ALTER LINK tgt ON SOURCE DELETE DELETE TARGET;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { tgt := (INSERT Tgt) };
+            DELETE Foo;
+        """)
+
+        await self.assert_query_result(
+            'select Tgt',
+            [],
+        )
+
+        await self.con.execute(r"""
+            ALTER TYPE Foo ALTER LINK tgt ON SOURCE DELETE ALLOW;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { tgt := (INSERT Tgt) };
+            DELETE Foo;
+        """)
+
+        await self.assert_query_result(
+            'select Tgt',
+            [{}],
+        )
+
+    async def test_edgeql_ddl_link_policy_14(self):
+        # Make sure that it works when changing cardinality
+        await self.con.execute(r"""
+            CREATE TYPE Tgt;
+            CREATE TYPE Foo {
+                CREATE LINK tgt -> Tgt {
+                    ON SOURCE DELETE DELETE TARGET;
+                }
+            };
+            ALTER TYPE Foo ALTER LINK tgt SET MULTI;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { tgt := (INSERT Tgt) };
+        """)
+
+        await self.con.execute("""
+            DELETE Foo;
+        """)
+        await self.assert_query_result(
+            'select Tgt',
+            [],
+        )
+
+    async def test_edgeql_ddl_link_policy_15(self):
+        # Make sure that it works when changing cardinality
+        await self.con.execute(r"""
+            CREATE TYPE Tgt;
+            CREATE TYPE Foo {
+                CREATE LINK tgt -> Tgt {
+                    ON SOURCE DELETE DELETE TARGET;
+                }
+            };
+            CREATE TYPE Bar EXTENDING Foo;
+        """)
+
+        await self.con.execute(r"""
+            INSERT Bar { tgt := (INSERT Tgt) };
+        """)
+
+        await self.con.execute("""
+            DELETE Foo;
+        """)
+        await self.assert_query_result(
+            'select Tgt',
+            [],
+        )
+
+    async def test_edgeql_ddl_link_policy_16(self):
+        # Make sure that it works when changing cardinality
+        await self.con.execute(r"""
+            CREATE TYPE Tgt;
+            CREATE TYPE Tgt2 EXTENDING Tgt;
+            CREATE TYPE Tgt3;
+            CREATE TYPE Foo {
+                CREATE MULTI LINK tgt -> Tgt | Tgt3 {
+                    ON SOURCE DELETE DELETE TARGET;
+                }
+            };
+        """)
+
+        await self.con.execute(r"""
+            INSERT Foo { tgt := {(INSERT Tgt), (INSERT Tgt2), (INSERT Tgt3)} };
+        """)
+
+        await self.con.execute("""
+            DELETE Foo;
+        """)
+        await self.assert_query_result(
+            'select Tgt UNION Tgt3',
+            [],
         )
 
     async def test_edgeql_ddl_dupe_link_storage_01(self):

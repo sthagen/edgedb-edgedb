@@ -28,6 +28,9 @@ CREATE SCALAR TYPE schema::Cardinality
 CREATE SCALAR TYPE schema::TargetDeleteAction
     EXTENDING enum<Restrict, DeleteSource, Allow, DeferredRestrict>;
 
+CREATE SCALAR TYPE schema::SourceDeleteAction
+    EXTENDING enum<DeleteTarget, Allow>;
+
 CREATE SCALAR TYPE schema::OperatorKind
     EXTENDING enum<Infix, Postfix, Prefix, Ternary>;
 
@@ -129,6 +132,7 @@ CREATE TYPE schema::TupleElement EXTENDING std::BaseObject {
 
 
 CREATE TYPE schema::Tuple EXTENDING schema::CollectionType {
+    CREATE REQUIRED PROPERTY named -> bool;
     CREATE MULTI LINK element_types EXTENDING schema::ordered
     -> schema::TupleElement {
         CREATE CONSTRAINT std::exclusive;
@@ -380,8 +384,7 @@ ALTER TYPE schema::ObjectType {
 
 ALTER TYPE schema::AccessPolicy {
   CREATE REQUIRED LINK subject -> schema::ObjectType;
-  CREATE REQUIRED PROPERTY _access_kinds -> array<schema::AccessKind>;
-  CREATE PROPERTY access_kinds := array_unpack(._access_kinds);
+  CREATE MULTI PROPERTY access_kinds -> schema::AccessKind;
   CREATE PROPERTY condition -> std::str;
   CREATE REQUIRED PROPERTY action -> schema::AccessPolicyAction;
   CREATE REQUIRED PROPERTY expr -> std::str;
@@ -408,6 +411,7 @@ ALTER TYPE schema::Link {
         USING (.target[IS schema::ObjectType]);
     CREATE MULTI LINK properties := .pointers[IS schema::Property];
     CREATE PROPERTY on_target_delete -> schema::TargetDeleteAction;
+    CREATE PROPERTY on_source_delete -> schema::SourceDeleteAction;
 };
 
 

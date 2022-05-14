@@ -1190,6 +1190,14 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                     self.write(' (')
                     self.visit(node.value)
                     self.write(')')
+            elif node.name == 'condition':
+                if node.value is None:
+                    self._write_keywords('RESET', 'WHEN')
+                else:
+                    self._write_keywords('WHEN')
+                    self.write(' (')
+                    self.visit(node.value)
+                    self.write(')')
             elif node.name == 'target':
                 if node.value is None:
                     self._write_keywords('RESET', 'TYPE')
@@ -1406,6 +1414,8 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         self._visit_DropObject(node, 'CONSTRAINT', after_name=after_name)
 
     def _format_access_kinds(self, kinds: List[qltypes.AccessKind]) -> str:
+        # Canonicalize the order, since the schema loses track
+        kinds = [k for k in list(qltypes.AccessKind) if k in kinds]
         if kinds == list(qltypes.AccessKind):
             return 'all'
         skinds = ', '.join(str(kind).lower() for kind in kinds)
@@ -1442,6 +1452,10 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         # This is left hanging from after_name, so that subcommands
         # get double indented
         self.indentation -= 1
+
+    def visit_SetAccessPerms(self, node: qlast.SetAccessPerms) -> None:
+        self._write_keywords(str(node.action) + ' ')
+        self._write_keywords(self._format_access_kinds(node.access_kinds))
 
     def visit_AlterAccessPolicy(self, node: qlast.AlterAccessPolicy) -> None:
         self._visit_AlterObject(node, 'ACCESS POLICY', unqualified=True)
@@ -1733,7 +1747,13 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         if node.cascade is None:
             self._write_keywords('RESET ON TARGET DELETE')
         else:
-            self._write_keywords('ON TARGET DELETE ', node.cascade.to_edgeql())
+            self._write_keywords('ON TARGET DELETE', node.cascade.to_edgeql())
+
+    def visit_OnSourceDelete(self, node: qlast.OnSourceDelete) -> None:
+        if node.cascade is None:
+            self._write_keywords('RESET ON SOURCE DELETE')
+        else:
+            self._write_keywords('ON SOURCE DELETE', node.cascade.to_edgeql())
 
     def visit_CreateObjectType(self, node: qlast.CreateObjectType) -> None:
         keywords = []

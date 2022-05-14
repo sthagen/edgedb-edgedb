@@ -668,6 +668,10 @@ class OnTargetDelete(DDLOperation):
     cascade: typing.Optional[qltypes.LinkTargetDeleteAction]
 
 
+class OnSourceDelete(DDLOperation):
+    cascade: typing.Optional[qltypes.LinkSourceDeleteAction]
+
+
 class SetField(DDLOperation):
     name: str
     value: typing.Union[Expr, TypeExpr, None]
@@ -1171,6 +1175,11 @@ class CreateAccessPolicy(CreateObject, AccessPolicyCommand):
     action: qltypes.AccessPolicyAction
     access_kinds: typing.List[qltypes.AccessKind]
     expr: Expr
+
+
+class SetAccessPerms(DDLOperation):
+    access_kinds: typing.List[qltypes.AccessKind]
+    action: qltypes.AccessPolicyAction
 
 
 class AlterAccessPolicy(AlterObject, AccessPolicyCommand):
