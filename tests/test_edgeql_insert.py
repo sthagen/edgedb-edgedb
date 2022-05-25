@@ -1000,6 +1000,82 @@ class TestInsert(tb.QueryTestCase):
             ]
         )
 
+    async def test_edgeql_insert_returning_15(self):
+        await self.con.execute('''
+            alter type Person {
+                create access policy ok allow all using (true);
+            };
+        ''')
+
+        # Nested, with a required link that forces an assert_exists
+        # to get injected.
+        await self.assert_query_result(
+            r'''
+            WITH P := (INSERT Person {name := "Emmanuel Villip"}),
+            SELECT ((
+                INSERT PersonWrapper { person := P }
+            )) { person: { name } };
+            ''',
+            [{"person": {"name": "Emmanuel Villip"}}],
+        )
+
+    async def test_edgeql_insert_conflict_policy_01(self):
+        # Make sure that having an access policy doesn't break using an
+        # object constraint in UNLESS CONFLICT.
+        await self.con.execute('''
+            create type Tgt {
+                create access policy test allow all using (true);
+            };
+            create type Src {
+                create link tgt -> Tgt;
+                create constraint exclusive on (.tgt);
+            };
+        ''')
+
+        await self.con.execute('''
+            INSERT Src {
+                tgt := (SELECT Tgt LIMIT 1)
+            }
+            UNLESS CONFLICT ON (.tgt)
+        ''')
+
+    async def test_edgeql_insert_conflict_policy_02(self):
+        # An UNLESS CONFLICT with an invisible conflicting object
+        # raises an exception. Notionally this is since the SELECT
+        # we do can't find the object, and so we can't fetch it for
+        # an ELSE clause.
+        await self.con.execute('''
+            alter type Person {
+                create access policy yes allow all using (true);
+                create access policy no deny select using (true);
+            };
+        ''')
+
+        Q = '''
+            insert Person { name := "test" }
+            unless conflict on (.name) else (Person);
+        '''
+
+        await self.con.execute(Q)
+
+        async with self.assertRaisesRegexTx(
+                edgedb.ConstraintViolationError,
+                "violates exclusivity constraint"):
+            await self.con.execute(Q)
+
+        Q = '''
+            insert Person {
+                name := "test2", note := (insert Note { name := "" }) }
+            unless conflict on (.name) else (Person);
+        '''
+
+        await self.con.execute(Q)
+
+        async with self.assertRaisesRegexTx(
+                edgedb.ConstraintViolationError,
+                "violates exclusivity constraint"):
+            await self.con.execute(Q)
+
     async def test_edgeql_insert_for_01(self):
         await self.con.execute(r'''
             FOR x IN {3, 5, 7, 2}
@@ -4446,6 +4522,33 @@ class TestInsert(tb.QueryTestCase):
                 "violates exclusivity constraint"):
             await self.con.execute(query)
 
+    async def test_edgeql_insert_cross_type_conflict_19(self):
+        await self.con.execute('''
+            create required global break -> bool { set default := false; };
+            create type X {
+                create property foo -> str {
+                    create constraint exclusive;
+                };
+                create access policy yes allow all using (true);
+                create access policy no deny select using (global break);
+            };
+            create type Y extending X;
+        ''')
+
+        await self.con.execute('''
+            set global break := true
+        ''')
+
+        async with self.assertRaisesRegexTx(
+                edgedb.ConstraintViolationError,
+                "violates exclusivity constraint"):
+            await self.con.query('''
+                select {
+                    (insert X { foo := "!" }),
+                    (insert Y { foo := "!" }),
+                };
+            ''')
+
     async def test_edgeql_insert_update_cross_type_conflict_01a(self):
         await self.con.execute('''
             INSERT DerivedPerson { name := 'Bar' };
@@ -4836,6 +4939,56 @@ class TestInsert(tb.QueryTestCase):
         ''')
         await self.con.execute(query1)
         await self.con.execute(query2)
+
+    async def test_edgeql_insert_update_cross_type_conflict_14(self):
+        await self.con.execute('''
+            create type A {
+                create property foo -> int64 {
+                    create constraint exclusive;
+                }
+            };
+            create type B extending A;
+            create type X extending B;
+            create type Y extending B;
+        ''')
+
+        with self.assertRaisesRegex(edgedb.ConstraintViolationError,
+                                    "violates exclusivity constraint"):
+            await self.con.execute('''
+                with x := (insert X { foo := 0 }),
+                     y := (insert Y { foo := 0 }),
+                select {x, y};
+            ''')
+
+    async def test_edgeql_insert_update_cross_type_conflict_15(self):
+        await self.con.execute('''
+            create required global break -> bool { set default := false; };
+            create type X {
+                create property foo -> str {
+                    create constraint exclusive;
+                };
+                create access policy yes allow all using (true);
+                create access policy no deny select using (
+                    global break and exists .foo);
+            };
+            create type Y extending X;
+        ''')
+        await self.con.query('''
+            insert X;
+        ''')
+        await self.con.query('''
+            insert Y;
+        ''')
+        await self.con.execute('''
+            set global break := true
+        ''')
+
+        async with self.assertRaisesRegexTx(
+                edgedb.ConstraintViolationError,
+                "violates exclusivity constraint"):
+            await self.con.query('''
+                update X set { foo := "!" };
+            ''')
 
     async def test_edgeql_insert_and_update_01(self):
         # INSERTing something that would violate a constraint while
