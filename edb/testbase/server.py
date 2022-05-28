@@ -394,6 +394,7 @@ async def init_cluster(
     init_settings=None,
     security=edgedb_args.ServerSecurityMode.Strict,
     http_endpoint_security=edgedb_args.ServerEndpointSecurityMode.Optional,
+    compiler_pool_mode=edgedb_args.CompilerPoolMode.Fixed,
 ) -> edgedb_cluster.BaseCluster:
     if data_dir is not None and backend_dsn is not None:
         raise ValueError(
@@ -403,22 +404,33 @@ async def init_cluster(
 
     if backend_dsn:
         cluster = edgedb_cluster.TempClusterWithRemotePg(
-            backend_dsn, testmode=True, log_level='s',
+            backend_dsn,
+            testmode=True,
+            log_level='s',
             data_dir_prefix='edb-test-',
             security=security,
-            http_endpoint_security=http_endpoint_security)
+            http_endpoint_security=http_endpoint_security,
+            compiler_pool_mode=compiler_pool_mode,
+        )
         destroy = True
     elif data_dir is None:
         cluster = edgedb_cluster.TempCluster(
-            testmode=True, log_level='s', data_dir_prefix='edb-test-',
+            testmode=True,
+            log_level='s',
+            data_dir_prefix='edb-test-',
             security=security,
-            http_endpoint_security=http_endpoint_security)
+            http_endpoint_security=http_endpoint_security,
+            compiler_pool_mode=compiler_pool_mode,
+        )
         destroy = True
     else:
         cluster = edgedb_cluster.Cluster(
-            data_dir=data_dir, log_level='s',
+            data_dir=data_dir,
+            log_level='s',
             security=security,
-            http_endpoint_security=http_endpoint_security)
+            http_endpoint_security=http_endpoint_security,
+            compiler_pool_mode=compiler_pool_mode,
+        )
         destroy = False
 
     if await cluster.get_status() == 'not-initialized':
@@ -1420,6 +1432,7 @@ class _EdgeDBServer:
         adjacent_to: Optional[tconn.Connection],
         max_allowed_connections: Optional[int],
         compiler_pool_size: int,
+        compiler_pool_mode: Optional[edgedb_args.CompilerPoolMode] = None,
         debug: bool,
         backend_dsn: Optional[str] = None,
         data_dir: Optional[str] = None,
@@ -1446,6 +1459,7 @@ class _EdgeDBServer:
         self.adjacent_to = adjacent_to
         self.max_allowed_connections = max_allowed_connections
         self.compiler_pool_size = compiler_pool_size
+        self.compiler_pool_mode = compiler_pool_mode
         self.debug = debug
         self.backend_dsn = backend_dsn
         self.data_dir = data_dir
@@ -1518,6 +1532,9 @@ class _EdgeDBServer:
             '--compiler-pool-size', str(self.compiler_pool_size),
             '--tls-cert-mode', str(self.tls_cert_mode),
         ]
+
+        if self.compiler_pool_mode is not None:
+            cmd.extend(('--compiler-pool-mode', self.compiler_pool_mode.value))
 
         for addr in self.bind_addrs:
             cmd.extend(('--bind-address', addr))
@@ -1705,6 +1722,7 @@ def start_edgedb_server(
     bootstrap_command: Optional[str]=None,
     max_allowed_connections: Optional[int]=10,
     compiler_pool_size: int=2,
+    compiler_pool_mode: Optional[edgedb_args.CompilerPoolMode] = None,
     adjacent_to: Optional[tconn.Connection]=None,
     debug: bool=False,
     backend_dsn: Optional[str] = None,
@@ -1753,6 +1771,7 @@ def start_edgedb_server(
         max_allowed_connections=max_allowed_connections,
         adjacent_to=adjacent_to,
         compiler_pool_size=compiler_pool_size,
+        compiler_pool_mode=compiler_pool_mode,
         debug=debug,
         backend_dsn=backend_dsn,
         tenant_id=tenant_id,
