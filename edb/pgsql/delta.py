@@ -2986,20 +2986,22 @@ class CreateIndex(IndexCommand, adapts=s_indexes.CreateIndex):
         singletons = [subject]
         path_prefix_anchor = ql_ast.Subject().name
 
+        options = qlcompiler.CompilerOptions(
+            modaliases=context.modaliases,
+            schema_object_context=cls.get_schema_metaclass(),
+            anchors={ql_ast.Subject().name: subject},
+            path_prefix_anchor=path_prefix_anchor,
+            singletons=singletons,
+            apply_query_rewrites=not context.stdmode,
+        )
+
         index_expr = index.get_expr(schema)
         ir = index_expr.irast
         if ir is None:
             index_expr = type(index_expr).compiled(
                 index_expr,
                 schema=schema,
-                options=qlcompiler.CompilerOptions(
-                    modaliases=context.modaliases,
-                    schema_object_context=cls.get_schema_metaclass(),
-                    anchors={ql_ast.Subject().name: subject},
-                    path_prefix_anchor=path_prefix_anchor,
-                    singletons=singletons,
-                    apply_query_rewrites=not context.stdmode,
-                ),
+                options=options,
             )
             ir = index_expr.irast
 
@@ -3017,12 +3019,28 @@ class CreateIndex(IndexCommand, adapts=s_indexes.CreateIndex):
         else:
             sql_exprs = [codegen.SQLSourceGenerator.to_source(sql_tree)]
 
+        except_expr = index.get_except_expr(schema)
+        if except_expr and not except_expr.irast:
+            except_expr = type(except_expr).compiled(
+                except_expr,
+                schema=schema,
+                options=options,
+            )
+        if except_expr:
+            except_tree = compiler.compile_ir_to_sql_tree(
+                except_expr.irast.expr, singleton_mode=True)
+            except_src = codegen.SQLSourceGenerator.to_source(except_tree)
+            except_src = f'({except_src}) is not true'
+        else:
+            except_src = None
+
         module_name = index.get_name(schema).module
         index_name = common.get_index_backend_name(
             index.id, module_name, catenate=False)
         pg_index = dbops.Index(
             name=index_name[1], table_name=table_name, exprs=sql_exprs,
             unique=False, inherit=True,
+            predicate=except_src,
             metadata={'schemaname': str(index.get_name(schema))})
         return dbops.CreateIndex(pg_index)
 
@@ -3291,6 +3309,12 @@ class PointerMetaCommand(MetaCommand):
             if objtype:
                 return objtype
 
+    def is_sequence_ptr(self, ptr, schema):
+        return bool(
+            (tgt := ptr.get_target(schema))
+            and tgt.issubclass(schema, schema.get('std::sequence'))
+        )
+
     def get_pointer_default(self, ptr, schema, context):
         if ptr.is_pure_computable(schema):
             return None
@@ -3298,11 +3322,10 @@ class PointerMetaCommand(MetaCommand):
         default = ptr.get_default(schema)
         default_value = None
 
-        if default is not None:
+        if default is not None and ptr.is_link_property(schema):
             default_value = schemamech.ptr_default_to_col_default(
                 schema, ptr, default)
-        elif (tgt := ptr.get_target(schema)) and tgt.issubclass(
-                schema, schema.get('std::sequence')):
+        elif self.is_sequence_ptr(ptr, schema):
             # TODO: replace this with a generic scalar type default
             #       using std::nextval().
             seq_name = common.quote_literal(
@@ -3698,11 +3721,9 @@ class PointerMetaCommand(MetaCommand):
         changing_col_type = not is_link
 
         source_ctx = self.get_referrer_context_or_die(context)
+        ptr_op = self.get_parent_op(context)
         if is_multi:
-            if isinstance(self, sd.AlterObjectFragment):
-                source_op = self.get_parent_op(context)
-            else:
-                source_op = self
+            source_op = ptr_op
         else:
             source_op = source_ctx.op
 
@@ -3905,6 +3926,14 @@ class PointerMetaCommand(MetaCommand):
             self.pgops.add(dbops.Query(update_qry))
 
         if changing_col_type:
+            # In case the column has a default, clear it out before
+            # changing the type
+            if is_lprop or self.is_sequence_ptr(pointer, orig_schema):
+                alter_table.add_operation(
+                    dbops.AlterTableAlterColumnDefault(
+                        column_name=old_ptr_stor_info.column_name,
+                        default=None))
+
             alter_type = dbops.AlterTableAlterColumnType(
                 old_ptr_stor_info.column_name,
                 common.quote_type(new_type),
@@ -4978,19 +5007,13 @@ class AlterProperty(PropertyMetaCommand, adapts=s_props.AlterProperty):
             orig_def_val = self.get_pointer_default(prop, orig_schema, context)
             def_val = self.get_pointer_default(prop, schema, context)
 
-            if (
-                orig_def_val != def_val
-                and (
-                    (tgt := prop.get_target(orig_schema)) is None
-                    or not tgt.issubclass(
-                        orig_schema,
-                        schema.get('std::sequence'),
-                    )
-                )
-            ):
-                source_ctx = context.get_ancestor(
-                    s_sources.SourceCommandContext, self)
-                alter_table = source_ctx.op.get_alter_table(
+            if orig_def_val != def_val:
+                if prop.get_cardinality(schema).is_multi():
+                    source_op = self
+                else:
+                    source_op = context.get_ancestor(
+                        s_sources.SourceCommandContext, self).op
+                alter_table = source_op.get_alter_table(
                     schema, context, manual=True)
 
                 ptr_stor_info = types.get_pointer_storage_info(

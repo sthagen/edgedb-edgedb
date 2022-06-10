@@ -2623,6 +2623,96 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ]
         )
 
+    async def test_edgeql_ddl_ptr_set_type_using_03(self):
+        # check that defaults don't break things
+        await self.con.execute(r"""
+            create type Foo {
+                create property x -> str {
+                    set default := '';
+                };
+                create multi property y -> str {
+                    set default := '';
+                };
+            };
+        """)
+
+        await self.con.execute(r"""
+            alter type Foo {
+                alter property x {
+                    set default := 0;
+                    set type int64 using (<int64>.x);
+                };
+                alter property y {
+                    set default := 0;
+                    set type int64 using (<int64>.y);
+                };
+            };
+        """)
+
+        await self.con.execute(r"""
+            create type Bar {
+                create link l -> Foo {
+                    create property x -> str {
+                        set default := '';
+                    }
+                }
+            };
+        """)
+
+        await self.con.execute(r"""
+            alter type Bar {
+                alter link l {
+                    alter property x {
+                        set default := 0;
+                        set type int64 using (<int64>@x);
+                    }
+                }
+            };
+        """)
+
+    async def test_edgeql_ddl_ptr_set_type_using_04(self):
+        # check that defaults don't break things
+        await self.con.execute(r"""
+            create scalar type X extending sequence;
+            create type Foo {
+                create property x -> X;
+            };
+        """)
+
+        await self.con.execute(r"""
+            alter type Foo {
+                alter property x {
+                    set type array<str> using ([<str>.x]);
+                }
+            };
+        """)
+
+        await self.con.execute(r"""
+            create type Bar {
+                create property x -> int64;
+            };
+        """)
+        await self.con.execute(r"""
+            alter type Bar {
+                alter property x {
+                    set type X using (<X>.x);
+                }
+            };
+        """)
+
+        await self.con.execute(r"""
+            create type Baz {
+                create multi property x -> int64;
+            };
+        """)
+        await self.con.execute(r"""
+            alter type Baz {
+                alter property x {
+                    set type X using (<X>.x);
+                }
+            };
+        """)
+
     async def test_edgeql_ddl_ptr_set_type_validation(self):
         await self.con.execute(r"""
 
@@ -9323,6 +9413,69 @@ type default::Foo {
                 update Post set { original := Post };
             """)
 
+    async def test_edgeql_ddl_constraint_18(self):
+        await self.con.execute(r"""
+            create type Foo {
+                create property flag -> bool;
+                create property except -> bool;
+                create constraint expression on (.flag) except (.except);
+             };
+        """)
+
+        # Check all combinations of expression outcome and except value
+        for flag in [True, False, None]:
+            for ex in [True, False, None]:
+                op = self.con.query(
+                    """
+                    INSERT Foo {
+                        flag := <optional bool>$flag,
+                        except := <optional bool>$ex,
+                    }
+                    """,
+                    flag=flag,
+                    ex=ex,
+                )
+
+                # The constraint fails if it is specifically false
+                # (not empty) and except is not true.
+                fail = flag is False and ex is not True
+                if fail:
+                    async with self.assertRaisesRegexTx(
+                            edgedb.ConstraintViolationError,
+                            r'invalid Foo'):
+                        await op
+                else:
+                    await op
+
+    async def test_edgeql_ddl_constraint_19(self):
+        # This is pretty marginal, but make sure we can distinguish
+        # on and except in name creation;
+        await self.con.execute(r"""
+            create abstract constraint always_ok extending constraint {
+                using (true)
+            };
+        """)
+
+        await self.con.execute(r"""
+            create type ExceptTest {
+                create property b -> bool;
+                create property e -> bool;
+                create constraint always_ok except (.e);
+                create constraint always_ok on (.e);
+            };
+        """)
+
+    async def test_edgeql_ddl_constraint_20(self):
+        async with self.assertRaisesRegexTx(
+                edgedb.InvalidConstraintDefinitionError,
+                r'constraints cannot contain paths with more than one hop'):
+            await self.con.execute("""
+                create type Foo {
+                    create constraint expression on (false)
+                        except (.__type__.name = 'default::Bar') ;
+                };
+            """)
+
     async def test_edgeql_ddl_constraint_check_01a(self):
         await self.con.execute(r"""
             create type Foo {
@@ -11330,6 +11483,27 @@ type default::Foo {
                 create index on (<str>.oid)
             };
         """)
+
+    async def test_edgeql_ddl_index_06(self):
+        # Unfortunately we don't really have a way to test that this
+        # actually works, but I looked at the SQL DDL.
+        await self.con.execute(r"""
+            create type Foo {
+                create property name -> str;
+                create property exclude -> bool;
+                create index on (.name) except (.exclude);
+            };
+        """)
+
+        # But we can at least make sure it made it into the schema
+        await self.assert_query_result(
+            '''
+            SELECT schema::ObjectType {
+                indexes: {expr, except_expr}
+            } FILTER .name = 'default::Foo'
+            ''',
+            [{"indexes": [{"except_expr": ".exclude", "expr": ".name"}]}]
+        )
 
     async def test_edgeql_ddl_errors_01(self):
         await self.con.execute('''
