@@ -21,7 +21,7 @@ let's navigate into the directory and start the dev server.
 
 .. code-block:: bash
 
-  $ cd nextjs-todo
+  $ cd nextjs-blog
   $ yarn dev
 
 Open `localhost:3000 <http://localhost:3000>`_ to see the default Next.js
@@ -148,14 +148,14 @@ directory. You'll be presented with a series of prompts.
 .. code-block:: bash
 
   $ edgedb project init
-  No `edgedb.toml` found in `~/nextjs-todo` or above
+  No `edgedb.toml` found in `~/nextjs-blog` or above
 
   Do you want to initialize a new project? [Y/n]
   > Y
 
   Specify the name of EdgeDB instance to use with this project [default:
-  nextjs-todo]:
-  > nextjs-todo
+  nextjs-blog]:
+  > nextjs-blog
 
   Checking EdgeDB versions...
   Specify the version of EdgeDB to use with this project [default: 1.x]:
@@ -164,20 +164,20 @@ directory. You'll be presented with a series of prompts.
   Do you want to start instance automatically on login? [y/n]
   > y
   ┌─────────────────────┬──────────────────────────────────────────────┐
-  │ Project directory   │ ~/nextjs-todo                                │
-  │ Project config      │ ~/nextjs-todo/edgedb.toml                    │
-  │ Schema dir (empty)  │ ~/nextjs-todo/dbschema                       │
+  │ Project directory   │ ~/nextjs-blog                                │
+  │ Project config      │ ~/nextjs-blog/edgedb.toml                    │
+  │ Schema dir (empty)  │ ~/nextjs-blog/dbschema                       │
   │ Installation method │ portable package                             │
   │ Start configuration │ manual                                       │
   │ Version             │ 1.x                                          │
-  │ Instance name       │ nextjs-todo                                  │
+  │ Instance name       │ nextjs-blog                                  │
   └─────────────────────┴──────────────────────────────────────────────┘
   Initializing EdgeDB instance...
   Applying migrations...
   Everything is up to date. Revision initial.
   Project initialized.
 
-This process has spun up an EdgeDB instance called ``nextjs-todo`` and
+This process has spun up an EdgeDB instance called ``nextjs-blog`` and
 "linked" it with your current directory. As long as you're inside that
 directory, CLI commands and client libraries will be able to connect to the
 linked instance automatically, without additional configuration.
@@ -321,14 +321,20 @@ we inserted earlier.
 
 To fetch these from the homepage, we'll use ``useState``, ``useEffect``, and
 the built-in ``fetch`` API. At the top of the ``HomePage`` component in
-``pages/index.tsx``, replace the static data with .
+``pages/index.tsx``, replace the static data and add the missing imports.
 
 .. code-block:: tsx-diff
 
      // pages/index.tsx
+  +  import {useState, useEffect} from 'react';
 
-     const Home: NextPage = () => {
+     type Post = {
+       id: string;
+       title: string;
+       content: string;
+     };
 
+     const HomePage: NextPage = () => {
   -    const posts: Post[] = [
   -      {
   -        id: 'post1',
@@ -405,13 +411,13 @@ instead.
 
     export const client = createClient();
 
-  + const getPosts = e.select(e.BlogPost, () => ({
+  + const selectPosts = e.select(e.BlogPost, () => ({
   +   id: true,
   +   title: true,
   +   content: true,
   + }));
 
-  + export type GetPosts = $infer<typeof getPosts>;
+  + export type Posts = $infer<typeof selectPosts>;
 
     export default async function handler(
       req: NextApiRequest,
@@ -422,7 +428,7 @@ instead.
   -     title,
   -     content
   -   };`);
-  +   const posts = await getPosts.run(client);
+  +   const posts = await selectPosts.run(client);
       res.status(200).json(posts);
     }
 
@@ -432,7 +438,7 @@ query builder as a single default import ``e`` from the ``dbschema/edgeql-js``
 directory.
 
 We're also using a utility called ``$infer`` to extract the inferred type of
-this query. In VSCode you can hover over ``GetPosts`` to see what this type is.
+this query. In VSCode you can hover over ``Posts`` to see what this type is.
 
 .. image::
     https://www.edgedb.com/docs/tutorials/nextjs/inference.png
@@ -440,7 +446,7 @@ this query. In VSCode you can hover over ``GetPosts`` to see what this type is.
     :width: 100%
 
 Back in ``pages/index.tsx``, lets update our code to use the inferred
-``GetPosts`` type instead of our manual type declaration.
+``Posts`` type instead of our manual type declaration.
 
 .. code-block:: typescript-diff
 
@@ -450,7 +456,7 @@ Back in ``pages/index.tsx``, lets update our code to use the inferred
      import Head from 'next/head';
      import {useEffect, useState} from 'react';
      import styles from '../styles/Home.module.css';
-  +  import {GetPosts} from "./api/post";
+  +  import {Posts} from "./api/post";
 
   -  type Post = {
   -    id: string;
@@ -460,14 +466,14 @@ Back in ``pages/index.tsx``, lets update our code to use the inferred
 
      const Home: NextPage = () => {
 
-  +    const [posts, setPosts] = useState<GetPosts | null>(null);
+  +    const [posts, setPosts] = useState<Posts | null>(null);
        // ...
 
      }
 
-Now, when we update our ``getPosts`` query, the type of our dynamically loaded
-``posts`` variable will update automatically—no need to keep our type
-definitions in sync with our API logic!
+Now, when we update our ``selectPosts`` query, the type of our dynamically
+loaded ``posts`` variable will update automatically—no need to keep
+our type definitions in sync with our API logic!
 
 Rendering blog posts
 --------------------
@@ -587,8 +593,8 @@ Once you've applied the migrations, consider creating some sample data in your
   $ edgedb --dsn <your-instance-dsn> --tls-security insecure
   EdgeDB 1.x (repl 1.x)
   Type \help for help, \quit to quit.
-  edgedb> insert Post { title := "Test post" };
-  {default::Post {id: c00f2c9a-cbf5-11ec-8ecb-4f8e702e5789}}
+  edgedb> insert BlogPost { title := "Test post" };
+  {default::BlogPost {id: c00f2c9a-cbf5-11ec-8ecb-4f8e702e5789}}
 
 
 **#4 Set up a `prebuild` script**
