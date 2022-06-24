@@ -76,7 +76,7 @@ class TestIntrospection(tb.QueryTestCase):
             ]
         )
 
-    @test.xfail(
+    @test.xerror(
         "Known collation issue on Heroku Postgres",
         unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
     )
@@ -108,7 +108,7 @@ class TestIntrospection(tb.QueryTestCase):
             }]
         )
 
-    @test.xfail(
+    @test.xerror(
         "Known collation issue on Heroku Postgres",
         unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
     )
@@ -138,7 +138,7 @@ class TestIntrospection(tb.QueryTestCase):
             }]
         )
 
-    @test.xfail(
+    @test.xerror(
         "Known collation issue on Heroku Postgres",
         unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
     )
@@ -195,7 +195,7 @@ class TestIntrospection(tb.QueryTestCase):
             }]
         )
 
-    @test.xfail(
+    @test.xerror(
         "Known collation issue on Heroku Postgres",
         unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
     )
@@ -890,7 +890,7 @@ class TestIntrospection(tb.QueryTestCase):
                             'type': {'name': 'std::duration'},
                         },
                     ],
-                    'volatility': 'Stable'
+                    'volatility': 'Immutable'
                 },
                 {
                     'name': 'std::+',
@@ -919,20 +919,20 @@ class TestIntrospection(tb.QueryTestCase):
                     volatility
                 }
                 FILTER
-                    .from_type.name IN {'std::duration', 'std::datetime'}
+                    .from_type.name = 'std::str'
                     AND
-                    .to_type.name = 'std::str'
-                ORDER BY .from_type.name;
+                    .to_type.name IN {'std::duration', 'std::datetime'}
+                ORDER BY .to_type.name;
             """,
             [
                 {
-                    'from_type': {'name': 'std::datetime'},
-                    'to_type': {'name': 'std::str'},
+                    'from_type': {'name': 'std::str'},
+                    'to_type': {'name': 'std::datetime'},
                     'volatility': 'Stable'
                 },
                 {
-                    'from_type': {'name': 'std::duration'},
-                    'to_type': {'name': 'std::str'},
+                    'from_type': {'name': 'std::str'},
+                    'to_type': {'name': 'std::duration'},
                     'volatility': 'Immutable'
                 }
             ]
@@ -1122,7 +1122,7 @@ class TestIntrospection(tb.QueryTestCase):
             [True] * res
         )
 
-    @test.xfail(
+    @test.xerror(
         "Known collation issue on Heroku Postgres",
         unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
     )
@@ -1252,7 +1252,7 @@ class TestIntrospection(tb.QueryTestCase):
             ],
         )
 
-    @test.xfail(
+    @test.xerror(
         "Known collation issue on Heroku Postgres",
         unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
     )
@@ -1299,7 +1299,7 @@ class TestIntrospection(tb.QueryTestCase):
             ],
         )
 
-    @test.xfail(
+    @test.xerror(
         "Known collation issue on Heroku Postgres",
         unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
     )

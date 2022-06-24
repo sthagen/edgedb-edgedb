@@ -479,7 +479,7 @@ class TestEdgeQLFor(tb.QueryTestCase):
             ]
         )
 
-    @test.xfail('deeply nested linkprop hoisting is currently broken')
+    @test.xerror('deeply nested linkprop hoisting is currently broken')
     async def test_edgeql_for_in_computable_03(self):
         await self.assert_query_result(
             r'''
@@ -513,7 +513,7 @@ class TestEdgeQLFor(tb.QueryTestCase):
             ]
         )
 
-    @test.xfail('''
+    @test.xerror('''
         See comment on why this test doesn't contain a FOR.
 
         The result is *almost* correct, but oddly @letter is not a
@@ -698,7 +698,7 @@ class TestEdgeQLFor(tb.QueryTestCase):
             ],
         )
 
-    @test.xfail("'letter' does not exist")
+    @test.xerror("'letter' does not exist")
     async def test_edgeql_for_in_computable_09(self):
         # This is basically test_edgeql_for_in_computable_01 but with
         # a WITH binding in front of the whole shape
@@ -732,7 +732,7 @@ class TestEdgeQLFor(tb.QueryTestCase):
             ],
         )
 
-    @test.xfail("""
+    @test.xerror("""
         This outputs ["I", "B"] as letter for both objects.
     """)
     async def test_edgeql_for_in_computable_10(self):
@@ -1036,3 +1036,77 @@ class TestEdgeQLFor(tb.QueryTestCase):
             await self.con.execute("""
                 WITH s := {} SELECT (FOR x in {s} UNION ());
             """)
+
+    async def test_edgeql_for_fake_group_01a(self):
+        await self.assert_query_result(
+            r'''
+            with GR := (
+                for x in {'Earth', 'Water'} union { key := {element := x} }
+            )
+            select GR {
+              key: {element},
+            }
+            order by .key.element;
+            ''',
+            [{"key": {"element": "Earth"}}, {"key": {"element": "Water"}}]
+        )
+
+    async def test_edgeql_for_fake_group_01b(self):
+        await self.assert_query_result(
+            r'''
+            with GR := (
+                for x in {'Earth', 'Water'} union {
+                    key := {element := x},
+                    elements := (select Card filter .element = x),
+                }
+            )
+            select GR {
+              key: {element},
+            }
+            order by .key.element;
+            ''',
+            [{"key": {"element": "Earth"}}, {"key": {"element": "Water"}}]
+        )
+
+    async def test_edgeql_for_fake_group_01c(self):
+        await self.assert_query_result(
+            r'''
+            with GR := (
+                for x in {'Earth', 'Water'} union {
+                    key := {element := x},
+                    elements := (select Card filter .element = x),
+                }
+            )
+            select GR {
+              key: {element},
+              elements: {name},
+            }
+            order by .key.element;
+            ''',
+            [
+                {
+                    "key": {"element": "Earth"},
+                    "elements": tb.bag([{"name": "Dwarf"}, {"name": "Golem"}]),
+                },
+                {
+                    "key": {"element": "Water"},
+                    "elements": tb.bag([
+                        {"name": "Bog monster"}, {"name": "Giant turtle"},
+                    ]),
+                },
+            ]
+        )
+
+    @test.xerror('''
+        Can't find materialized set
+            ns~2@ns~6@ns~7@@(__derived__::GR@w~1).>key[IS std::str]
+    ''')
+    async def test_edgeql_for_fake_group_02(self):
+        await self.assert_query_result(
+            r'''
+            with GR := (for x in {'Earth', 'Water'} union {key := x})
+            select GR { key }
+            order by .key;
+            ''',
+            [{"key": "Earth"}, {"key": "Water"}]
+        )
