@@ -365,7 +365,7 @@ class Compiler:
         self._compile_schema_storage_in_delta(
             ctx, pgdelta, subblock, context=context)
 
-        return block, new_types
+        return block, new_types, pgdelta.config_ops
 
     def _compile_schema_storage_in_delta(
         self,
@@ -904,7 +904,7 @@ class Compiler:
 
         # Apply and adapt delta, build native delta plan, which
         # will also update the schema.
-        block, new_types = self._process_delta(ctx, delta)
+        block, new_types, config_ops = self._process_delta(ctx, delta)
 
         ddl_stmt_id: Optional[str] = None
 
@@ -974,6 +974,7 @@ class Compiler:
             user_schema=current_tx.get_user_schema_if_updated(),
             cached_reflection=current_tx.get_cached_reflection_if_updated(),
             global_schema=current_tx.get_global_schema_if_updated(),
+            config_ops=config_ops,
         )
 
     def _compile_ql_migration(
@@ -1562,6 +1563,13 @@ class Compiler:
             ),
         )
 
+        globals = None
+        if ir.globals:
+            globals = [
+                (str(glob.global_name), glob.has_present_arg)
+                for glob in ir.globals
+            ]
+
         is_backend_setting = bool(getattr(ir, 'backend_setting', None))
         requires_restart = bool(getattr(ir, 'requires_restart', False))
 
@@ -1613,6 +1621,7 @@ class Compiler:
             requires_restart=requires_restart,
             single_unit=single_unit,
             config_op=config_op,
+            globals=globals,
         )
 
     def _compile_dispatch_ql(
@@ -1655,6 +1664,8 @@ class Compiler:
 
         elif isinstance(ql, qlast.ConfigOp):
             if ql.scope is qltypes.ConfigScope.SESSION:
+                capability = enums.Capability.SESSION_CONFIG
+            elif ql.scope is qltypes.ConfigScope.GLOBAL:
                 capability = enums.Capability.SESSION_CONFIG
             else:
                 capability = enums.Capability.PERSISTENT_CONFIG
@@ -1821,6 +1832,8 @@ class Compiler:
                 if comp.global_schema is not None:
                     unit.global_schema = pickle.dumps(comp.global_schema, -1)
 
+                unit.config_ops.extend(comp.config_ops)
+
             elif isinstance(comp, dbstate.TxControlQuery):
                 unit.sql = comp.sql
                 unit.cacheable = comp.cacheable
@@ -1875,6 +1888,7 @@ class Compiler:
 
             elif isinstance(comp, dbstate.SessionStateQuery):
                 unit.sql = comp.sql
+                unit.globals = comp.globals
 
                 if comp.config_scope is qltypes.ConfigScope.INSTANCE:
                     if (not ctx.state.current_tx().is_implicit() or

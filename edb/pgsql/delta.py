@@ -74,6 +74,7 @@ from edb.pgsql import dbops
 from edb.pgsql import params
 
 from edb.server import defines as edbdef
+from edb.server.config import ops as config_ops
 
 from . import ast as pg_ast
 from .common import qname as q
@@ -677,6 +678,33 @@ class AlterGlobal(
     pass
 
 
+class SetGlobalType(
+    GlobalCommand,  # ???
+    adapts=s_globals.SetGlobalType,
+):
+    def register_config_op(self, op, context):
+        ops = context.get(sd.DeltaRootContext).op.config_ops
+        ops.append(op)
+
+    def apply(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+
+        schema = super().apply(schema, context)
+        if self.reset_value:
+            op = config_ops.Operation(
+                opcode=config_ops.OpCode.CONFIG_RESET,
+                scope=ql_ft.ConfigScope.GLOBAL,
+                setting_name=str(self.scls.get_name(schema)),
+                value=None,
+            )
+            self.register_config_op(op, context)
+
+        return schema
+
+
 class DeleteGlobal(
     GlobalCommand,
     adapts=s_globals.DeleteGlobal,
@@ -803,6 +831,58 @@ class AlterArrayExprAlias(
 class DeleteArrayExprAlias(
     ArrayExprAliasCommand,
     adapts=s_types.DeleteArrayExprAlias,
+):
+    pass
+
+
+class RangeCommand(MetaCommand):
+    pass
+
+
+class CreateRange(RangeCommand, adapts=s_types.CreateRange):
+    pass
+
+
+class AlterRange(RangeCommand, adapts=s_types.AlterRange):
+    pass
+
+
+class RenameRange(RangeCommand, adapts=s_types.RenameRange):
+    pass
+
+
+class DeleteRange(RangeCommand, adapts=s_types.DeleteRange):
+    pass
+
+
+class RangeExprAliasCommand(MetaCommand):
+    pass
+
+
+class CreateRangeExprAlias(
+    RangeExprAliasCommand,
+    adapts=s_types.CreateRangeExprAlias,
+):
+    pass
+
+
+class RenameRangeExprAlias(
+    RangeExprAliasCommand,
+    adapts=s_types.RenameRangeExprAlias,
+):
+    pass
+
+
+class AlterRangeExprAlias(
+    RangeExprAliasCommand,
+    adapts=s_types.AlterRangeExprAlias,
+):
+    pass
+
+
+class DeleteRangeExprAlias(
+    RangeExprAliasCommand,
+    adapts=s_types.DeleteRangeExprAlias,
 ):
     pass
 
@@ -6228,6 +6308,7 @@ class DeltaRoot(MetaCommand, adapts=sd.DeltaRoot):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._renames = {}
+        self.config_ops = []
 
     def apply(
         self,

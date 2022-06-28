@@ -47,7 +47,9 @@ class TestProtocol(ProtocolTestCase):
                 expected_cardinality=protocol.Cardinality.MANY,
                 input_typedesc_id=b'\0' * 16,
                 output_typedesc_id=b'\0' * 16,
+                state_typedesc_id=b'\0' * 16,
                 arguments=b'',
+                state_data=b'',
             ),
             protocol.Sync(),
         )
@@ -73,7 +75,9 @@ class TestProtocol(ProtocolTestCase):
                 expected_cardinality=protocol.Cardinality.MANY,
                 input_typedesc_id=b'\0' * 16,
                 output_typedesc_id=b'\0' * 16,
+                state_typedesc_id=b'\0' * 16,
                 arguments=b'',
+                state_data=b'',
             ),
             protocol.Sync(),
         )
@@ -153,6 +157,8 @@ class TestProtocol(ProtocolTestCase):
                 output_format=protocol.OutputFormat.BINARY,
                 expected_cardinality=compiler.Cardinality.AT_MOST_ONE,
                 command_text='SEL ECT 1',
+                state_typedesc_id=b'\0' * 16,
+                state_data=b'',
             )
         )
         # Should come through even without an explicit 'flush'
@@ -175,6 +181,8 @@ class TestProtocol(ProtocolTestCase):
                 output_format=protocol.OutputFormat.BINARY,
                 expected_cardinality=compiler.Cardinality.AT_MOST_ONE,
                 command_text='SELECT 1',
+                state_typedesc_id=b'\0' * 16,
+                state_data=b'',
             ),
             protocol.Flush()
         )
@@ -198,7 +206,9 @@ class TestProtocol(ProtocolTestCase):
                 expected_cardinality=protocol.Cardinality.MANY,
                 input_typedesc_id=b'\0' * 16,
                 output_typedesc_id=b'\0' * 16,
+                state_typedesc_id=b'\0' * 16,
                 arguments=b'',
+                state_data=b'',
             ),
             protocol.Sync(),
         )
@@ -225,7 +235,9 @@ class TestProtocol(ProtocolTestCase):
                 expected_cardinality=protocol.Cardinality.MANY,
                 input_typedesc_id=b'\0' * 16,
                 output_typedesc_id=b'\0' * 16,
+                state_typedesc_id=b'\0' * 16,
                 arguments=b'',
+                state_data=b'',
             ),
         )
         # Should come through even without an explicit 'flush'
@@ -282,7 +294,9 @@ class TestServerCancellation(tb.TestCase):
                     expected_cardinality=protocol.Cardinality.MANY,
                     input_typedesc_id=b'\0' * 16,
                     output_typedesc_id=b'\0' * 16,
+                    state_typedesc_id=b'\0' * 16,
                     arguments=b'',
+                    state_data=b'',
                 ),
                 protocol.Sync(),
             )
@@ -348,7 +362,9 @@ class TestServerCancellation(tb.TestCase):
                         expected_cardinality=protocol.Cardinality.MANY,
                         input_typedesc_id=b'\0' * 16,
                         output_typedesc_id=b'\0' * 16,
+                        state_typedesc_id=b'\0' * 16,
                         arguments=b'',
+                        state_data=b'',
                     ),
                     protocol.Sync(),
                 )

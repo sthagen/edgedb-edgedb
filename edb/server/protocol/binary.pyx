@@ -87,7 +87,6 @@ include "./consts.pxi"
 
 
 DEF FLUSH_BUFFER_AFTER = 100_000
-cdef bytes ZERO_UUID = b'\x00' * 16
 cdef bytes EMPTY_TUPLE_UUID = s_obj.get_known_type_id('empty-tuple').bytes
 
 cdef object CARD_NO_RESULT = compiler.Cardinality.NO_RESULT
@@ -601,10 +600,30 @@ cdef class EdgeConnection:
             b'system_config',
             self.server.get_report_config_data()
         )
+        self.write_state_desc(False)
 
         self.write(self.sync_status())
 
         self.flush()
+
+    cdef inline write_state_desc(self, bint flush=True):
+        cdef WriteBuffer state, buf
+
+        buf = WriteBuffer.new_message(b'S')
+        buf.write_len_prefixed_bytes(b'state_description')
+
+        type_id, type_data = self.get_dbview().describe_state()
+        state = WriteBuffer.new()
+        state.write_bytes(type_id.bytes)
+        state.write_len_prefixed_bytes(type_data)
+
+        buf.write_len_prefixed_buffer(state)
+        buf.end_message()
+
+        self.write(buf)
+        if flush:
+            self.flush()
+        self.pending_state_desc_push = False
 
     async def _do_handshake(self):
         cdef:
@@ -652,6 +671,7 @@ cdef class EdgeConnection:
         dbv = await self.server.new_dbview(
             dbname=database,
             query_cache=self.query_cache_enabled,
+            protocol_version=self.protocol_version,
         )
         assert type(dbv) is dbview.DatabaseConnectionView
         self._dbview = <dbview.DatabaseConnectionView>dbv
@@ -1436,26 +1456,20 @@ cdef class EdgeConnection:
         msg.end_message()
         return msg
 
-    cdef WriteBuffer make_command_complete_msg(self, query_unit):
+    cdef WriteBuffer make_command_complete_msg(self, capabilities, status):
         cdef:
             WriteBuffer msg
 
-        msg = WriteBuffer.new_message(b'C')
-        msg.write_int16(0)  # no headers
-        msg.write_int64(<int64_t><uint64_t>query_unit.capabilities)
-        msg.write_len_prefixed_bytes(query_unit.status)
-        return msg.end_message()
-
-    cdef WriteBuffer make_command_complete_msg_by_group(
-        self, query_unit_group
-    ):
-        cdef:
-            WriteBuffer msg
+        state_tid, state_data = self.get_dbview().encode_state()
 
         msg = WriteBuffer.new_message(b'C')
         msg.write_int16(0)  # no headers
-        msg.write_int64(<int64_t><uint64_t>query_unit_group.capabilities)
-        msg.write_len_prefixed_bytes(query_unit_group[-1].status)
+        msg.write_int64(<int64_t><uint64_t>capabilities)
+        msg.write_len_prefixed_bytes(status)
+
+        msg.write_bytes(state_tid.bytes)
+        msg.write_len_prefixed_bytes(state_data)
+
         return msg.end_message()
 
     async def _execute_system_config(self, query_unit, conn):
@@ -1508,7 +1522,9 @@ cdef class EdgeConnection:
                 assert query_unit.tx_rollback
                 _dbview.abort_tx()
 
-            self.write(self.make_command_complete_msg(query_unit))
+            self.write(self.make_command_complete_msg(
+                query_unit.capabilities, query_unit.status
+            ))
         finally:
             self.maybe_release_pgcon(conn)
 
@@ -1540,7 +1556,7 @@ cdef class EdgeConnection:
             if query_unit.drop_db:
                 await self.server._on_before_drop_db(
                     query_unit.drop_db, _dbview.dbname)
-            if query_unit.system_config or query_unit.set_global:
+            if query_unit.system_config:
                 await self._execute_system_config(query_unit, conn)
             else:
                 if query_unit.sql:
@@ -1551,9 +1567,11 @@ cdef class EdgeConnection:
                     else:
                         bound_args_buf = self.recode_bind_args(
                             bind_args, compiled, None)
+                        edgecon = self if not query_unit.set_global else None
+
                         await conn.parse_execute(
                             query_unit,         # =query
-                            self,               # =edgecon
+                            edgecon,            # =edgecon
                             bound_args_buf,     # =bind_data
                             use_prep_stmt,      # =use_prep_stmt
                             state,              # =state
@@ -1563,6 +1581,13 @@ cdef class EdgeConnection:
                         # state is restored, clear orig_state so that we can
                         # set conn.last_state correctly later
                         orig_state = None
+
+                config_ops = query_unit.config_ops
+                if query_unit.set_global:
+                    new_config_ops = await self._finish_set_global(
+                        conn, query_unit, state)
+                    if new_config_ops:
+                        config_ops = new_config_ops
 
                 if query_unit.tx_savepoint_rollback:
                     _dbview.rollback_tx_to_savepoint(query_unit.sp_name)
@@ -1580,10 +1605,10 @@ cdef class EdgeConnection:
                     self.server._on_after_drop_db(
                         query_unit.drop_db)
 
-                if query_unit.config_ops:
+                if config_ops:
                     await _dbview.apply_config_ops(
                         conn,
-                        query_unit.config_ops)
+                        config_ops)
         except Exception as ex:
             _dbview.on_error()
 
@@ -1611,6 +1636,27 @@ cdef class EdgeConnection:
                     conn.last_state = state
         finally:
             self.maybe_release_pgcon(conn)
+
+    async def _finish_set_global(self, conn, query_unit, state):
+        config_ops = None
+        try:
+            try:
+                if state is not None:
+                    await self.wait_for_state_resp(
+                        state, bool(query_unit.tx_id))
+                for sql in query_unit.sql:
+                    data = await conn.wait_for_command(
+                        ignore_data=False
+                    )
+                if data:
+                    config_ops = [
+                        config.Operation.from_json(r[0][1:])
+                        for r in data]
+            finally:
+                await conn.wait_for_sync()
+        finally:
+            await conn.after_command()
+        return config_ops
 
     cdef QueryRequestInfo parse_execute_request(self):
         cdef:
@@ -1654,6 +1700,10 @@ cdef class EdgeConnection:
         query = self.buffer.read_len_prefixed_bytes()
         if not query:
             raise errors.BinaryProtocolError('empty query')
+
+        state_tid = self.buffer.read_bytes(16)
+        state_data = self.buffer.read_len_prefixed_bytes()
+        self.get_dbview().decode_state(state_tid, state_data)
 
         return QueryRequestInfo(
             self._tokenize(query),
@@ -1708,6 +1758,7 @@ cdef class EdgeConnection:
         in_tid = self.buffer.read_bytes(16)
         out_tid = self.buffer.read_bytes(16)
         args = self.buffer.read_len_prefixed_bytes()
+
         self.buffer.finish_message()
 
         dbview = self.get_dbview()
@@ -1773,8 +1824,9 @@ cdef class EdgeConnection:
         elif len(query_unit_group) > 1:
             await self._execute_script(compiled, args)
             self.write(
-                self.make_command_complete_msg_by_group(
-                    compiled.query_unit_group
+                self.make_command_complete_msg(
+                    compiled.query_unit_group.capabilities,
+                    compiled.query_unit_group[-1].status,
                 )
             )
         else:
@@ -1785,8 +1837,9 @@ cdef class EdgeConnection:
             await self._execute(compiled, args, use_prep)
             self.write(
                 self.make_command_complete_msg(
-                    compiled.query_unit_group[0],
-                ),
+                    compiled.query_unit_group[0].capabilities,
+                    compiled.query_unit_group[0].status,
+                )
             )
 
         if self._cancelled:
@@ -1854,6 +1907,12 @@ cdef class EdgeConnection:
 
                 if self._stop_requested:
                     break
+
+                if (
+                    self.pending_state_desc_push and
+                    not self.get_dbview().in_tx()
+                ):
+                    self.write_state_desc()
 
                 if not self.buffer.take_message():
                     if self._passive_mode:
@@ -2408,6 +2467,14 @@ cdef class EdgeConnection:
         if not self._write_waiter or self._write_waiter.done():
             return
         self._write_waiter.set_result(True)
+
+    def push_state_desc(self):
+        if not self.authed or self._con_status == EDGECON_BAD:
+            return
+        if self.idling and not self.get_dbview().in_tx():
+            self.write_state_desc()
+        else:
+            self.pending_state_desc_push = True
 
     async def dump(self):
         cdef:
