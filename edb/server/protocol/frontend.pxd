@@ -17,15 +17,10 @@
 #
 
 
-from edb.server.dbview cimport dbview
+from edb.server.pgproto.pgproto cimport WriteBuffer
 
 
-@cython.final
-cdef class EdgeConnectionBackwardsCompatible(EdgeConnection):
-    cdef legacy_parse_prepare_query_part(self, bint account_for_stmt_name)
-    cdef WriteBuffer make_legacy_command_data_description_msg(
-        self, dbview.CompiledQuery query
-    )
-    cdef WriteBuffer make_legacy_command_complete_msg(self, query_unit)
-    cdef uint64_t _parse_implicit_limit(self, bytes v) except <uint64_t>-1
-    cdef dict legacy_parse_headers(self)
+cdef class FrontendConnection:
+
+    cdef write(self, WriteBuffer buf)
+    cdef flush(self)

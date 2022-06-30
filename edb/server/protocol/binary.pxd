@@ -31,6 +31,7 @@ from edb.server.pgproto.pgproto cimport (
 from edb.server.dbview cimport dbview
 from edb.server.pgcon cimport pgcon
 from edb.server.pgproto.debug cimport PG_DEBUG
+from edb.server.protocol cimport frontend
 
 
 cdef enum EdgeSeverity:
@@ -50,30 +51,7 @@ cdef enum EdgeConnectionStatus:
     EDGECON_BAD = 3
 
 
-@cython.final
-cdef class QueryRequestInfo:
-    cdef public object source  # edgeql.Source
-    cdef public tuple protocol_version
-    cdef public object output_format
-    cdef public bint expect_one
-    cdef public int implicit_limit
-    cdef public bint inline_typeids
-    cdef public bint inline_typenames
-    cdef public bint inline_objectids
-    cdef public uint64_t allow_capabilities
-
-    cdef int cached_hash
-
-
-@cython.final
-cdef class CompiledQuery:
-    cdef public object query_unit_group
-    cdef public object first_extra  # Optional[int]
-    cdef public object extra_counts
-    cdef public object extra_blobs
-
-
-cdef class EdgeConnection:
+cdef class EdgeConnection(frontend.FrontendConnection):
 
     cdef:
         EdgeConnectionStatus _con_status
@@ -95,7 +73,7 @@ cdef class EdgeConnection:
 
         object _main_task
 
-        CompiledQuery _last_anon_compiled
+        dbview.CompiledQuery _last_anon_compiled
         int _last_anon_compiled_hash
         WriteBuffer _write_buf
 
@@ -135,7 +113,7 @@ cdef class EdgeConnection:
 
     cdef interpret_backend_error(self, exc)
 
-    cdef QueryRequestInfo parse_execute_request(self)
+    cdef dbview.QueryRequestInfo parse_execute_request(self)
     cdef parse_output_format(self, bytes mode)
     cdef parse_cardinality(self, bytes card)
     cdef char render_cardinality(self, query_unit) except -1
@@ -149,25 +127,11 @@ cdef class EdgeConnection:
 
     cdef sync_status(self)
 
-    cdef uint64_t _count_globals(
-        self,
-        query_unit: object,
-    )
-    cdef _inject_globals(
-        self,
-        query_unit: object,
-        WriteBuffer out_buf,
-    )
-
-    cdef WriteBuffer recode_bind_args(self,
-        bytes bind_args, CompiledQuery compiled, object positions,
-    )
-
     cdef WriteBuffer make_negotiate_protocol_version_msg(
         self, tuple target_proto
     )
     cdef WriteBuffer make_command_data_description_msg(
-        self, CompiledQuery query
+        self, dbview.CompiledQuery query
     )
     cdef WriteBuffer make_command_complete_msg(self, capabilities, status)
 

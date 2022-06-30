@@ -16,7 +16,6 @@
 # limitations under the License.
 #
 
-
 import asyncio
 import contextlib
 import decimal
@@ -69,7 +68,8 @@ from edb.server.cache cimport stmt_cache
 from edb.server.dbview cimport dbview
 from edb.server import pgconnparams
 from edb.server import metrics
-from edb.server.protocol cimport binary as edgecon
+
+from edb.server.protocol cimport frontend
 
 from edb.common import debug
 
@@ -1038,7 +1038,10 @@ cdef class PGConnection:
             await self._parse_apply_state_resp(state)
 
     async def wait_for_command(
-        self, *, bint ignore_data, edgecon.EdgeConnection edgecon=None
+        self,
+        *,
+        bint ignore_data,
+        frontend.FrontendConnection fe_conn = None,
     ):
         cdef WriteBuffer buf = None
 
@@ -1053,7 +1056,7 @@ cdef class PGConnection:
                     # DataRow
                     if ignore_data:
                         self.buffer.discard_message()
-                    elif edgecon is None:
+                    elif fe_conn is None:
                         ncol = self.buffer.read_int16()
                         row = []
                         for i in range(ncol):
@@ -1071,14 +1074,14 @@ cdef class PGConnection:
 
                         self.buffer.redirect_messages(buf, b'D', 0)
                         if buf.len() >= DATA_BUFFER_SIZE:
-                            edgecon.write(buf)
+                            fe_conn.write(buf)
                             buf = None
 
                 elif mtype == b'C':  ## result
                     # CommandComplete
                     self.buffer.discard_message()
                     if buf is not None:
-                        edgecon.write(buf)
+                        fe_conn.write(buf)
                         buf = None
                     return result
 
@@ -1117,12 +1120,13 @@ cdef class PGConnection:
 
     async def _parse_execute(
         self,
-        object query,
-        edgecon.EdgeConnection edgecon,
+        query,
+        frontend.FrontendConnection fe_conn,
         WriteBuffer bind_data,
         bint use_prep_stmt,
         bytes state,
-        dbver
+        dbver,
+        bint return_data,
     ):
         cdef:
             WriteBuffer out
@@ -1216,10 +1220,12 @@ cdef class PGConnection:
         self.write_sync(out)
         self.write(out)
 
-        # If no edgecon is passed, the caller is responsible for
+        # If no fe_conn is passed, the caller is responsible for
         # handling the server response
-        if edgecon is None:
+        if fe_conn is None and not return_data:
             return
+
+        result = None
 
         try:
             if state is not None:
@@ -1243,23 +1249,36 @@ cdef class PGConnection:
                                 f'no data returned received a DATA package; '
                                 f'query: {query.sql}')
 
-                        if buf is None:
-                            buf = WriteBuffer.new()
+                        if fe_conn is None:
+                            ncol = self.buffer.read_int16()
+                            row = []
+                            for i in range(ncol):
+                                coll = self.buffer.read_int32()
+                                if coll == -1:
+                                    row.append(None)
+                                else:
+                                    row.append(self.buffer.read_bytes(coll))
+                            if result is None:
+                                result = []
+                            result.append(row)
+                        else:
+                            if buf is None:
+                                buf = WriteBuffer.new()
 
-                        self.buffer.redirect_messages(buf, b'D', 0)
-                        if buf.len() >= DATA_BUFFER_SIZE:
-                            edgecon.write(buf)
-                            buf = None
+                            self.buffer.redirect_messages(buf, b'D', 0)
+                            if buf.len() >= DATA_BUFFER_SIZE:
+                                fe_conn.write(buf)
+                                buf = None
 
                     elif mtype == b'C':  ## result
                         # CommandComplete
                         self.buffer.discard_message()
                         if buf is not None:
-                            edgecon.write(buf)
+                            fe_conn.write(buf)
                             buf = None
                         msgs_executed += 1
                         if msgs_executed == msgs_num:
-                            return
+                            break
 
                     elif mtype == b'1' and parse:
                         # ParseComplete
@@ -1279,7 +1298,7 @@ cdef class PGConnection:
                     elif mtype == b's':  ## result
                         # PortalSuspended
                         self.buffer.discard_message()
-                        return
+                        break
 
                     elif mtype == b'2':
                         # BindComplete
@@ -1288,7 +1307,7 @@ cdef class PGConnection:
                     elif mtype == b'I':  ## result
                         # EmptyQueryResponse
                         self.buffer.discard_message()
-                        return
+                        break
 
                     elif mtype == b'3':
                         # CloseComplete
@@ -1302,29 +1321,33 @@ cdef class PGConnection:
         finally:
             await self.wait_for_sync()
 
+        return result
+
     async def parse_execute(
         self,
-        object query,
-        edgecon.EdgeConnection edgecon,
+        query,
+        frontend.FrontendConnection fe_conn,
         WriteBuffer bind_data,
         bint use_prep_stmt,
         bytes state,
         int dbver,
+        bint return_data = False,
     ):
         self.before_command()
         started_at = time.monotonic()
         try:
             return await self._parse_execute(
                 query,
-                edgecon,
+                fe_conn,
                 bind_data,
                 use_prep_stmt,
                 state,
-                dbver
+                dbver,
+                return_data,
             )
         finally:
             metrics.backend_query_duration.observe(time.monotonic() - started_at)
-            if edgecon:
+            if fe_conn is not None:
                 await self.after_command()
 
     async def _simple_query(self, bytes sql, bint ignore_data, bytes state):

@@ -18,14 +18,21 @@
 
 
 from edb.server.dbview cimport dbview
+from edb.server.pgproto.pgproto cimport WriteBuffer
 
 
-@cython.final
-cdef class EdgeConnectionBackwardsCompatible(EdgeConnection):
-    cdef legacy_parse_prepare_query_part(self, bint account_for_stmt_name)
-    cdef WriteBuffer make_legacy_command_data_description_msg(
-        self, dbview.CompiledQuery query
-    )
-    cdef WriteBuffer make_legacy_command_complete_msg(self, query_unit)
-    cdef uint64_t _parse_implicit_limit(self, bytes v) except <uint64_t>-1
-    cdef dict legacy_parse_headers(self)
+cdef WriteBuffer recode_bind_args(
+    dbview.DatabaseConnectionView dbv,
+    dbview.CompiledQuery compiled,
+    bytes bind_args,
+    list positions = ?,
+)
+
+
+cdef recode_bind_args_for_script(
+    dbview.DatabaseConnectionView dbv,
+    dbview.CompiledQuery compiled,
+    bytes bind_args,
+    ssize_t start,
+    ssize_t end,
+)
