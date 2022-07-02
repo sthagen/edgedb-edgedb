@@ -2006,6 +2006,7 @@ def process_set_as_type_cast(
         pathctx.put_path_id_map(ctx.rel, ir_set.path_id, inner_set.path_id)
 
         if (is_json_cast
+                and not irtyputils.is_range(inner_set.typeref)
                 and (irtyputils.is_collection(inner_set.typeref)
                      or irtyputils.is_object(inner_set.typeref))):
             subctx.expr_exposed = True
@@ -2139,7 +2140,7 @@ def process_set_as_singleton_assertion(
     expr = ir_set.expr
     assert isinstance(expr, irast.FunctionCall)
 
-    ir_arg = expr.args[0]
+    ir_arg = expr.args[1]
     ir_arg_set = ir_arg.expr
 
     if ir_arg.cardinality.is_single():
@@ -2153,6 +2154,8 @@ def process_set_as_singleton_assertion(
     with ctx.subrel() as newctx:
         arg_ref = dispatch.compile(ir_arg_set, ctx=newctx)
         arg_val = output.output_as_value(arg_ref, env=newctx.env)
+
+        msg = dispatch.compile(expr.args[0].expr, ctx=newctx)
 
         # Generate a singleton set assertion as the following SQL:
         #
@@ -2184,9 +2187,14 @@ def process_set_as_singleton_assertion(
                 pgast.StringConstant(val='cardinality_violation'),
                 pgast.NamedFuncArg(
                     name='msg',
-                    val=pgast.StringConstant(
-                        val='assert_single violation: more than one element '
-                            'returned by an expression',
+                    val=pgast.CoalesceExpr(
+                        args=[
+                            msg,
+                            pgast.StringConstant(
+                                val='assert_single violation: more than one '
+                                    'element returned by an expression',
+                            ),
+                        ],
                     ),
                 ),
                 pgast.NamedFuncArg(
@@ -2235,7 +2243,7 @@ def process_set_as_existence_assertion(
     expr = ir_set.expr
     assert isinstance(expr, irast.FunctionCall)
 
-    ir_arg = expr.args[0]
+    ir_arg = expr.args[1]
     ir_arg_set = ir_arg.expr
 
     if not ir_arg.cardinality.can_be_zero():
@@ -2254,6 +2262,9 @@ def process_set_as_existence_assertion(
         pathctx.put_path_id_map(newctx.rel, ir_set.path_id, ir_arg_set.path_id)
         arg_ref = dispatch.compile(ir_arg_set, ctx=newctx)
         arg_val = output.output_as_value(arg_ref, env=newctx.env)
+
+        msg = dispatch.compile(expr.args[0].expr, ctx=newctx)
+
         set_expr = pgast.FuncCall(
             name=('edgedb', 'raise_on_null'),
             args=[
@@ -2261,9 +2272,14 @@ def process_set_as_existence_assertion(
                 pgast.StringConstant(val='cardinality_violation'),
                 pgast.NamedFuncArg(
                     name='msg',
-                    val=pgast.StringConstant(
-                        val='assert_exists violation: expression returned '
-                            'an empty set',
+                    val=pgast.CoalesceExpr(
+                        args=[
+                            msg,
+                            pgast.StringConstant(
+                                val='assert_exists violation: expression '
+                                    'returned an empty set',
+                            ),
+                        ]
                     ),
                 ),
                 pgast.NamedFuncArg(
@@ -2313,7 +2329,7 @@ def process_set_as_multiplicity_assertion(
     expr = ir_set.expr
     assert isinstance(expr, irast.FunctionCall)
 
-    ir_arg = expr.args[0]
+    ir_arg = expr.args[1]
     ir_arg_set = ir_arg.expr
 
     if not ir_arg.multiplicity.is_many():
@@ -2368,6 +2384,8 @@ def process_set_as_multiplicity_assertion(
                 )
             )
 
+        msg = dispatch.compile(expr.args[0].expr, ctx=newctx)
+
         do_raise = pgast.FuncCall(
             name=('edgedb', 'raise'),
             args=[
@@ -2381,9 +2399,14 @@ def process_set_as_multiplicity_assertion(
                 pgast.StringConstant(val='cardinality_violation'),
                 pgast.NamedFuncArg(
                     name='msg',
-                    val=pgast.StringConstant(
-                        val='assert_distinct violation: expression returned '
-                            'a set with duplicate elements',
+                    val=pgast.CoalesceExpr(
+                        args=[
+                            msg,
+                            pgast.StringConstant(
+                                val='assert_distinct violation: expression '
+                                    'returned a set with duplicate elements',
+                            ),
+                        ],
                     ),
                 ),
                 pgast.NamedFuncArg(

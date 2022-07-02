@@ -20,9 +20,18 @@
 from edgedb.protocol.asyncio_proto cimport AsyncIOProtocol
 
 
+cdef class Protocol(AsyncIOProtocol):
+    cdef:
+        bytes last_state
+        object state_stack
+
+    cdef parse_command_complete_message(self)
+    cdef encode_state(self, state)
+
+
 cdef class Connection:
 
     cdef:
         object _transport
         readonly list inbox
-        AsyncIOProtocol _protocol
+        Protocol _protocol
