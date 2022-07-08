@@ -61,7 +61,7 @@ cdef class Connection:
     async def execute(self, query):
         await self.send(
             messages.Execute(
-                headers=[],
+                annotations=[],
                 command_text=query,
                 output_format=messages.OutputFormat.NONE,
                 expected_cardinality=messages.Cardinality.MANY,
@@ -123,6 +123,7 @@ cdef class Connection:
                     raise AssertionError(
                         f'{msgcls.__name__}.{fieldname} value {val!r} '
                         f'does not equal to expected {expected!r}')
+        return message
 
     async def send(self, *msgs: messages.ClientMessage):
         cdef WriteBuffer buf
