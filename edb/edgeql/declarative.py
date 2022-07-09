@@ -244,6 +244,11 @@ def get_verbosename_from_fqname(
     elif isinstance(traceobj, qltracer.Pointer):
         ofobj, name = str(fq_name).split('@', 1)
         ofobj = f" of object type '{ofobj}'"
+    elif isinstance(traceobj, qltracer.AccessPolicy):
+        clsname = 'access policy'
+        ofobj, name = str(fq_name).split('@', 1)
+        _, name = name.split('::')
+        ofobj = f" of object type '{ofobj}'"
 
     return f"{clsname} '{name}'{ofobj}"
 
@@ -650,8 +655,18 @@ def _trace_item_layout(
             ctx.constraints[fq_name].add(con_name)
 
         elif isinstance(decl, qlast.CreateAnnotationValue):
-            # Validate that the constraint exists at all.
+            # Validate that the annotation exists at all.
             _validate_schema_ref(decl, ctx=ctx)
+
+        elif isinstance(decl, qlast.CreateAccessPolicy):
+            _, pol_fq_name = ctx.get_fq_name(decl)
+
+            pol_name = s_name.QualName(
+                module=fq_name.module,
+                name=f'{fq_name.name}@{pol_fq_name}',
+            )
+            assert isinstance(obj, qltracer.Source)
+            ctx.objects[pol_name] = qltracer.AccessPolicy(pol_name, source=obj)
 
 
 RECURSION_GUARD: Set[s_name.QualName] = set()
@@ -845,6 +860,20 @@ def trace_Alias(
 
 
 @trace_dependencies.register
+def trace_Global(
+    node: qlast.CreateGlobal,
+    *,
+    ctx: DepTraceContext,
+) -> None:
+    hard_dep_exprs = []
+
+    if isinstance(node.target, qlast.Expr):
+        hard_dep_exprs.append(ExprDependency(expr=node.target))
+
+    _register_item(node, hard_dep_exprs=hard_dep_exprs, ctx=ctx)
+
+
+@trace_dependencies.register
 def trace_Function(
     node: qlast.CreateFunction,
     *,
@@ -914,6 +943,13 @@ def _register_item(
 ) -> None:
 
     name, fq_name = ctx.get_fq_name(decl)
+
+    if fq_name in ctx.ddlgraph:
+        vn = get_verbosename_from_fqname(fq_name, ctx)
+        msg = f'{vn} was already declared'
+
+        raise errors.InvalidDefinitionError(
+            msg, context=decl.context)
 
     if deps:
         deps = set(deps)
@@ -1063,7 +1099,8 @@ def _register_item(
                 for dep in pdeps:
                     deps.add(dep)
 
-                    if isinstance(decl, qlast.CreateAlias):
+                    if isinstance(
+                            decl, (qlast.CreateAlias, qlast.CreateGlobal)):
                         # If the declaration is a view, we need to be
                         # dependent on all the types and their props
                         # used in the view.
@@ -1071,7 +1108,7 @@ def _register_item(
                         for vdep in vdeps:
                             deps |= ctx.defdeps.get(vdep, set())
 
-                    elif (
+                    if (
                         isinstance(decl, (
                             qlast.CreateConcretePointer, qlast.CreateGlobal))
                         and isinstance(decl.target, qlast.Expr)
