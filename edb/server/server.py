@@ -23,7 +23,6 @@ import functools
 from typing import *
 
 import asyncio
-import binascii
 import collections
 import ipaddress
 import json
@@ -585,13 +584,7 @@ class Server(ha_base.ClusterProtocol):
         syscon = await self._acquire_sys_pgcon()
         try:
             query = self.get_sys_query('sysconfig')
-            sys_config_json = await syscon.parse_execute_json(
-                query,
-                b'__backend_sysconfig',
-                dbver=0,
-                use_prep_stmt=True,
-                args=(),
-            )
+            sys_config_json = await syscon.sql_fetch_val(query)
         finally:
             self._release_sys_pgcon()
 
@@ -614,14 +607,14 @@ class Server(ha_base.ClusterProtocol):
     async def load_reported_config(self):
         syscon = await self._acquire_sys_pgcon()
         try:
-            data = await syscon.parse_execute_extract_single_data_frame(
+            data = await syscon.sql_fetch_val(
                 self.get_sys_query('report_configs'),
-                b'__report_configs',
-                dbver=0, use_prep_stmt=True, args=(),
+                use_prep_stmt=True,
             )
             self._report_config_data = (
                 struct.pack('!L', len(self._report_config_typedesc)) +
                 self._report_config_typedesc +
+                struct.pack('!L', len(data)) +
                 data
             )
         except Exception:
@@ -631,18 +624,13 @@ class Server(ha_base.ClusterProtocol):
             self._release_sys_pgcon()
 
     async def introspect_global_schema(self, conn=None):
+        intro_query = self._global_intro_query
         if conn is not None:
-            json_data = await conn.parse_execute_json(
-                self._global_intro_query, b'__global_intro_db',
-                dbver=0, use_prep_stmt=True, args=(),
-            )
+            json_data = await conn.sql_fetch_val(intro_query)
         else:
             syscon = await self._acquire_sys_pgcon()
             try:
-                json_data = await syscon.parse_execute_json(
-                    self._global_intro_query, b'__global_intro_db',
-                    dbver=0, use_prep_stmt=True, args=(),
-                )
+                json_data = await syscon.sql_fetch_val(intro_query)
             finally:
                 self._release_sys_pgcon()
 
@@ -665,10 +653,7 @@ class Server(ha_base.ClusterProtocol):
         self._fetch_roles()
 
     async def introspect_user_schema(self, conn):
-        json_data = await conn.parse_execute_json(
-            self._local_intro_query, b'__local_intro_db',
-            dbver=0, use_prep_stmt=True, args=(),
-        )
+        json_data = await conn.sql_fetch_val(self._local_intro_query)
 
         base_schema = s_schema.ChainedSchema(
             self._std_schema,
@@ -718,7 +703,7 @@ class Server(ha_base.ClusterProtocol):
         try:
             user_schema = await self.introspect_user_schema(conn)
 
-            reflection_cache_json = await conn.parse_execute_json(
+            reflection_cache_json = await conn.sql_fetch_val(
                 b'''
                     SELECT json_agg(o.c)
                     FROM (
@@ -732,10 +717,6 @@ class Server(ha_base.ClusterProtocol):
                                 AS t(eql_hash text, argnames text[])
                     ) AS o;
                 ''',
-                b'__reflection_cache',
-                dbver=0,
-                use_prep_stmt=True,
-                args=(),
             )
 
             reflection_cache = immutables.Map({
@@ -743,7 +724,7 @@ class Server(ha_base.ClusterProtocol):
                 for r in json.loads(reflection_cache_json)
             })
 
-            backend_ids_json = await conn.parse_execute_json(
+            backend_ids_json = await conn.sql_fetch_val(
                 b'''
                 SELECT
                     json_object_agg(
@@ -753,10 +734,6 @@ class Server(ha_base.ClusterProtocol):
                 FROM
                     edgedb."_SchemaType"
                 ''',
-                b'__backend_ids_fetch',
-                dbver=0,
-                use_prep_stmt=True,
-                args=(),
             )
             backend_ids = json.loads(backend_ids_json)
 
@@ -774,24 +751,14 @@ class Server(ha_base.ClusterProtocol):
             self.release_pgcon(dbname, conn)
 
     async def introspect_db_config(self, conn):
-        query = self.get_sys_query('dbconfig')
-        result = await conn.parse_execute_json(
-            query,
-            b'__backend_dbconfig',
-            dbver=0,
-            use_prep_stmt=True,
-            args=(),
-        )
+        result = await conn.sql_fetch_val(self.get_sys_query('dbconfig'))
         return config.from_json(config.get_settings(), result)
 
     async def _introspect_dbs(self):
         syscon = await self._acquire_sys_pgcon()
         try:
             dbs_query = self.get_sys_query('listdbs')
-            json_data = await syscon.parse_execute_json(
-                dbs_query, b'__listdbs',
-                dbver=0, use_prep_stmt=True, args=(),
-            )
+            json_data = await syscon.sql_fetch_val(dbs_query)
             dbnames = json.loads(json_data)
         finally:
             self._release_sys_pgcon()
@@ -822,77 +789,64 @@ class Server(ha_base.ClusterProtocol):
     async def _load_instance_data(self):
         syscon = await self._acquire_sys_pgcon()
         try:
-            result = await syscon.simple_query(b'''\
-                SELECT json FROM edgedbinstdata.instdata
+            result = await syscon.sql_fetch_val(b'''\
+                SELECT json::json FROM edgedbinstdata.instdata
                 WHERE key = 'instancedata';
-            ''', ignore_data=False)
-            self._instance_data = immutables.Map(
-                json.loads(result[0][0].decode('utf-8')))
+            ''')
+            self._instance_data = immutables.Map(json.loads(result))
 
-            result = await syscon.simple_query(b'''\
-                SELECT json FROM edgedbinstdata.instdata
+            result = await syscon.sql_fetch_val(b'''\
+                SELECT json::json FROM edgedbinstdata.instdata
                 WHERE key = 'sysqueries';
-            ''', ignore_data=False)
-            queries = json.loads(result[0][0].decode('utf-8'))
+            ''')
+            queries = json.loads(result)
             self._sys_queries = immutables.Map(
                 {k: q.encode() for k, q in queries.items()})
 
-            result = await syscon.simple_query(b'''\
+            self._local_intro_query = await syscon.sql_fetch_val(b'''\
                 SELECT text FROM edgedbinstdata.instdata
                 WHERE key = 'local_intro_query';
-            ''', ignore_data=False)
-            self._local_intro_query = result[0][0]
+            ''')
 
-            result = await syscon.simple_query(b'''\
+            self._global_intro_query = await syscon.sql_fetch_val(b'''\
                 SELECT text FROM edgedbinstdata.instdata
                 WHERE key = 'global_intro_query';
-            ''', ignore_data=False)
-            self._global_intro_query = result[0][0]
+            ''')
 
-            result = await syscon.simple_query(b'''\
+            result = await syscon.sql_fetch_val(b'''\
                 SELECT bin FROM edgedbinstdata.instdata
                 WHERE key = 'stdschema';
-            ''', ignore_data=False)
+            ''')
             try:
-                data = binascii.a2b_hex(result[0][0][2:])
-                self._std_schema = pickle.loads(data)
+                self._std_schema = pickle.loads(result[2:])
             except Exception as e:
                 raise RuntimeError(
                     'could not load std schema pickle') from e
 
-            result = await syscon.simple_query(b'''\
+            result = await syscon.sql_fetch_val(b'''\
                 SELECT bin FROM edgedbinstdata.instdata
                 WHERE key = 'reflschema';
-            ''', ignore_data=False)
+            ''')
             try:
-                data = binascii.a2b_hex(result[0][0][2:])
-                self._refl_schema = pickle.loads(data)
+                self._refl_schema = pickle.loads(result[2:])
             except Exception as e:
                 raise RuntimeError(
                     'could not load refl schema pickle') from e
 
-            result = await syscon.simple_query(b'''\
+            result = await syscon.sql_fetch_val(b'''\
                 SELECT bin FROM edgedbinstdata.instdata
                 WHERE key = 'classlayout';
-            ''', ignore_data=False)
+            ''')
             try:
-                data = binascii.a2b_hex(result[0][0][2:])
-                self._schema_class_layout = pickle.loads(data)
+                self._schema_class_layout = pickle.loads(result[2:])
             except Exception as e:
                 raise RuntimeError(
                     'could not load schema class layout pickle') from e
 
-            result = await syscon.simple_query(b'''\
+            self._report_config_typedesc = await syscon.sql_fetch_val(b'''\
                 SELECT bin FROM edgedbinstdata.instdata
                 WHERE key = 'report_configs_typedesc';
-            ''', ignore_data=False)
-            try:
-                data = binascii.a2b_hex(result[0][0][2:])
-                assert data is not None
-                self._report_config_typedesc = data
-            except Exception as e:
-                raise RuntimeError(
-                    'could not load report config typedesc') from e
+            ''')
 
         finally:
             self._release_sys_pgcon()
@@ -1076,7 +1030,7 @@ class Server(ha_base.ClusterProtocol):
         # CONFIGURE INSTANCE RESET setting_name;
         pass
 
-    async def _acquire_sys_pgcon(self):
+    async def _acquire_sys_pgcon(self) -> pgcon.PGConnection:
         if not self._initing and not self._serving:
             raise RuntimeError("EdgeDB server is not serving.")
 
@@ -1118,16 +1072,15 @@ class Server(ha_base.ClusterProtocol):
             pgcon.start_pg_cancellation()
             try:
                 # Returns True if the `pid` exists and it was able to send it a
-                # SIGINT.  Will throw an exception if the priveleges aren't
+                # SIGINT.  Will throw an exception if the privileges aren't
                 # sufficient.
-                result = await syscon.simple_query(
+                result = await syscon.sql_fetch_val(
                     f'SELECT pg_cancel_backend({pgcon.backend_pid});'.encode(),
-                    ignore_data=False
                 )
             finally:
                 pgcon.finish_pg_cancellation()
 
-            return result[0][0] == b't'
+            return result == b'\x01'
         finally:
             self._release_sys_pgcon()
 

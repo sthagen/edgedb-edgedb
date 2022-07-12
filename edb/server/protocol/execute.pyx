@@ -17,13 +17,25 @@
 #
 
 from typing import (
+    Any,
+    Mapping,
     Optional,
 )
 
+import decimal
+import json
+
+import immutables
+
 from edb import errors
+from edb.common import debug
+
+from edb import edgeql
+from edb.edgeql import qltypes
 
 from edb.server import compiler
 from edb.server import config
+from edb.server import defines as edbdef
 from edb.server.dbview cimport dbview
 from edb.server.protocol cimport args_ser
 from edb.server.protocol cimport frontend
@@ -85,12 +97,12 @@ async def execute(
                         dbv, compiled, bind_args)
 
                     data = await be_conn.parse_execute(
-                        query_unit,         # =query
-                        fe_conn if not query_unit.set_global else None,
-                        bound_args_buf,     # =bind_data
-                        use_prep_stmt,      # =use_prep_stmt
-                        state,              # =state
-                        dbv.dbver,          # =dbver
+                        query=query_unit,
+                        fe_conn=fe_conn if not query_unit.set_global else None,
+                        bind_data=bound_args_buf,
+                        use_prep_stmt=use_prep_stmt,
+                        state=state,
+                        dbver=dbv.dbver,
                     )
 
                     if query_unit.set_global and data:
@@ -291,17 +303,26 @@ async def execute_script(
 async def execute_system_config(
     conn: pgcon.PGConnection,
     dbv: dbview.DatabaseConnectionView,
-    query_unit,
+    query_unit: compiler.QueryUnit,
 ):
     if query_unit.sql:
-        data = await conn.simple_query(
-            b';'.join(query_unit.sql), ignore_data=False)
+        if len(query_unit.sql) > 1:
+            raise errors.InternalServerError(
+                "unexpected multiple SQL statements in CONFIGURE INSTANCE "
+                "compilation product"
+            )
+        data = await conn.sql_fetch_col(query_unit.sql[0])
     else:
         data = None
 
     if data:
         # Prefer encoded op produced by the SQL command.
-        config_ops = [config.Operation.from_json(r[0]) for r in data]
+        if data[0][0] != 0x01:
+            raise errors.InternalServerError(
+                f"unexpected JSONB version produced by SQL statement for "
+                f"CONFIGURE INSTANCE: {data[0][0]}"
+            )
+        config_ops = [config.Operation.from_json(r[1:]) for r in data]
     else:
         # Otherwise, fall back to staticly evaluated op.
         config_ops = query_unit.config_ops
@@ -310,8 +331,7 @@ async def execute_system_config(
     # If this is a backend configuration setting we also
     # need to make sure it has been loaded.
     if query_unit.backend_config:
-        await conn.simple_query(
-            b'SELECT pg_reload_conf()', ignore_data=True)
+        await conn.sql_execute(b'SELECT pg_reload_conf()')
 
 
 def signal_side_effects(dbv, side_effects):
@@ -352,3 +372,130 @@ def signal_side_effects(dbv, side_effects):
             ),
             interruptable=False,
         )
+
+
+async def parse_execute_json(
+    db: dbview.Database,
+    query: str,
+    *,
+    variables: Mapping[str, Any] = immutables.Map(),
+    globals_: Mapping[str, Any] = immutables.Map(),
+    output_format: compiler.OutputFormat = compiler.OutputFormat.JSON,
+    query_cache_enabled: Optional[bool] = None,
+) -> bytes:
+    if query_cache_enabled is None:
+        query_cache_enabled = not (
+            debug.flags.disable_qcache or debug.flags.edgeql_compile)
+
+    server = db.server
+    dbv = await server.new_dbview(
+        dbname=db.name,
+        query_cache=query_cache_enabled,
+        protocol_version=edbdef.CURRENT_PROTOCOL,
+    )
+
+    query_req = dbview.QueryRequestInfo(
+        edgeql.Source.from_string(query),
+        protocol_version=edbdef.CURRENT_PROTOCOL,
+        input_format=compiler.InputFormat.JSON,
+        output_format=output_format,
+        allow_capabilities=compiler.Capability.MODIFICATIONS,
+    )
+
+    compiled = await dbv.parse(query_req)
+
+    pgcon = await server.acquire_pgcon(db.name)
+    try:
+        return await execute_json(
+            pgcon,
+            dbv,
+            compiled,
+            variables=variables,
+            globals_=globals_,
+        )
+    finally:
+        server.release_pgcon(db.name, pgcon)
+
+
+async def execute_json(
+    be_conn: pgcon.PGConnection,
+    dbv: dbview.DatabaseConnectionView,
+    compiled: dbview.CompiledQuery,
+    variables: Mapping[str, Any] = immutables.Map(),
+    globals_: Mapping[str, Any] = immutables.Map(),
+    *,
+    fe_conn: Optional[frontend.FrontendConnection] = None,
+    use_prep_stmt: bint = False,
+) -> bytes:
+    if globals_:
+        dbv.set_globals(immutables.Map({
+            "__::__edb_json_globals__": config.SettingValue(
+                name="__::__edb_json_globals__",
+                value=_encode_json_value(globals_),
+                source='global',
+                scope=qltypes.ConfigScope.GLOBAL,
+            )
+        }))
+
+    qug = compiled.query_unit_group
+
+    args = []
+    if qug.in_type_args:
+        for param in qug.in_type_args:
+            value = variables.get(param.name)
+            args.append(value)
+
+    bind_args = _encode_args(args)
+
+    if len(qug) > 1:
+        data = await execute_script(
+            be_conn,
+            dbv,
+            compiled,
+            bind_args,
+            fe_conn=fe_conn,
+        )
+    else:
+        data = await execute(
+            be_conn,
+            dbv,
+            compiled,
+            bind_args,
+            fe_conn=fe_conn,
+        )
+
+    if fe_conn is None:
+        if not data or len(data) > 1 or len(data[0]) != 1:
+            raise errors.InternalServerError(
+                f'received incorrect response data for a JSON query')
+
+        return data[0][0]
+    else:
+        return None
+
+
+cdef bytes _encode_json_value(object val):
+    if isinstance(val, decimal.Decimal):
+        jarg = str(val)
+    else:
+        jarg = json.dumps(val)
+
+    return b'\x01' + jarg.encode('utf-8')
+
+
+cdef bytes _encode_args(list args):
+    cdef:
+        WriteBuffer out_buf = WriteBuffer.new()
+
+    if args:
+        out_buf.write_int32(len(args))
+        for arg in args:
+            out_buf.write_int32(0)  # reserved
+            if arg is None:
+                out_buf.write_int32(-1)
+            else:
+                jval = _encode_json_value(arg)
+                out_buf.write_int32(len(jval))
+                out_buf.write_bytes(jval)
+
+    return bytes(out_buf)

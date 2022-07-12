@@ -17,18 +17,12 @@
 #
 
 
-from __future__ import annotations
-
-from .compiler import compile_graphql
-from .translator import translate_ast, parse_text, parse_tokens
-from .translator import TranspiledOperation
-from .types import GQLCoreSchema
-
-from . import _patch_core
-_patch_core.patch_graphql_core()
+from edb.server.protocol cimport frontend
+from edb.server.pgproto.pgproto cimport WriteBuffer
 
 
-__all__ = (
-    'translate_ast', 'parse_text', 'parse_tokens', 'GQLCoreSchema',
-    'compile_graphql', 'TranspiledOperation'
-)
+cdef class NotebookConnection(frontend.FrontendConnection):
+    cdef:
+        WriteBuffer buf
+
+    cdef bytes _get_data(self)
