@@ -44,8 +44,8 @@ from edb.common import verutils
 
 
 # Increment this whenever the database layout or stdlib changes.
-EDGEDB_CATALOG_VERSION = 2022_07_08_00_00
-EDGEDB_MAJOR_VERSION = 2
+EDGEDB_CATALOG_VERSION = 2022_07_13_00_00
+EDGEDB_MAJOR_VERSION = 3
 
 
 class MetadataError(Exception):

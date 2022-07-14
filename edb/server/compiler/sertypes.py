@@ -151,7 +151,7 @@ class TypeSerializer:
         return uuidgen.uuid5(s_types.TYPE_ID_NAMESPACE, string_id)
 
     def _get_object_type_id(self, coll_type, subtypes,
-                            element_names=None, *,
+                            element_names=None, cardinalities=None, *,
                             links_props=None,
                             links=None,
                             has_implicit_fields=False):
@@ -159,6 +159,8 @@ class TypeSerializer:
         string_id = f'{coll_type}\x00{":".join(subtypes)}'
         if element_names:
             string_id += f'\x00{":".join(element_names)}'
+        if cardinalities:
+            string_id += f'\x00{":".join(map(chr, cardinalities))}'
         string_id += f'{has_implicit_fields!r};{links_props!r};{links!r}'
         return uuidgen.uuid5(s_types.TYPE_ID_NAMESPACE, string_id)
 
@@ -349,7 +351,7 @@ class TypeSerializer:
                         cardinality_from_ptr(ptr, self.schema).value)
 
             type_id = self._get_object_type_id(
-                base_type_id, subtypes, element_names,
+                base_type_id, subtypes, element_names, cardinalities,
                 links_props=link_props, links=links,
                 has_implicit_fields=implicit_id)
 
@@ -475,7 +477,7 @@ class TypeSerializer:
             base_type_id = mt.id
 
             type_id = self._get_object_type_id(
-                base_type_id, subtypes, element_names
+                base_type_id, subtypes, element_names, cardinalities
             )
 
             if type_id in self.uuid_to_pos:
@@ -821,15 +823,17 @@ class StateSerializerFactory:
             s_type = g.get_target(schema)
             if s_type.is_array():
                 array_type_ids[name] = s_type.get_element_type(schema).id
-            globals_shape.append(
-                (
-                    name,
-                    s_type,
-                    enums.Cardinality.AT_MOST_ONE if
-                    g.get_cardinality(schema) == qltypes.SchemaCardinality.One
-                    else enums.Cardinality.MANY,
-                )
-            )
+            if g.get_cardinality(schema) == qltypes.SchemaCardinality.One:
+                if g.get_required(schema):
+                    cardinality = enums.Cardinality.ONE
+                else:
+                    cardinality = enums.Cardinality.AT_MOST_ONE
+            else:
+                if g.get_required(schema):
+                    cardinality = enums.Cardinality.AT_LEAST_ONE
+                else:
+                    cardinality = enums.Cardinality.MANY
+            globals_shape.append((name, s_type, cardinality))
 
         builder = builder.derive(schema)
         type_id = builder.describe_input_shape(
@@ -1086,6 +1090,17 @@ class InputShapeDesc(ShapeDesc):
             idx = wrapped.read_ui32()
             name, desc = self.fields_list[idx]
             data = wrapped.read_nullable_len32_prefixed_bytes()
+            if data is None:
+                cardinality = self.cardinalities.get(name)
+                if cardinality == enums.Cardinality.ONE:
+                    raise errors.CardinalityViolationError(
+                        f"State '{name}' expects exactly 1 value, 0 given"
+                    )
+                elif cardinality == enums.Cardinality.AT_LEAST_ONE:
+                    raise errors.CardinalityViolationError(
+                        f"State '{name}' expects at least 1 value, 0 given"
+                    )
+
             if self.data_raw or data is None:
                 rv[name] = data
             else:
