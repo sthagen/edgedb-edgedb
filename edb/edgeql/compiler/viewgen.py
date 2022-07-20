@@ -467,7 +467,7 @@ def _compile_qlexpr(
         # evaluation of link properties on computable links,
         # most importantly, in INSERT/UPDATE context.
         shape_expr_ctx.view_rptr = context.ViewRPtr(
-            ptrsource if is_linkprop else view_scls,
+            source=ptrsource if is_linkprop else view_scls,
             ptrcls=ptrcls,
             ptrcls_name=ptr_name,
             ptrcls_is_linkprop=is_linkprop,
@@ -578,7 +578,8 @@ def _normalize_view_ptr_expr(
 
     if compexpr is None:
         ptrcls = setgen.resolve_ptr(
-            ptrsource, ptrname, track_ref=lexpr, ctx=ctx)
+            ptrsource, ptrname, track_ref=lexpr, ctx=ctx,
+            source_context=shape_el.context)
         if is_polymorphic:
             ptrcls = schemactx.derive_ptr(
                 ptrcls, view_scls, ctx=ctx)

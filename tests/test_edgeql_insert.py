@@ -533,6 +533,43 @@ class TestInsert(tb.QueryTestCase):
             }]
         )
 
+    async def test_edgeql_insert_nested_12(self):
+        # Ugh, set a default value on the link prop
+        await self.con.execute('''
+            ALTER TYPE InsertTest
+              ALTER LINK subordinates
+                ALTER PROPERTY comment
+                  SET default := "!!!";
+        ''')
+
+        await self.con.execute('''
+            INSERT Subordinate {
+                name := 'linkprop test target 6'
+            };
+        ''')
+
+        await self.assert_query_result(
+            '''
+                SELECT (
+                    INSERT InsertTest {
+                        name := 'insert nested 6',
+                        l2 := 0,
+                        subordinates := (
+                            SELECT Subordinate LIMIT 1
+                        )
+                    }
+                ) {
+                    subordinates: { name, @comment }
+                }
+            ''',
+            [{
+                'subordinates': [{
+                    'name': 'linkprop test target 6',
+                    '@comment': '!!!'
+                }]
+            }]
+        )
+
     async def test_edgeql_insert_returning_01(self):
         await self.con.execute('''
             INSERT DefaultTest1 {
@@ -2768,12 +2805,22 @@ class TestInsert(tb.QueryTestCase):
         )
 
     async def test_edgeql_insert_unless_conflict_11(self):
-        # ELSE without ON, using object constraint
+        async with self.assertRaisesRegexTx(
+                edgedb.QueryError,
+                "self-referencing INSERTs are not allowed"):
+            await self.con.execute(r'''
+                SELECT (
+                    INSERT Person {name := "Madz"}
+                    UNLESS CONFLICT ON (.name)
+                    ELSE (INSERT Person {name := "Maddy"})
+                ) {name};
+            ''')
+
         query = r'''
             SELECT (
                 INSERT Person {name := "Madz"}
                 UNLESS CONFLICT ON (.name)
-                ELSE (INSERT Person {name := "Maddy"})
+                ELSE (DETACHED (INSERT Person {name := "Maddy"}))
             ) {name};
         '''
 
@@ -4043,6 +4090,31 @@ class TestInsert(tb.QueryTestCase):
         await self.assert_query_result(
             "SELECT Obj {name, foo: {name}, bar: {name}}",
             [{"name": "obj", "foo": {"name": "foo"}, "bar": {"name": "bar"}}],
+        )
+
+    async def test_edgeql_insert_dependent_28(self):
+        await self.con.execute(r"""
+            create type X {
+                create required property name -> str {
+                    create constraint exclusive
+                };
+                create multi link notes -> Note;
+            };
+        """)
+
+        # The Madeline note insert shouldn't happen
+        q = r"""
+            INSERT X {name := "Madeline Hatch",
+                      notes := (INSERT Note {name := "tag" })}
+            UNLESS CONFLICT;
+        """
+        await self.con.query(q)
+        await self.con.query(q)
+
+        # Should only be one note
+        await self.assert_query_result(
+            r'''SELECT count(Note)''',
+            [1],
         )
 
     async def test_edgeql_insert_unless_conflict_self_01(self):
