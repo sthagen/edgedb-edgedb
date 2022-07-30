@@ -4,14 +4,15 @@ v2.0
 
 :edb-alt-title: EdgeDB v2 (Sagittarius)
 
-.. note::
+.. image:: images/v2_sagittarius.jpg
+    :width: 100%
 
-    This document is a work in progress. We'll continue updating it
-    until the stable `v2 release <https://lu.ma/edgedb>`_ on July 28th 2022.
+EdgeDB 2.0 was released on July 28th, 2022. Read the announcement
+blog post `here <v2anno_>`_.
 
-EdgeDB 2.0 RC1 was released to the "stable" channel on July 14th, 2022. We
-would like to thank our community for reporting issues and contributing fixes.
-You are awesome! ❤️
+We would like to thank our community for reporting issues and contributing
+fixes. You are awesome! ❤️
+
 
 Try it out
 ==========
@@ -54,14 +55,13 @@ upgrade.
     - ``edgedb@0.24.0``
   * - `Golang <https://www.edgedb.com/docs/clients/go/index>`_
     - ``edgedb@0.12.0``
+  * - `Rust <https://github.com/edgedb/edgedb-rust>`_
+    - ``edgedb-tokio@0.3.0``
+  * - `.NET <https://github.com/quinchs/EdgeDB.Net>`_ (community-maintained)
+    - ``EdgeDB.Net.Driver@0.3.0``
 
-.. * - `Rust <https://github.com/edgedb/edgedb-rust>`_
-..   - ``edgedb-tokio@0.3.0``
-
-.. There are also community-maintained clients for
-.. `.NET <https://github.com/quinchs/EdgeDB.Net>`_ and
-.. `Elixir <https://github.com/nsidnev/edgedb-elixir>`_ that support the 2.0
-.. protocol.
+There is also a community-maintained `Elixir
+<https://github.com/nsidnev/edgedb-elixir>`_ client with partial 2.0 support.
 
 New features
 ============
@@ -419,3 +419,7 @@ Protocol overhaul
     https://www.edgedb.com/blog/edgedb-2-0
 
 .. lint-on
+
+
+.. _v2anno:
+    https://www.edgedb.com/blog/edgedb-2-0

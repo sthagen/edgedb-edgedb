@@ -46,7 +46,7 @@ which client library you're using.
       current_user_id: '2141a5b4-5634-4ccc-b835-437863534c51',
     });
 
-    await client.query(`select global current_user_id;`);
+    await clientWithGlobals.query(`select global current_user_id;`);
 
   .. code-tab:: python
 
@@ -146,7 +146,7 @@ Unlike query parameters, globals can be referenced
 This is particularly useful when declaring :ref:`access policies
 <ref_datamodel_access_policies>`.
 
-.. code-block::
+.. code-block:: sdl
 
   type Person {
     required property name -> str;
