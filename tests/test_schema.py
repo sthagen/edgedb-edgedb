@@ -313,6 +313,19 @@ class TestSchema(tb.BaseSchemaLoadTest):
             };
         """
 
+    @tb.must_fail(
+        errors.InvalidLinkTargetError,
+        "invalid link target type, expected object type, "
+        "got scalar type 'std::str'",
+    )
+    def test_schema_bad_link_04(self):
+        """
+            type Object {
+                property foo -> str;
+                link bar := .foo;
+            };
+        """
+
     @tb.must_fail(errors.InvalidPropertyTargetError,
                   "invalid property type: expected a scalar type, "
                   "or a scalar collection, got object type 'test::Object'",
@@ -5860,7 +5873,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             }
         """, r"""
             required global foo -> int64 {
-                default := 0;
+                default := 0 + 1;
             }
         """])
 
