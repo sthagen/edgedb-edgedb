@@ -9539,6 +9539,7 @@ type default::Foo {
                 else:
                     await op
 
+    @test.xerror('only object constraints may use EXCEPT')
     async def test_edgeql_ddl_constraint_19(self):
         # This is pretty marginal, but make sure we can distinguish
         # on and except in name creation;
@@ -9552,8 +9553,10 @@ type default::Foo {
             create type ExceptTest {
                 create property b -> bool;
                 create property e -> bool;
-                create constraint always_ok except (.e);
-                create constraint always_ok on (.e);
+                create link l -> Object {
+                    create constraint always_ok except (.e);
+                    create constraint always_ok on (.e);
+                };
             };
         """)
 
@@ -9596,6 +9599,16 @@ type default::Foo {
                     create property y -> str {
                         create constraint expression on (<array<int32>>[]);
                     }
+                };
+            """)
+
+    async def test_edgeql_ddl_constraint_23(self):
+        async with self.assertRaisesRegexTx(
+                edgedb.InvalidConstraintDefinitionError,
+                r"constraints on object types must have an 'on' clause"):
+            await self.con.execute("""
+                create type X {
+                    create constraint exclusive;
                 };
             """)
 
@@ -12757,7 +12770,7 @@ type default::Foo {
             };
 
             CREATE TYPE Foo {
-                CREATE CONSTRAINT bogus;
+                CREATE CONSTRAINT bogus on (true);
             };
         """)
 
@@ -14008,6 +14021,28 @@ type default::Foo {
             await self.con.execute("""
                 ALTER TYPE Foo ALTER LINK link SET REQUIRED;
             """)
+
+    async def test_edgeql_ddl_link_union_delete_01(self):
+        await self.con.execute(r"""
+            CREATE TYPE default::M;
+            CREATE ABSTRACT TYPE default::Base {
+                CREATE LINK l -> default::M;
+            };
+            CREATE TYPE default::A EXTENDING default::Base;
+            CREATE TYPE default::B EXTENDING default::Base;
+            CREATE TYPE default::L {
+                CREATE LINK l -> (default::B | default::A);
+            };
+            CREATE TYPE ForceRedo {
+                CREATE LINK l -> default::M;
+            };
+        """)
+        await self.con.execute(r"""
+            insert M;
+        """)
+        await self.con.execute(r"""
+            delete M;
+        """)
 
     async def test_edgeql_ddl_alter_union_01(self):
         await self.con.execute(r"""
