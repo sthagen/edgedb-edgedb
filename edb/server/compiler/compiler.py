@@ -625,14 +625,11 @@ class Compiler:
             options=self._get_compile_options(ctx),
         )
 
-        if ir.cardinality.is_single():
-            result_cardinality = enums.Cardinality.AT_MOST_ONE
-        else:
-            result_cardinality = enums.Cardinality.MANY
-            if ctx.expected_cardinality_one:
-                raise errors.ResultCardinalityMismatchError(
-                    f'the query has cardinality {result_cardinality.name} '
-                    f'which does not match the expected cardinality ONE')
+        if ir.cardinality.is_multi() and ctx.expected_cardinality_one:
+            raise errors.ResultCardinalityMismatchError(
+                f'the query has cardinality {ir.cardinality.name} '
+                f'which does not match the expected cardinality ONE')
+        result_cardinality = enums.cardinality_from_ir_value(ir.cardinality)
 
         sql_text, argmap = pg_compiler.compile_ir_to_sql(
             ir,
@@ -1245,16 +1242,22 @@ class Compiler:
                     else:
                         proposed_desc = None
 
+                complete = False
+                if proposed_desc is None:
+                    diff = s_ddl.delta_schemas(schema, mstate.target_schema)
+                    complete = not bool(diff.get_subcommands())
+                    if debug.flags.delta_plan:
+                        debug.header(
+                            'DESCRIBE CURRENT MIGRATION AS JSON mismatch')
+                        debug.dump(diff)
+
                 desc = json.dumps({
                     'parent': (
                         str(mstate.parent_migration.get_name(schema))
                         if mstate.parent_migration is not None
                         else 'initial'
                     ),
-                    'complete': (
-                        proposed_desc is None
-                        and s_ddl.schemas_are_equal(
-                            schema, mstate.target_schema)),
+                    'complete': complete,
                     'confirmed': confirmed,
                     'proposed': proposed_desc,
                 }).encode('unicode_escape').decode('utf-8')

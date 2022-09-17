@@ -1,4 +1,18 @@
-<% macro _init() -%>
+name: Tests of patching old EdgeDB Versions
+
+on:
+  workflow_dispatch:
+    inputs: {}
+  push:
+    branches:
+      - patch-test*
+      - stable/*
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
     - uses: actions/checkout@v2
       with:
         fetch-depth: 0
@@ -13,9 +27,9 @@
       uses: actions/setup-python@v2
       with:
         python-version: '3.10.0'
-<%- endmacro %>
 
-<% macro _init_venv() -%>
+    # Build virtualenv
+
     - name: Handle virtualenv
       uses: syphar/restore-virtualenv@v1.2
       id: venv-cache
@@ -24,14 +38,6 @@
           setup.py
           pyproject.toml
         custom_cache_key_element: v2
-<%- endmacro -%>
-
-<% macro build() %>
-    << _init() >>
-
-    # Build virtualenv
-
-    << _init_venv() >>
 
     - name: Install Python dependencies
       if: steps.venv-cache.outputs.cache-hit != 'true'
@@ -46,7 +52,21 @@
 
     # Prepare environment variables and shared artifacts
 
-    << caller() >>
+    - name: Compute cache keys
+      run: |
+        mkdir -p .tmp
+        python setup.py -q ci_helper --type cli > .tmp/edgedbcli_git_rev.txt
+        python setup.py -q ci_helper --type rust >.tmp/rust_cache_key.txt
+        python setup.py -q ci_helper --type ext >.tmp/ext_cache_key.txt
+        python setup.py -q ci_helper --type parsers >.tmp/parsers_cache_key.txt
+        python setup.py -q ci_helper --type postgres >.tmp/postgres_git_rev.txt
+        echo 'v0.17.0' >.tmp/stolon_git_rev.txt
+        python setup.py -q ci_helper --type bootstrap >.tmp/bootstrap_cache_key.txt
+        echo EDGEDBCLI_GIT_REV=$(cat .tmp/edgedbcli_git_rev.txt) >> $GITHUB_ENV
+        echo POSTGRES_GIT_REV=$(cat .tmp/postgres_git_rev.txt) >> $GITHUB_ENV
+        echo STOLON_GIT_REV=$(cat .tmp/stolon_git_rev.txt) >> $GITHUB_ENV
+        echo BUILD_LIB=$(python setup.py -q ci_helper --type build_lib) >> $GITHUB_ENV
+        echo BUILD_TEMP=$(python setup.py -q ci_helper --type build_temp) >> $GITHUB_ENV
 
     - name: Upload shared artifacts
       uses: actions/upload-artifact@v2
@@ -282,28 +302,70 @@
       if: steps.bootstrap-cache.outputs.cache-hit != 'true'
       run: |
         edb server --bootstrap-only
-<%- endmacro %>
 
-<% macro calc_cache_key() -%>
-    mkdir -p .tmp
-    python setup.py -q ci_helper --type cli > .tmp/edgedbcli_git_rev.txt
-    python setup.py -q ci_helper --type rust >.tmp/rust_cache_key.txt
-    python setup.py -q ci_helper --type ext >.tmp/ext_cache_key.txt
-    python setup.py -q ci_helper --type parsers >.tmp/parsers_cache_key.txt
-    python setup.py -q ci_helper --type postgres >.tmp/postgres_git_rev.txt
-    echo 'v0.17.0' >.tmp/stolon_git_rev.txt
-    python setup.py -q ci_helper --type bootstrap >.tmp/bootstrap_cache_key.txt
-    echo EDGEDBCLI_GIT_REV=$(cat .tmp/edgedbcli_git_rev.txt) >> $GITHUB_ENV
-    echo POSTGRES_GIT_REV=$(cat .tmp/postgres_git_rev.txt) >> $GITHUB_ENV
-    echo STOLON_GIT_REV=$(cat .tmp/stolon_git_rev.txt) >> $GITHUB_ENV
-    echo BUILD_LIB=$(python setup.py -q ci_helper --type build_lib) >> $GITHUB_ENV
-    echo BUILD_TEMP=$(python setup.py -q ci_helper --type build_temp) >> $GITHUB_ENV
-<%- endmacro %>
+  compute-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+    - id: set-matrix
+      name: Compute versions to run on
+      shell: python
+      run: |
+        import json
+        import os
+        import re
+        from urllib import request
 
-<% macro restore_cache() %>
-    << _init() >>
+        u = 'https://packages.edgedb.com/archive/.jsonindexes/x86_64-unknown-linux-gnu.json'
+        data = json.loads(request.urlopen(u).read())
 
-    << _init_venv() >>
+        branch = os.getenv('GITHUB_REF_NAME')
+        version = int(re.findall(r'\d+', branch)[0])
+
+        versions = []
+        for obj in data['packages']:
+            if (
+                obj['version_details']['major'] == version
+                and not obj['version_details']['prerelease']
+            ):
+                versions.append(obj['version'])
+
+        matrix = {"edgedb-version": versions, "make-dbs": [True, False]}
+
+        print(f'::set-output name=matrix::{json.dumps(matrix)}')
+
+  test:
+    runs-on: ubuntu-latest
+    needs: [build, compute-versions]
+    strategy:
+      fail-fast: false
+      matrix: ${{fromJSON(needs.compute-versions.outputs.matrix)}}
+
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+        submodules: false
+
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 50
+        submodules: true
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.10.0'
+
+    - name: Handle virtualenv
+      uses: syphar/restore-virtualenv@v1.2
+      id: venv-cache
+      with:
+        requirement_files: |
+          setup.py
+          pyproject.toml
+        custom_cache_key_element: v2
 
     # Restore the artifacts and environment variables
 
@@ -394,17 +456,44 @@
         rsync -av ./build/lib/edb/ ./edb/
         cp build/postgres/install/stamp build/postgres/
         rsync -av $VIRTUAL_ENV/edgedb_server.egg-info/ ./edgedb_server.egg-info/
-<%- endmacro %>
 
-<% macro setup_terraform() -%>
-    - uses: actions/checkout@v2
-      with:
-        fetch-depth: 0
-        submodules: false
+    # Run the test
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v1
+    - name: Download an earlier database version and set up a instance
+      env:
+        EDGEDB_VERSION: ${{ matrix.edgedb-version }}
+      run: |
+        wget -q "https://packages.edgedb.com/archive/x86_64-unknown-linux-gnu/edgedb-server-$EDGEDB_VERSION.tar.gz"
+        tar xzf edgedb-server-$EDGEDB_VERSION.tar.gz
+        edgedb-server-$EDGEDB_VERSION/bin/edgedb-server -D test-dir --bootstrap-only --testmode
 
-    - name: Initialize Terraform
-      run: terraform init
-<%- endmacro %>
+    - name: Create databases on the older version
+      env:
+        EDGEDB_VERSION: ${{ matrix.edgedb-version }}
+      if: ${{ matrix.make-dbs }}
+      shell: python
+      run: |
+        import edgedb
+        import os
+        import subprocess
+
+        version = os.getenv('EDGEDB_VERSION')
+        cmd = [
+            f'edgedb-server-{version}/bin/edgedb-server', '-D' 'test-dir',
+            '--testmode', '--security', 'insecure_dev_mode', '--port', '10000',
+        ]
+        proc = subprocess.Popen(cmd)
+
+        db = edgedb.create_client(
+            host='localhost', port=10000, tls_security='insecure'
+        )
+        for name in ['json', 'functions', 'expressions', 'casts']:
+            db.execute(f'create database {name};')
+
+        proc.terminate()
+        proc.wait()
+
+    - name: Run tests with instance created on an older version
+      run: |
+        # Should we run *all* the tests?
+        edb test -j2 -v --data-dir test-dir tests/test_edgeql_json.py tests/test_edgeql_casts.py tests/test_edgeql_functions.py tests/test_edgeql_expressions.py
