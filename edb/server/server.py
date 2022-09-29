@@ -44,6 +44,7 @@ from jwcrypto import jwk
 from edb import errors
 
 from edb.common import devmode
+from edb.common import retryloop
 from edb.common import taskgroup
 from edb.common import windowedsum
 
@@ -269,6 +270,9 @@ class Server(ha_base.ClusterProtocol):
         self._session_idle_timeout = None
 
         self._admin_ui = admin_ui
+
+        # A set of databases that should not accept new connections.
+        self._block_new_connections: set[str] = set()
 
     async def _request_stats_logger(self):
         last_seen = -1
@@ -850,13 +854,9 @@ class Server(ha_base.ClusterProtocol):
     async def _maybe_patch_db(self, dbname, patches):
         logger.info("applying patches to database '%s'", dbname)
 
-        conn = await self.acquire_pgcon(dbname)
-
-        try:
-            if dbname != defines.EDGEDB_SYSTEM_DB:
+        if dbname != defines.EDGEDB_SYSTEM_DB:
+            async with self._direct_pgcon(dbname) as conn:
                 await self._maybe_apply_patches(dbname, conn, patches)
-        finally:
-            self.release_pgcon(dbname, conn)
 
     async def _maybe_patch(self):
         """Apply patches to all the databases"""
@@ -1089,21 +1089,62 @@ class Server(ha_base.ClusterProtocol):
 
         await self._ensure_database_not_connected(dbname)
 
-    async def _ensure_database_not_connected(self, dbname: str):
+    async def _ensure_database_not_connected(self, dbname: str) -> None:
         if self._dbindex and self._dbindex.count_connections(dbname):
             # If there are open EdgeDB connections to the `dbname` DB
             # just raise the error Postgres would have raised itself.
             raise errors.ExecutionError(
                 f'database {dbname!r} is being accessed by other users')
         else:
-            # If, however, there are no open EdgeDB connections, prune
-            # all non-active postgres connection to the `dbname` DB.
+            self._block_new_connections.add(dbname)
+
+            # Prune our inactive connections.
             await self._pg_pool.prune_inactive_connections(dbname)
+
+            # Signal adjacent servers to prune their connections to this
+            # database.
+            await self._signal_sysevent(
+                'ensure-database-not-used',
+                dbname=dbname,
+            )
+
+            rloop = retryloop.RetryLoop(
+                backoff=retryloop.exp_backoff(),
+                timeout=10.0,
+                ignore=errors.ExecutionError,
+            )
+
+            async for iteration in rloop:
+                async with iteration:
+                    await self._pg_ensure_database_not_connected(dbname)
+
+    async def _pg_ensure_database_not_connected(self, dbname: str) -> None:
+        async with self._use_sys_pgcon() as pgcon:
+            conns = await pgcon.sql_fetch_col(
+                b"""
+                SELECT
+                    pid
+                FROM
+                    pg_stat_activity
+                WHERE
+                    datname = $1
+                """,
+                args=[dbname.encode("utf-8")],
+            )
+
+        if conns:
+            raise errors.ExecutionError(
+                f'database {dbname!r} is being accessed by other users')
+
+    def _allow_database_connections(self, dbname: str) -> None:
+        self._block_new_connections.discard(dbname)
 
     def _on_after_drop_db(self, dbname: str):
         try:
             assert self._dbindex is not None
-            self._dbindex.unregister_db(dbname)
+            if self._dbindex.has_db(dbname):
+                self._dbindex.unregister_db(dbname)
+            self._block_new_connections.discard(dbname)
         except Exception:
             metrics.background_errors.inc(1.0, 'on_after_drop_db')
             raise
@@ -1212,6 +1253,19 @@ class Server(ha_base.ClusterProtocol):
         finally:
             self._release_sys_pgcon()
 
+    @contextlib.asynccontextmanager
+    async def _direct_pgcon(
+        self,
+        dbname: str,
+    ) -> AsyncGenerator[pgcon.PGConnection, None]:
+        conn = None
+        try:
+            conn = await self._pg_connect(dbname)
+            yield conn
+        finally:
+            if conn is not None:
+                await self._pg_disconnect(conn)
+
     async def _cancel_pgcon_operation(self, pgcon) -> bool:
         async with self._use_sys_pgcon() as syscon:
             if pgcon.idle:
@@ -1262,6 +1316,22 @@ class Server(ha_base.ClusterProtocol):
             metrics.background_errors.inc(1.0, 'signal_sysevent')
             raise
 
+    def _on_remote_database_quarantine(self, dbname):
+        if not self._accept_new_tasks:
+            return
+
+        # Block new connections to the database.
+        self._block_new_connections.add(dbname)
+
+        async def task():
+            try:
+                await self._pg_pool.prune_inactive_connections(dbname)
+            except Exception:
+                metrics.background_errors.inc(1.0, 'remote_db_quarantine')
+                raise
+
+        self.create_task(task(), interruptable=True)
+
     def _on_remote_ddl(self, dbname):
         if not self._accept_new_tasks:
             return
@@ -1274,6 +1344,28 @@ class Server(ha_base.ClusterProtocol):
             except Exception:
                 metrics.background_errors.inc(1.0, 'on_remote_ddl')
                 raise
+
+        self.create_task(task(), interruptable=True)
+
+    def _on_remote_database_changes(self):
+        if not self._accept_new_tasks:
+            return
+
+        # Triggered by a postgres notification event 'database-changes'
+        # on the __edgedb_sysevent__ channel
+        async def task():
+            async with self._use_sys_pgcon() as syscon:
+                dbnames = set(await self.get_dbnames(syscon))
+
+            tg = taskgroup.TaskGroup(name='new database introspection')
+            async with tg as g:
+                for dbname in dbnames:
+                    if not self._dbindex.has_db(dbname):
+                        g.create_task(self._early_introspect_db(dbname))
+
+            for dbname in self._dbindex.iter_dbs():
+                if dbname not in dbnames:
+                    self._on_after_drop_db(dbname)
 
         self.create_task(task(), interruptable=True)
 
@@ -1877,6 +1969,12 @@ class Server(ha_base.ClusterProtocol):
         auth_type = config.get_settings().get_type_by_name(
             default_method.value)
         return auth_type()
+
+    def is_database_connectable(self, dbname: str) -> bool:
+        return (
+            dbname != defines.EDGEDB_TEMPLATE_DB
+            and dbname not in self._block_new_connections
+        )
 
     def get_sys_query(self, key):
         return self._sys_queries[key]

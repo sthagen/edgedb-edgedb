@@ -2178,6 +2178,78 @@ class TestServerProtoDdlPropagation(tb.QueryTestCase):
                             DROP ROLE ddlprop01;
                         ''')
 
+    @unittest.skipUnless(devmode.is_in_dev_mode(),
+                         'the test requires devmode')
+    async def test_server_adjacent_database_propagation(self):
+        if not self.has_create_database:
+            self.skipTest('create database is not supported by the backend')
+
+        conargs = self.get_connect_args()
+
+        server_args = {}
+        if self.backend_dsn:
+            server_args['backend_dsn'] = self.backend_dsn
+        else:
+            server_args['adjacent_to'] = self.con
+        async with tb.start_edgedb_server(**server_args) as sd:
+
+            await self.con.execute('''
+                CREATE DATABASE test_db_prop;
+            ''')
+
+            # Make sure the adjacent server picks up on the new db
+            async for tr in self.try_until_succeeds(
+                ignore=edgedb.UnknownDatabaseError,
+                timeout=30,
+            ):
+                async with tr:
+                    con2 = await sd.connect(
+                        user=conargs.get('user'),
+                        password=conargs.get('password'),
+                        database="test_db_prop",
+                    )
+
+                    await con2.query("select 1")
+                    await con2.aclose()
+
+            async for tr in self.try_until_succeeds(
+                ignore=edgedb.ExecutionError,
+            ):
+                async with tr:
+                    await self.con.execute('''
+                        DROP DATABASE test_db_prop;
+                    ''')
+
+            # Now, recreate the DB and try the other way around
+            con2 = await sd.connect(
+                user=conargs.get('user'),
+                password=conargs.get('password'),
+                database=self.get_database_name(),
+            )
+
+            await con2.execute('''
+                CREATE DATABASE test_db_prop;
+            ''')
+
+            async for tr in self.try_until_succeeds(
+                ignore=edgedb.UnknownDatabaseError,
+                timeout=30,
+            ):
+                async with tr:
+                    con1 = await self.connect(database="test_db_prop")
+                    await con1.query("select 1")
+                    await con1.aclose()
+
+            async for tr in self.try_until_succeeds(
+                ignore=edgedb.ExecutionError,
+            ):
+                async with tr:
+                    await con2.execute('''
+                        DROP DATABASE test_db_prop;
+                    ''')
+
+            await con2.aclose()
+
 
 class TestServerProtoDDL(tb.DDLTestCase):
 

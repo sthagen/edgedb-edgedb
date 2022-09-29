@@ -471,7 +471,10 @@ def compile_GlobalExpr(
     if glob.is_computable(ctx.env.schema):
         obj_ref = s_utils.name_to_ast_ref(
             glob.get_target(ctx.env.schema).get_name(ctx.env.schema))
-        return dispatch.compile(qlast.Path(steps=[obj_ref]), ctx=ctx)
+        # Wrap the reference in a subquery so that it does not get
+        # factored out or go directly into the scope tree.
+        qry = qlast.SelectQuery(result=qlast.Path(steps=[obj_ref]))
+        return dispatch.compile(qry, ctx=ctx)
 
     objctx = ctx.env.options.schema_object_context
     if objctx in (s_constr.Constraint, s_indexes.Index):
@@ -675,14 +678,16 @@ def compile_Introspect(
 
 @dispatch.compile.register(qlast.Indirection)
 def compile_Indirection(
-        expr: qlast.Indirection, *, ctx: context.ContextLevel) -> irast.Set:
+    expr: qlast.Indirection, *, ctx: context.ContextLevel
+) -> irast.Set:
     node: Union[irast.Set, irast.Expr] = dispatch.compile(expr.arg, ctx=ctx)
     for indirection_el in expr.indirection:
         if isinstance(indirection_el, qlast.Index):
             idx = dispatch.compile(indirection_el.index, ctx=ctx)
             idx.context = indirection_el.index.context
-            node = irast.IndexIndirection(expr=node, index=idx,
-                                          context=expr.context)
+            node = irast.IndexIndirection(
+                expr=node, index=idx, context=expr.context
+            )
 
         elif isinstance(indirection_el, qlast.Slice):
             start: Optional[irast.Base]
@@ -698,11 +703,14 @@ def compile_Indirection(
             else:
                 stop = None
 
+            node_set = setgen.ensure_set(node, ctx=ctx)
             node = irast.SliceIndirection(
-                expr=node, start=start, stop=stop)
+                expr=node_set, start=start, stop=stop
+            )
         else:
-            raise ValueError('unexpected indirection node: '
-                             '{!r}'.format(indirection_el))
+            raise ValueError(
+                'unexpected indirection node: ' '{!r}'.format(indirection_el)
+            )
 
     return setgen.ensure_set(node, ctx=ctx)
 

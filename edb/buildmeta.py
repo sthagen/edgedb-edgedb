@@ -44,7 +44,7 @@ from edb.common import verutils
 
 
 # Increment this whenever the database layout or stdlib changes.
-EDGEDB_CATALOG_VERSION = 2022_08_19_00_00
+EDGEDB_CATALOG_VERSION = 2022_09_20_00_00
 EDGEDB_MAJOR_VERSION = 3
 
 
@@ -222,7 +222,7 @@ def hash_dirs(
     for path in sorted(paths):
         with open(path, 'rb') as f:
             h.update(f.read())
-
+    h.update(str(sys.version_info[:2]).encode())
     return h.digest()
 
 

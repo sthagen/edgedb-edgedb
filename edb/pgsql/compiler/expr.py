@@ -276,8 +276,8 @@ def compile_IndexIndirection(
 
 @dispatch.compile.register(irast.SliceIndirection)
 def compile_SliceIndirection(
-        expr: irast.SliceIndirection, *,
-        ctx: context.CompilerContextLevel) -> pgast.BaseExpr:
+    expr: irast.SliceIndirection, *, ctx: context.CompilerContextLevel
+) -> pgast.BaseExpr:
     # Handle Expr[Index], where Expr may be std::str, array<T> or
     # std::json. For strings we translate this into substr calls.
     # Arrays use the native slice syntax. JSON is handled by a
@@ -285,21 +285,67 @@ def compile_SliceIndirection(
     with ctx.new() as subctx:
         subctx.expr_exposed = False
         subj = dispatch.compile(expr.expr, ctx=subctx)
+
+        # Postgres arrays use 32bit indexes, so EdgeDB inherits this limitation
+        def compile_and_cast_int(expr: irast.Base) -> pgast.BaseExpr:
+            pg_expr = dispatch.compile(expr, ctx=subctx)
+            return pgast.TypeCast(
+                arg=pg_expr, type_name=pgast.TypeName(name=("integer",))
+            )
+
         if expr.start is None:
-            start: pgast.BaseExpr = pgast.NullConstant()
+            start: pgast.BaseExpr = pgast.LiteralExpr(expr="0")
         else:
-            start = dispatch.compile(expr.start, ctx=subctx)
+            start = compile_and_cast_int(expr.start)
+
         if expr.stop is None:
-            stop: pgast.BaseExpr = pgast.NullConstant()
+            # Max index in EdgeQL is 2^32-2 because during conversion
+            # to Postgres index, we add 1 to the stop and then subtract one.
+            stop: pgast.BaseExpr = pgast.LiteralExpr(expr=str(2**31 - 2))
         else:
-            stop = dispatch.compile(expr.stop, ctx=subctx)
+            stop = compile_and_cast_int(expr.stop)
 
-    result = pgast.FuncCall(
-        name=('edgedb', '_slice'),
-        args=[subj, start, stop]
+        typ = expr.expr.typeref
+        inline_array_slicing = irtyputils.is_array(typ) and any(
+            irtyputils.is_tuple(st) for st in typ.subtypes
+        )
+
+        if inline_array_slicing:
+            return _inline_array_slicing(subj, start, stop)
+        else:
+            return pgast.FuncCall(
+                name=("edgedb", "_slice"), args=[subj, start, stop]
+            )
+
+
+def _inline_array_slicing(
+    subj: pgast.BaseExpr, start: pgast.BaseExpr, stop: pgast.BaseExpr
+) -> pgast.BaseExpr:
+    return pgast.Indirection(
+        arg=subj,
+        indirection=[
+            pgast.Slice(
+                lidx=pgast.FuncCall(
+                    name=("edgedb", "_normalize_array_index"),
+                    args=[
+                        start,
+                        pgast.FuncCall(name=("cardinality",), args=[subj]),
+                    ],
+                ),
+                ridx=astutils.new_binop(
+                    lexpr=pgast.FuncCall(
+                        name=("edgedb", "_normalize_array_index"),
+                        args=[
+                            stop,
+                            pgast.FuncCall(name=("cardinality",), args=[subj]),
+                        ],
+                    ),
+                    op="-",
+                    rexpr=pgast.LiteralExpr(expr="1"),
+                ),
+            )
+        ],
     )
-
-    return result
 
 
 @dispatch.compile.register(irast.TypeIntrospection)

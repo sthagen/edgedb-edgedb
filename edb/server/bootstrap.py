@@ -1658,6 +1658,11 @@ async def _bootstrap(ctx: BootstrapContext) -> None:
 
         schema = s_schema.FlatSchema()
         schema = await _init_defaults(schema, compiler, tpl_ctx.conn)
+
+        # Run analyze on the template database, so that new dbs start
+        # with up-to-date statistics.
+        await tpl_ctx.conn.sql_execute(b"ANALYZE")
+
     finally:
         if in_dev_mode:
             await ctx.conn.sql_execute(

@@ -5171,6 +5171,139 @@ class TestEdgeQLSelect(tb.QueryTestCase):
             }],
         )
 
+    async def test_edgeql_select_slice_04(self):
+
+        await self.assert_query_result(
+            r"""
+            select [1,2,3,4,5][1:];
+            """,
+            [[2, 3, 4, 5]],
+        )
+
+        await self.assert_query_result(
+            r"""
+            select [1,2,3,4,5][:3];
+            """,
+            [[1, 2, 3]],
+        )
+
+        await self.assert_query_result(
+            r"""
+            select [1,2,3][1:<int64>{}];
+            """,
+            [],
+        )
+
+        # try to trick the compiler and to pass NULL into edgedb._slice
+        await self.assert_query_result(
+            r"""
+            select [1,2,3][1:<optional int64>$0];
+            """,
+            [],
+            variables=(None,),
+        )
+
+        await self.assert_query_result(
+            r"""
+            select [1,2,3][<optional int64>$0:2];
+            """,
+            [],
+            variables=(None,),
+        )
+
+        await self.assert_query_result(
+            r"""
+            select [1,2,3][<optional int64>$0:<optional int64>$1];
+            """,
+            [],
+            variables=(
+                None,
+                None,
+            ),
+        )
+
+        self.assertEqual(
+            await self.con.query(
+                r"""
+                select to_json('[true, 3, 4, null]')[1:];
+                """
+            ),
+            edgedb.Set(('[3, 4, null]',)),
+        )
+
+        self.assertEqual(
+            await self.con.query(
+                r"""
+                select to_json('[true, 3, 4, null]')[:2];
+                """
+            ),
+            edgedb.Set(('[true, 3]',)),
+        )
+
+        await self.assert_query_result(
+            r"""
+            select (<optional json>$0)[2:];
+            """,
+            [],
+            variables=(None,),
+        )
+
+        self.assertEqual(
+            await self.con.query(
+                r"""
+                select to_json('"hello world"')[2:];
+                """
+            ),
+            edgedb.Set(('"llo world"',)),
+        )
+
+        self.assertEqual(
+            await self.con.query(
+                r"""
+                select to_json('"hello world"')[:4];
+                """
+            ),
+            edgedb.Set(('"hell"',)),
+        )
+
+        await self.assert_query_result(
+            r"""
+            select (<array<str>>[])[0:];
+            """,
+            [[]],
+        )
+
+        await self.assert_query_result(
+            r'''select to_json('[]')[0:];''',
+            # JSON:
+            [[]],
+            # Binary:
+            ['[]'],
+        )
+
+        await self.assert_query_result(
+            r'''select [(1,'foo'), (2,'bar'), (3,'baz')][1:];''',
+            [[(2, 'bar'), (3, 'baz')]],
+        )
+
+        await self.assert_query_result(
+            r'''select [(1,'foo'), (2,'bar'), (3,'baz')][:2];''',
+            [[(1, 'foo'), (2, 'bar')]],
+        )
+
+        await self.assert_query_result(
+            r'''select [(1,'foo'), (2,'bar'), (3,'baz')][1:2];''',
+            [[(2, 'bar')]],
+        )
+
+        await self.assert_query_result(
+            r'''
+                select [(1,'foo'), (2,'bar'), (3,'baz')][<optional int32>$0:];
+            ''',
+            [],
+            variables=(None,),
+        )
+
     async def test_edgeql_select_tuple_01(self):
         await self.assert_query_result(
             r"""
@@ -5898,6 +6031,39 @@ class TestEdgeQLSelect(tb.QueryTestCase):
             await self.con.query("""
                 SELECT User.nam;
             """)
+
+    async def test_edgeql_select_bad_reference_03(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r"object type or alias 'default::number' does not exist",
+                _hint="did you mean '.number'?"):
+
+            await self.con.query("""
+                select Issue filter number = '4418';
+            """)
+
+    async def test_edgeql_select_bad_reference_04(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r"object type or alias 'default::referrnce' does not exist",
+                _hint="did you mean '.references'?"):
+
+            await self.con.query("""
+                select Issue filter referrnce = '#4418';
+            """)
+
+    async def test_edgeql_select_bad_reference_05(self):
+
+        with self.assertRaisesRegex(
+            edgedb.QueryError,
+            "object type 'default::Issue' has no link or property 'referrnce'",
+            _hint="did you mean 'references'?",
+        ):
+            await self.con.query(
+                """
+            select Issue filter .referrnce = '#4418';
+            """
+            )
 
     async def test_edgeql_select_precedence_01(self):
         with self.assertRaisesRegex(
