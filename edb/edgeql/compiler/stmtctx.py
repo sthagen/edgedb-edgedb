@@ -155,9 +155,7 @@ def fini_expression(
     )
 
     multiplicity = inference.infer_multiplicity(
-        ir,
-        scope_tree=ctx.path_scope,
-        ctx=inf_ctx,
+        ir, scope_tree=ctx.path_scope, ctx=inf_ctx
     )
 
     # Fix up weak namespaces
@@ -169,6 +167,9 @@ def fini_expression(
     for rw in ctx.env.type_rewrites.values():
         if isinstance(rw, irast.Set):
             inference.infer_cardinality(
+                rw, scope_tree=ctx.path_scope, ctx=inf_ctx
+            )
+            inference.infer_multiplicity(
                 rw, scope_tree=ctx.path_scope, ctx=inf_ctx)
 
     # ConfigSet and ConfigReset don't like being part of a Set
@@ -272,7 +273,7 @@ def fini_expression(
         scope_tree=ctx.env.path_scope,
         cardinality=cardinality,
         volatility=volatility,
-        multiplicity=multiplicity.own if multiplicity is not None else None,
+        multiplicity=multiplicity.own,
         stype=expr_type,
         view_shapes={
             src: [ptr for ptr, op in ptrs if op != qlast.ShapeOp.MATERIALIZE]
@@ -749,6 +750,22 @@ def preprocess_script(
         with ctx.new() as mctx:
             mctx.modaliases = modaliases
             target_stype = typegen.ql_typeexpr_to_type(cast.type, ctx=mctx)
+
+        # for ObjectType parameters, we inject intermediate cast to uuid,
+        # so parameter is uuid and then cast to ObjectType
+        if target_stype.is_object_type():
+            uuid_cast = qlast.TypeCast(
+                type=qlast.TypeName(maintype=qlast.ObjectRef(name='uuid')),
+                expr=cast.expr,
+                cardinality_mod=cast.cardinality_mod,
+            )
+            cast.expr = uuid_cast
+            cast = cast.expr
+
+            with ctx.new() as mctx:
+                mctx.modaliases = modaliases
+                target_stype = typegen.ql_typeexpr_to_type(cast.type, ctx=mctx)
+
         target_typeref = typegen.type_to_typeref(target_stype, env=ctx.env)
         required = cast.cardinality_mod != qlast.CardinalityModifier.Optional
         params[name] = irast.Param(

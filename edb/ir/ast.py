@@ -111,9 +111,9 @@ class ViewShapeMetadata(Base):
 
 
 class TypeRef(ImmutableBase):
-    # Hide ancestors and descendants from debug spew because they are
+    # Hide ancestors and children from debug spew because they are
     # incredibly noisy.
-    __ast_hidden__ = {'ancestors', 'descendants'}
+    __ast_hidden__ = {'ancestors', 'children'}
 
     # The id of the referenced type
     id: uuid.UUID
@@ -126,9 +126,9 @@ class TypeRef(ImmutableBase):
     # If this is a scalar type, base_type would be the highest
     # non-abstract base type.
     base_type: typing.Optional[TypeRef] = None
-    # A set of type descendant descriptors, if necessary for
+    # A set of type children descriptors, if necessary for
     # this type description.
-    descendants: typing.Optional[typing.FrozenSet[TypeRef]] = None
+    children: typing.Optional[typing.FrozenSet[TypeRef]] = None
     # A set of type ancestor descriptors, if necessary for
     # this type description.
     ancestors: typing.Optional[typing.FrozenSet[TypeRef]] = None
@@ -592,7 +592,7 @@ class Statement(Command):
     globals: typing.List[Global]
     cardinality: qltypes.Cardinality
     volatility: qltypes.Volatility
-    multiplicity: typing.Optional[qltypes.Multiplicity]
+    multiplicity: qltypes.Multiplicity
     stype: s_types.Type
     view_shapes: typing.Dict[so.Object, typing.List[s_pointers.Pointer]]
     view_shapes_metadata: typing.Dict[s_types.Type, ViewShapeMetadata]
