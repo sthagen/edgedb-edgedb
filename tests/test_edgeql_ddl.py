@@ -3241,6 +3241,29 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             };
         """)
 
+    async def test_edgeql_ddl_link_property_09(self):
+        await self.con.execute("""
+            create type T;
+            create type S {
+                create multi link x -> T {
+                    create property id -> str;
+                    create index on (__subject__@id);
+                }
+            };
+            insert T;
+            insert S { x := (select T { @id := "lol" }) };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                select S { x: {id, @id} }
+            """,
+            [{'x': [{'id': str, '@id': "lol"}]}],
+            # The python bindings seem to misbehave when there is
+            # linkprop and a regular prop with the same name
+            json_only=True,
+        )
+
     async def test_edgeql_ddl_bad_01(self):
         with self.assertRaisesRegex(
                 edgedb.InvalidReferenceError,
@@ -14635,6 +14658,85 @@ type default::Foo {
             create type X { create link foo -> Tgt };
             create alias Y := X { foo: {id} };
             alter type X { create link bar := .foo };
+        """)
+
+    async def test_edgeql_ddl_rebase_views_01(self):
+        await self.con.execute(r"""
+            CREATE TYPE default::Foo {
+                CREATE PROPERTY x -> std::str {
+                    CREATE CONSTRAINT std::exclusive;
+                };
+            };
+            CREATE TYPE default::Bar EXTENDING default::Foo;
+            CREATE TYPE default::Baz EXTENDING default::Foo;
+        """)
+
+        await self.con.execute(r"""
+            CREATE TYPE default::Foo2 EXTENDING default::Foo;
+            ALTER TYPE default::Bar {
+                DROP EXTENDING default::Foo;
+                EXTENDING default::Foo2 LAST;
+            };
+
+            INSERT Bar;
+        """)
+
+        # should still be in the view
+        await self.assert_query_result(
+            'select Foo',
+            [{}],
+        )
+
+        await self.assert_query_result(
+            'select Object',
+            [{}],
+        )
+
+    async def test_edgeql_ddl_rebase_views_02(self):
+        await self.con.execute(r"""
+            CREATE TYPE default::Foo {
+                CREATE PROPERTY x -> std::str {
+                    CREATE CONSTRAINT std::exclusive;
+                };
+            };
+            CREATE TYPE default::Bar EXTENDING default::Foo;
+            CREATE TYPE default::Baz EXTENDING default::Foo;
+        """)
+
+        await self.con.execute(r"""
+            CREATE TYPE default::Foo2 {
+                CREATE PROPERTY x -> std::str {
+                    CREATE CONSTRAINT std::exclusive;
+                };
+            };
+            ALTER TYPE default::Bar {
+                DROP EXTENDING default::Foo;
+                EXTENDING default::Foo2 LAST;
+            };
+
+            INSERT Bar;
+        """)
+
+        # should *not* still be in the view
+        await self.assert_query_result(
+            'select Foo',
+            [],
+        )
+
+        await self.assert_query_result(
+            'select Object',
+            [{}],
+        )
+
+    async def test_edgeql_ddl_alias_and_create_set_required(self):
+        await self.con.execute(r"""
+            create type T;
+            create alias A := T;
+            alter type T {
+                create required property bar -> str {
+                    set required using ('!')
+                }
+            };
         """)
 
 

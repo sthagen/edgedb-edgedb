@@ -751,23 +751,27 @@ class Compiler:
         else:
             first_extra = None
 
-        total_params = len(script_info.params) if script_info else len(params)
+        all_params = script_info.params.values() if script_info else params
+        total_params = len([p for p in all_params if not p.is_sub_param])
         user_params = first_extra if first_extra is not None else total_params
 
         if script_info is not None:
             outer_mapping = {n: i for i, n in enumerate(script_info.params)}
             # Count however many of *our* arguments are user_params
             user_params = sum(
-                outer_mapping[n.name] < user_params for n in params)
+                outer_mapping[n.name] < user_params for n in params
+                if not n.is_sub_param)
         else:
             outer_mapping = None
 
         oparams = [None] * user_params
         in_type_args = [None] * user_params
         for idx, param in enumerate(params):
+            if param.is_sub_param:
+                continue
             if argmap is not None:
                 sql_param = argmap[param.name]
-                idx = sql_param.index - 1
+                idx = sql_param.logical_index - 1
             if idx >= user_params:
                 continue
 
@@ -792,11 +796,26 @@ class Compiler:
                 param.required,
             )
 
+            if param.sub_params:
+                array_tids = []
+                for p in param.sub_params.params:
+                    if p.schema_type.is_array():
+                        el_type = p.schema_type.get_element_type(schema)
+                        array_tids.append(el_type.id)
+                    else:
+                        array_tids.append(None)
+
+                sub_params = (
+                    array_tids, param.sub_params.trans_type.flatten())
+            else:
+                sub_params = None
+
             in_type_args[idx] = dbstate.Param(
                 name=param.name,
                 required=param.required,
                 array_type_id=array_tid,
                 outer_idx=outer_mapping[param.name] if outer_mapping else None,
+                sub_params=sub_params,
             )
 
         return oparams, in_type_args
@@ -955,11 +974,17 @@ class Compiler:
         create_db = None
         drop_db = None
         create_db_template = None
+        create_ext = None
+        drop_ext = None
         if isinstance(stmt, qlast.DropDatabase):
             drop_db = stmt.name.name
         elif isinstance(stmt, qlast.CreateDatabase):
             create_db = stmt.name.name
             create_db_template = stmt.template.name if stmt.template else None
+        elif isinstance(stmt, qlast.CreateExtension):
+            create_ext = stmt.name.name
+        elif isinstance(stmt, qlast.DropExtension):
+            drop_ext = stmt.name.name
 
         if debug.flags.delta_execute:
             debug.header('Delta Script')
@@ -977,6 +1002,8 @@ class Compiler:
             create_db=create_db,
             drop_db=drop_db,
             create_db_template=create_db_template,
+            create_ext=create_ext,
+            drop_ext=drop_ext,
             has_role_ddl=isinstance(stmt, qlast.RoleCommand),
             ddl_stmt_id=ddl_stmt_id,
             user_schema=current_tx.get_user_schema_if_updated(),
@@ -1212,8 +1239,7 @@ class Compiler:
                             # it into the actual query, so filter them out.
                             used_placeholders = {
                                 p.name for p in ast.find_children(
-                                    ddl_ast,
-                                    lambda n: isinstance(n, qlast.Placeholder))
+                                    ddl_ast, qlast.Placeholder)
                             }
                             required_user_input = tuple(
                                 (k, v) for k, v in (
@@ -1881,6 +1907,8 @@ class Compiler:
                 unit.create_db = comp.create_db
                 unit.drop_db = comp.drop_db
                 unit.create_db_template = comp.create_db_template
+                unit.create_ext = comp.create_ext
+                unit.drop_ext = comp.drop_ext
                 unit.has_role_ddl = comp.has_role_ddl
                 unit.ddl_stmt_id = comp.ddl_stmt_id
                 if comp.user_schema is not None:
@@ -1982,6 +2010,12 @@ class Compiler:
 
             else:  # pragma: no cover
                 raise errors.InternalServerError('unknown compile state')
+
+            if unit.in_type_args:
+                unit.in_type_args_real_count = sum(
+                    len(p.sub_params[0]) if p.sub_params else 1
+                    for p in unit.in_type_args
+                )
 
             rv.append(unit)
 

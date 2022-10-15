@@ -685,7 +685,7 @@ class Pointer(referencing.ReferencedInheritingObject,
     def is_special_pointer(self, schema: s_schema.Schema) -> bool:
         return self.get_shortname(schema).name in {
             'source', 'target', 'id'
-        }
+        } and (self.is_id_pointer(schema) or self.is_endpoint_pointer(schema))
 
     def is_property(self, schema: s_schema.Schema) -> bool:
         raise NotImplementedError
@@ -777,7 +777,8 @@ class Pointer(referencing.ReferencedInheritingObject,
     ) -> bool:
         object_type = self.get_source(schema)
         if isinstance(object_type, s_types.Type):
-            return not object_type.is_view(schema)
+            return (
+                not object_type.is_view(schema) or refdict.attr == 'pointers')
         else:
             return True
 
@@ -1848,6 +1849,7 @@ class CreatePointer(
             )
         ):
             cmd.set_attribute_value('from_alias', True)
+            cmd.set_object_aux_data('from_alias', True)
 
         return cmd
 

@@ -167,12 +167,6 @@ def compile_ForQuery(
             iterator = iterator.elements[0]
 
         contains_dml = qlutils.contains_dml(qlstmt.result)
-        # If the body contains DML, then we need to prohibit
-        # correlation between the iterator and the enclosing
-        # query, since the correlation imposes compilation issues
-        # we aren't willing to tackle.
-        if contains_dml:
-            sctx.path_scope.factoring_allowlist.update(ctx.iterator_path_ids)
 
         with sctx.new() as ectx:
             if ectx.expr_exposed:
@@ -205,22 +199,20 @@ def compile_ForQuery(
             ctx=sctx,
         )
 
-        # Iterator symbol is, by construction, outside of the scope
-        # of the UNION argument, but is perfectly legal to be referenced
-        # inside a factoring fence that is an immediate child of this
-        # scope.
-        sctx.path_scope.factoring_allowlist.add(stmt.iterator_stmt.path_id)
         sctx.iterator_path_ids |= {stmt.iterator_stmt.path_id}
         node = sctx.path_scope.find_descendant(iterator_stmt.path_id)
         if node is not None:
-            # See above about why we need a factoring fence.
-            # We need to do this again when we move the branch so
-            # as to preserve the fencing.
+            # If the body contains DML, then we need to prohibit
+            # correlation between the iterator and the enclosing
+            # query, since the correlation imposes compilation issues
+            # we aren't willing to tackle.
+            #
             # Do this by sticking the iterator subtree onto a branch
             # with a factoring fence.
             if contains_dml:
                 node = node.attach_branch()
                 node.factoring_fence = True
+                node.factoring_allowlist.update(ctx.iterator_path_ids)
                 node = node.attach_branch()
 
             node.attach_subtree(view_scope_info.path_scope,
@@ -365,8 +357,7 @@ def compile_InternalGroupQuery(
                     grouping_stype, expr.grouping_alias, ctx=topctx)
 
         # Check that the by clause is legit
-        by_refs: List[qlast.ObjectRef] = ast.find_children(
-            stmt.by, lambda n: isinstance(n, qlast.ObjectRef))
+        by_refs = ast.find_children(stmt.by, qlast.ObjectRef)
         for by_ref in by_refs:
             if by_ref.name not in stmt.using:
                 raise errors.InvalidReferenceError(
@@ -561,25 +552,6 @@ def _get_dunder_type_ptrref(ctx: context.ContextLevel) -> irast.PointerRef:
     )
 
 
-def get_all_concrete(
-    stype: s_objtypes.ObjectType, *, ctx: context.ContextLevel
-) -> set[s_objtypes.ObjectType]:
-    if stype.get_intersection_of(ctx.env.schema):
-        # TODO: We should enumerate all object types in the intersection
-        # maybe in concretify, though?
-        raise errors.UnsupportedFeatureError(
-            'DML statements on intersections are not implemented yet',
-        )
-
-    if union := stype.get_union_of(ctx.env.schema):
-        return {
-            x
-            for t in union.objects(ctx.env.schema)
-            for x in get_all_concrete(t, ctx=ctx)
-        }
-    return {stype} | stype.descendants(ctx.env.schema)
-
-
 @dispatch.compile.register(qlast.UpdateQuery)
 def compile_UpdateQuery(
         expr: qlast.UpdateQuery, *, ctx: context.ContextLevel) -> irast.Set:
@@ -661,7 +633,7 @@ def compile_UpdateQuery(
                 ctx=resultctx,
             )
 
-        for dtype in get_all_concrete(mat_stype, ctx=ctx):
+        for dtype in schemactx.get_all_concrete(mat_stype, ctx=ctx):
             if pol_cond := policies.compile_dml_policy(
                 dtype, result, mode=qltypes.AccessKind.UpdateRead, ctx=ctx
             ):
@@ -781,7 +753,7 @@ def compile_DeleteQuery(
                 ctx=resultctx,
             )
 
-        for dtype in get_all_concrete(mat_stype, ctx=ctx):
+        for dtype in schemactx.get_all_concrete(mat_stype, ctx=ctx):
             if pol_cond := policies.compile_dml_policy(
                 dtype, result, mode=qltypes.AccessKind.Delete, ctx=ctx
             ):
@@ -1144,7 +1116,7 @@ def init_stmt(
 
     if isinstance(irstmt, irast.MutatingStmt):
         ctx.path_scope.factoring_fence = True
-        parent_ctx.path_scope.factoring_allowlist.update(ctx.iterator_path_ids)
+        ctx.path_scope.factoring_allowlist.update(ctx.iterator_path_ids)
 
 
 def fini_stmt(
