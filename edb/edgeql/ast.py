@@ -759,7 +759,6 @@ class CreateMigration(CreateObject, MigrationCommand):
 
     body: NestedQLBlock
     parent: typing.Optional[ObjectRef] = None
-    message: typing.Optional[str] = None
     metadata_only: bool = False
 
 
@@ -1367,7 +1366,9 @@ class Schema(SDL):
 #
 
 
-def get_targets(target: typing.Union[None, TypeExpr, Expr]):
+def get_targets(
+    target: typing.Union[None, TypeExpr, Expr]
+) -> typing.List[typing.Union[TypeExpr, Expr]]:
     if target is None:
         return []
     elif isinstance(target, TypeOp):
