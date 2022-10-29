@@ -853,7 +853,7 @@ class Server(ha_base.ClusterProtocol):
                 g.create_task(self._early_introspect_db(dbname))
 
     async def get_patch_count(self, conn):
-        """Apply any un-applied patches to the database."""
+        """Get the number of applied patches."""
         num_patches = await conn.sql_fetch_val(
             b'''
                 SELECT json::json from edgedbinstdata.instdata
@@ -863,20 +863,57 @@ class Server(ha_base.ClusterProtocol):
         num_patches = json.loads(num_patches) if num_patches else 0
         return num_patches
 
+    async def _get_patch_log(self, conn, idx):
+        # We need to maintain a log in the system database of
+        # patches that have been applied. This is so that if a
+        # patch creates a new object, and then we succesfully
+        # apply the patch to a user db but crash *before* applying
+        # it to the system db, when we start up again and try
+        # applying it to the system db, it is important that we
+        # apply the same compiled version of the patch. If we
+        # instead recompiled it, and it created new objects, those
+        # objects might have a different id in the std schema and
+        # in the actual user db.
+        result = await conn.sql_fetch_val(f'''\
+            SELECT bin FROM edgedbinstdata.instdata
+            WHERE key = 'patch_log_{idx}';
+        '''.encode('utf-8'))
+        if result:
+            return pickle.loads(result)
+        else:
+            return None
+
     async def _prepare_patches(self, conn):
         """Prepare all the patches"""
         num_patches = await self.get_patch_count(conn)
-        schema = self._std_schema
 
         patches = {}
         patch_list = list(enumerate(pg_patches.PATCHES))
         for num, (kind, patch) in patch_list[num_patches:]:
             from . import bootstrap
-            sql, syssql, schema = bootstrap.prepare_patch(
-                num, kind, patch, schema, self._refl_schema,
-                self._schema_class_layout, self.get_backend_runtime_params())
 
-            patches[num] = (sql, syssql, schema)
+            idx = num_patches + num
+            if not (entry := await self._get_patch_log(conn, idx)):
+                entry = bootstrap.prepare_patch(
+                    num, kind, patch, self._std_schema, self._refl_schema,
+                    self._schema_class_layout,
+                    self.get_backend_runtime_params())
+
+                await bootstrap._store_static_bin_cache_conn(
+                    conn, f'patch_log_{idx}', pickle.dumps(entry))
+
+            patches[num] = entry
+            _, _, updates = entry
+            if 'stdschema' in updates:
+                self._std_schema = updates['stdschema']
+            if 'reflschema' in updates:
+                self._refl_schema = updates['reflschema']
+            if 'local_intro_query' in updates:
+                self._local_intro_query = updates['local_intro_query']
+            if 'global_intro_query' in updates:
+                self._global_intro_query = updates['global_intro_query']
+            if 'classlayout' in updates:
+                self._schema_class_layout = updates['classlayout']
 
         return patches
 
@@ -931,7 +968,6 @@ class Server(ha_base.ClusterProtocol):
         async with self._use_sys_pgcon() as syscon:
             await self._maybe_apply_patches(
                 defines.EDGEDB_SYSTEM_DB, syscon, patches, sys=True)
-        self._std_schema = patches[max(patches)][-1]
 
     def _fetch_roles(self):
         global_schema = self._dbindex.get_global_schema()
@@ -963,40 +999,43 @@ class Server(ha_base.ClusterProtocol):
             self._sys_queries = immutables.Map(
                 {k: q.encode() for k, q in queries.items()})
 
-            self._local_intro_query = await syscon.sql_fetch_val(b'''\
-                SELECT text FROM edgedbinstdata.instdata
-                WHERE key = 'local_intro_query';
-            ''')
+            patch_count = await self.get_patch_count(syscon)
+            version_key = pg_patches.get_version_key(patch_count)
 
-            self._global_intro_query = await syscon.sql_fetch_val(b'''\
+            self._local_intro_query = await syscon.sql_fetch_val(f'''\
                 SELECT text FROM edgedbinstdata.instdata
-                WHERE key = 'global_intro_query';
-            ''')
+                WHERE key = 'local_intro_query{version_key}';
+            '''.encode('utf-8'))
 
-            result = await syscon.sql_fetch_val(b'''\
+            self._global_intro_query = await syscon.sql_fetch_val(f'''\
+                SELECT text FROM edgedbinstdata.instdata
+                WHERE key = 'global_intro_query{version_key}';
+            '''.encode('utf-8'))
+
+            result = await syscon.sql_fetch_val(f'''\
                 SELECT bin FROM edgedbinstdata.instdata
-                WHERE key = 'stdschema';
-            ''')
+                WHERE key = 'stdschema{version_key}';
+            '''.encode('utf-8'))
             try:
                 self._std_schema = pickle.loads(result[2:])
             except Exception as e:
                 raise RuntimeError(
                     'could not load std schema pickle') from e
 
-            result = await syscon.sql_fetch_val(b'''\
+            result = await syscon.sql_fetch_val(f'''\
                 SELECT bin FROM edgedbinstdata.instdata
-                WHERE key = 'reflschema';
-            ''')
+                WHERE key = 'reflschema{version_key}';
+            '''.encode('utf-8'))
             try:
                 self._refl_schema = pickle.loads(result[2:])
             except Exception as e:
                 raise RuntimeError(
                     'could not load refl schema pickle') from e
 
-            result = await syscon.sql_fetch_val(b'''\
+            result = await syscon.sql_fetch_val(f'''\
                 SELECT bin FROM edgedbinstdata.instdata
-                WHERE key = 'classlayout';
-            ''')
+                WHERE key = 'classlayout{version_key}';
+            '''.encode('utf-8'))
             try:
                 self._schema_class_layout = pickle.loads(result[2:])
             except Exception as e:
