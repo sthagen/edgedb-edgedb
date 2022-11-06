@@ -9224,7 +9224,7 @@ class TestEdgeQLDataMigration(EdgeQLDataMigrationTestCase):
 
         await self.assert_query_result(
             r"""
-                SELECT schema::Future {
+                SELECT schema::FutureBehavior {
                     name,
                 }
                 FILTER .name = 'nonrecursive_access_policies'
@@ -9255,7 +9255,7 @@ class TestEdgeQLDataMigration(EdgeQLDataMigrationTestCase):
 
         await self.assert_query_result(
             r"""
-                SELECT schema::Future {
+                SELECT schema::FutureBehavior {
                     name,
                 }
                 FILTER .name = 'nonrecursive_access_policies'
@@ -11128,9 +11128,6 @@ class TestEdgeQLDataMigration(EdgeQLDataMigrationTestCase):
         await self.migrate(schema)
         await self.migrate(schema)
 
-    @test.xerror('''
-        Infinite recursion via _propagate_if_expr_refs
-    ''')
     async def test_edgeql_migration_policies_and_collections(self):
         # An infinite recursion bug with this this was found by accident
         # when a number of tests accidentally were in the non isolated test.
