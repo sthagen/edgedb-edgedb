@@ -122,6 +122,7 @@ class CompileContext:
     bootstrap_mode: bool = False
     internal_schema_mode: bool = False
     log_ddl_as_migrations: bool = True
+    notebook: bool = False
 
 
 DEFAULT_MODULE_ALIASES_MAP = immutables.Map(
@@ -680,10 +681,19 @@ class Compiler:
         # (eventually) rewriting <STRING> and returning it
         assert self._is_dev_instance()
 
-        # TODO: Translate the SQL source code here
-        # current_tx = ctx.state.current_tx()
-        # schema = current_tx.get_schema(self._std_schema)
-        sql_source = ql.source + ';'
+        current_tx = ctx.state.current_tx()
+        schema = current_tx.get_schema(self._std_schema)
+
+        from edb.pgsql import parser as pg_parser
+        from edb.pgsql import resolver as pg_resolver
+        from edb.pgsql import codegen as pg_codegen
+
+        stmts = pg_parser.parse(ql.source)
+        sql_source = ''
+        for stmt in stmts:
+            resolved = pg_resolver.resolve(stmt, schema)
+            source = pg_codegen.generate_source(resolved)
+            sql_source += source + ';'
 
         # Compile the result as a query that just returns the string
         res_ql = edgeql.parse(f'SELECT {qlquote.quote_literal(sql_source)}')
@@ -2045,7 +2055,15 @@ class Compiler:
             if ql.scope is qltypes.ConfigScope.SESSION:
                 capability = enums.Capability.SESSION_CONFIG
             elif ql.scope is qltypes.ConfigScope.GLOBAL:
-                capability = enums.Capability.SET_GLOBAL
+                # We want the notebook protocol to be able to SET
+                # GLOBAL but not CONFIGURE SESSION, but they are
+                # merged in the capabilities header. Splitting them
+                # out introduces compatability headaches, so for now
+                # we keep them merged and hack around it for the notebook.
+                if ctx.notebook:
+                    capability = enums.Capability(0)
+                else:
+                    capability = enums.Capability.SESSION_CONFIG
             else:
                 capability = enums.Capability.PERSISTENT_CONFIG
             return (
@@ -2459,17 +2477,7 @@ class Compiler:
             cached_reflection=reflection_cache,
         )
 
-        ctx = CompileContext(
-            state=state,
-            output_format=enums.OutputFormat.BINARY,
-            expected_cardinality_one=False,
-            implicit_limit=implicit_limit,
-            inline_typenames=True,
-            json_parameters=False,
-            protocol_version=protocol_version
-        )
-
-        ctx.state.start_tx()
+        state.start_tx()
 
         result: List[
             Tuple[
@@ -2491,7 +2499,8 @@ class Compiler:
                     inline_typenames=True,
                     json_parameters=False,
                     source=source,
-                    protocol_version=protocol_version
+                    protocol_version=protocol_version,
+                    notebook=True,
                 )
 
                 result.append(

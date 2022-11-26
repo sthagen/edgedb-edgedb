@@ -121,18 +121,12 @@ DEF SERVER_HEADER_CAPABILITIES = 0x1001
 DEF ALL_CAPABILITIES = 0xFFFFFFFFFFFFFFFF
 
 
-cdef uint64_t CAP_SESSION_CONFIG = enums.Capability.SESSION_CONFIG
-cdef uint64_t CAP_SET_GLOBAL = enums.Capability.SET_GLOBAL
-
-
 def parse_capabilities_header(value: bytes) -> uint64_t:
     if len(value) != 8:
         raise errors.BinaryProtocolError(
             f'capabilities header must be exactly 8 bytes'
         )
     cdef uint64_t mask = hton.unpack_uint64(cpython.PyBytes_AS_STRING(value))
-    if mask & CAP_SESSION_CONFIG:
-        mask |= CAP_SET_GLOBAL
     return mask
 
 
@@ -491,7 +485,14 @@ cdef class EdgeConnection(frontend.FrontendConnection):
         if authmethod_name == 'SCRAM':
             await self._auth_scram(user)
         elif authmethod_name == 'JWT':
-            self._auth_jwt(user)
+            # token in the HTTP header has higher priority than
+            # the ClientHandshake message, under the scenario of
+            # binary protocol over HTTP
+            if self._auth_data:
+                token = self._extract_token_from_auth_data(self._auth_data)
+            else:
+                token = params.get('token')
+            self._auth_jwt(user, token)
         elif authmethod_name == 'Trust':
             self._auth_trust(user)
         else:
@@ -612,45 +613,39 @@ cdef class EdgeConnection(frontend.FrontendConnection):
         if user not in roles:
             raise errors.AuthenticationError('authentication failed')
 
-    def _auth_jwt(self, user):
-        role = self.server.get_roles().get(user)
-        if role is None:
-            raise errors.AuthenticationError('authentication failed')
-
-        if not self._auth_data:
-            raise errors.AuthenticationError(
-                'authentication failed: no authorization data provided')
-
-        header_value = self._auth_data.decode("ascii")
-        scheme, _, encoded_token = header_value.partition(" ")
+    def _extract_token_from_auth_data(self, auth_data):
+        header_value = auth_data.decode("ascii")
+        scheme, _, prefixed_token = header_value.partition(" ")
         if scheme.lower() != "bearer":
             raise errors.AuthenticationError(
                 'authentication failed: unrecognized authentication scheme')
 
-        encoded_token = encoded_token.strip()
-        if not encoded_token:
+        return prefixed_token.strip()
+
+    def _auth_jwt(self, user, prefixed_token):
+        if not prefixed_token:
+            raise errors.AuthenticationError(
+                'authentication failed: no authorization data provided')
+
+        for prefix in ["nbwt_", "edbt_"]:
+            encoded_token = prefixed_token.removeprefix(prefix)
+            if encoded_token != prefixed_token:
+                break
+        else:
             raise errors.AuthenticationError(
                 'authentication failed: malformed JWT')
 
-        ekey = self.server.get_jwe_key()
+        role = self.server.get_roles().get(user)
+        if role is None:
+            raise errors.AuthenticationError('authentication failed')
+
         skey = self.server.get_jws_key()
 
         try:
-            decrypted_token = jwt.JWT(
-                key=ekey,
-                algs=[
-                    "RSA-OAEP-256",
-                    "ECDH-ES",
-                    "A128GCM",
-                    "A192GCM",
-                    "A256GCM",
-                ],
-                jwt=encoded_token,
-            )
             token = jwt.JWT(
                 key=skey,
                 algs=["RS256", "ES256"],
-                jwt=decrypted_token.claims,
+                jwt=encoded_token,
             )
         except jwt.JWException as e:
             logger.debug('authentication failure', exc_info=True)
@@ -674,20 +669,15 @@ cdef class EdgeConnection(frontend.FrontendConnection):
 
         if not claims.get(f"{namespace}.any_role"):
             token_roles = claims.get(f"{namespace}.roles")
-            if not isinstance(token_roles, dict):
+            if not isinstance(token_roles, list):
                 raise errors.AuthenticationError(
                     f'authentication failed: malformed claims section in JWT'
                     f' expected mapping in "role_names"'
                 )
 
-            token_pw = token_roles.get(user)
-            if token_pw is None:
+            if user not in token_roles:
                 raise errors.AuthenticationError(
                     'authentication failed: role not authorized by this JWT')
-
-            if token_pw != role["password"]:
-                raise errors.AuthenticationError(
-                    'authentication failed: mismatched password in JWT')
 
     async def _auth_scram(self, user):
         # Tell the client that we require SASL SCRAM auth.

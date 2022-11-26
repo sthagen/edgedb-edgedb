@@ -43,7 +43,6 @@ MIB = 1024 * 1024
 RAM_MIB_PER_CONN = 100
 TLS_CERT_FILE_NAME = "edbtlscert.pem"
 TLS_KEY_FILE_NAME = "edbprivkey.pem"
-JWE_KEY_FILE_NAME = "edbjwekeys.pem"
 JWS_KEY_FILE_NAME = "edbjwskeys.pem"
 
 
@@ -168,7 +167,7 @@ class ServerConfig(NamedTuple):
     log_to: str
     bootstrap_only: bool
     bootstrap_command: str
-    bootstrap_script: pathlib.Path
+    bootstrap_command_file: pathlib.Path
     default_database: Optional[str]
     default_database_user: Optional[str]
     devmode: bool
@@ -198,7 +197,6 @@ class ServerConfig(NamedTuple):
     tls_cert_mode: ServerTlsCertMode
 
     jws_key_file: pathlib.Path
-    jwe_key_file: pathlib.Path
     jose_key_mode: JOSEKeyMode
 
     default_auth_method: ServerAuthMethods
@@ -475,15 +473,66 @@ def _validate_default_auth_method(
     return ServerAuthMethods(methods)
 
 
+class EnvvarResolver(click.Option):
+    def resolve_envvar_value(self, ctx: click.Context):
+        if self.envvar is None:
+            return None
+
+        if not isinstance(self.envvar, str):
+            raise click.BadParameter(
+                "expected a single envvar value but got multiple")
+
+        file_var = f'{self.envvar}_FILE'
+        alt_var = f'{self.envvar}_ENV'
+
+        var_val = os.environ.get(self.envvar)
+        alt_var_val = os.environ.get(alt_var)
+        file_var_val = os.environ.get(file_var)
+
+        if var_val and file_var_val:
+            raise click.BadParameter(
+                f'{self.envvar} and ${file_var} are exclusive, '
+                f'but both are set.')
+
+        if var_val and alt_var_val:
+            raise click.BadParameter(
+                f'{self.envvar} and ${alt_var} are exclusive, '
+                f'but both are set.')
+
+        if file_var_val and alt_var_val:
+            raise click.BadParameter(
+                f'{file_var} and ${alt_var} are exclusive, '
+                f'but both are set.')
+
+        if alt_var_val:
+            var_val = os.environ.get(alt_var_val)
+
+        if var_val:
+            return var_val
+
+        if file_var_val:
+            try:
+                with open(file_var_val, 'rt') as f:
+                    return f.read()
+            except Exception as e:
+                raise click.BadParameter(
+                    f'could not read the file specified by '
+                    f'{file_var} ({file_var_val!r})') from e
+
+        return None
+
+
 _server_options = [
     click.option(
         '-D', '--data-dir', type=PathPath(),
+        envvar="EDGEDB_SERVER_DATADIR", cls=EnvvarResolver,
         help='database cluster directory'),
     click.option(
         '--postgres-dsn', type=str, hidden=True,
         help='[DEPRECATED] DSN of a remote Postgres cluster, if using one'),
     click.option(
         '--backend-dsn', type=str,
+        envvar="EDGEDB_SERVER_BACKEND_DSN", cls=EnvvarResolver,
         help='DSN of a remote backend cluster, if using one. '
              'Also supports HA clusters, for example: stolon+consul+http://'
              'localhost:8500/test_cluster'),
@@ -533,6 +582,7 @@ _server_options = [
         help='[DEPRECATED] bootstrap the database cluster and exit'),
     click.option(
         '--bootstrap-only', is_flag=True,
+        envvar="EDGEDB_SERVER_BOOTSTRAP_ONLY", cls=EnvvarResolver,
         help='bootstrap the database cluster and exit'),
     click.option(
         '--default-database', type=str, hidden=True,
@@ -542,14 +592,18 @@ _server_options = [
         help='[DEPRECATED] the name of the default database owner'),
     click.option(
         '--bootstrap-command', metavar="QUERIES",
+        envvar="EDGEDB_SERVER_BOOTSTRAP_COMMAND", cls=EnvvarResolver,
         help='run the commands when initializing the database. '
              'Queries are executed by default user within default '
              'database. May be used with or without `--bootstrap-only`.'),
     click.option(
-        '--bootstrap-script', type=PathPath(), metavar="PATH",
+        '--bootstrap-command-file', type=PathPath(), metavar="PATH",
         help='run the script when initializing the database. '
              'Script run by default user within default database. '
              'May be used with or without `--bootstrap-only`.'),
+    click.option(
+        '--bootstrap-script', type=PathPath(),
+        help='[DEPRECATED] use --bootstrap-command-file instead.'),
     click.option(
         '--devmode/--no-devmode',
         help='enable or disable the development mode',
@@ -560,10 +614,12 @@ _server_options = [
         default=False),
     click.option(
         '-I', '--bind-address', type=str, multiple=True,
+        envvar="EDGEDB_SERVER_BIND_ADDRESS", cls=EnvvarResolver,
         help='IP addresses to listen on, specify multiple times for more than '
              'one address to listen on'),
     click.option(
         '-P', '--port', type=PortType(), default=None,
+        envvar="EDGEDB_SERVER_PORT", cls=EnvvarResolver,
         help='port to listen on'),
     click.option(
         '-b', '--background', is_flag=True, help='daemonize'),
@@ -576,6 +632,7 @@ _server_options = [
         '--daemon-group', type=int),
     click.option(
         '--runstate-dir', type=PathPath(), default=None,
+        envvar="EDGEDB_SERVER_RUNSTATE_DIR",
         help=f'directory where UNIX sockets and other temporary '
              f'runtime files will be placed ({_get_runstate_dir_default()} '
              f'by default)'),
@@ -656,7 +713,7 @@ _server_options = [
              'be automatically created in the specified path.'),
     click.option(
         '--tls-cert-mode',
-        envvar="EDGEDB_SERVER_TLS_CERT_MODE",
+        envvar="EDGEDB_SERVER_TLS_CERT_MODE", cls=EnvvarResolver,
         type=click.Choice(
             ['default'] + list(ServerTlsCertMode.__members__.values()),
             case_sensitive=True,
@@ -730,11 +787,8 @@ _server_options = [
     click.option(
         '--jwe-key-file',
         type=PathPath(),
-        envvar="EDGEDB_SERVER_JWE_KEY_FILE",
         hidden=True,
-        help='Specifies a path to a file containing a private key in PEM '
-             'format used to decrypt JWE tokens. The file could also contain '
-             'a public key to encrypt JWE tokens for local testing.'),
+        help='Deprecated: no longer in use.'),
     click.option(
         '--jose-key-mode',
         type=click.Choice(
@@ -745,19 +799,18 @@ _server_options = [
         default='default',
         help='Specifies what to do when the JOSE keys are either not '
              'specified or are missing.  When set to "require_file", the JOSE '
-             'keys must be specified in the --jws-key-file and --jwe-key-file '
-             'options and both must exist.  When set to "generate", 2 new key '
-             'pairs will be generated and placed in the path specified by '
-             '--jwe-key-file/--jws-key-file, if those are set, otherwise the '
-             f'generated key pairs are stored as `{JWE_KEY_FILE_NAME}` and '
-             f'`{JWS_KEY_FILE_NAME}` in the data directory, or, if the server '
-             'is running with --backend-dsn, in a subdirectory of '
+             'keys must be specified in the --jws-key-file and the file must '
+             'exist.  When set to "generate", a new key pair will be '
+             'generated and placed in the path specified by --jws-key-file, '
+             'if those are set, otherwise the generated key pairs are stored '
+             f'as `{JWS_KEY_FILE_NAME}` in the data directory, or, if the '
+             'server is running with --backend-dsn, in a subdirectory of '
              '--runstate-dir.\n\nThe default is "require_file" when the '
              '--security option is set to "strict", and "generate" when the '
              '--security option is set to "insecure_dev_mode"'),
     click.option(
         "--default-auth-method",
-        envvar="EDGEDB_SERVER_DEFAULT_AUTH_METHOD",
+        envvar="EDGEDB_SERVER_DEFAULT_AUTH_METHOD", cls=EnvvarResolver,
         callback=_validate_default_auth_method,
         type=str,
         help=(
@@ -1132,29 +1185,12 @@ def parse_args(**kwargs: Any):
                 exit_code=11,
             )
         kwargs['jws_key_file'] = jws_key_file
-
-    if not kwargs['jwe_key_file']:
-        if kwargs['data_dir']:
-            jwe_key_file = kwargs['data_dir'] / JWE_KEY_FILE_NAME
-        elif generate_jose:
-            jwe_key_file = pathlib.Path('<runstate>') / JWE_KEY_FILE_NAME
-        else:
-            abort(
-                "no JWE key specified and JOSE keys auto-generation"
-                " has not been requested; see help for --jose-key-mode",
-                exit_code=11,
-            )
-        kwargs['jwe_key_file'] = jwe_key_file
+    del kwargs['jwe_key_file']
 
     if not kwargs['bootstrap_only'] and not generate_jose:
         if not kwargs['jws_key_file'].exists():
             abort(
                 f"JWS key file \"{kwargs['jws_key_file']}\" does not exist"
-            )
-
-        if not kwargs['jwe_key_file'].exists():
-            abort(
-                f"JWE key file \"{kwargs['jwe_key_file']}\" does not exist"
             )
 
     if (
@@ -1166,21 +1202,30 @@ def parse_args(**kwargs: Any):
             " is not a regular file"
         )
 
-    if (
-        kwargs['jwe_key_file'].exists() and
-        not kwargs['jwe_key_file'].is_file()
-    ):
-        abort(
-            f"JWE key file \"{kwargs['jwe_key_file']}\""
-            " is not a regular file"
-        )
-
     if kwargs['log_level']:
         kwargs['log_level'] = kwargs['log_level'].lower()[0]
 
-    bootstrap_script_text: Optional[str]
     if kwargs['bootstrap_script']:
-        with open(kwargs['bootstrap_script']) as f:
+        if not kwargs['bootstrap_command_file']:
+            warnings.warn(
+                "The `--bootstrap-script` option is deprecated, use "
+                "`--bootstrap-command-file` instead.",
+                DeprecationWarning,
+            )
+            kwargs['bootstrap_command_file'] = kwargs['bootstrap_script']
+        else:
+            warnings.warn(
+                "Both `--bootstrap-command-file` and `--bootstrap-script` "
+                "were specified, but are mutually exclusive. "
+                "Ignoring the deprecated `--bootstrap-script` option.",
+                DeprecationWarning,
+            )
+
+    del kwargs['bootstrap_script']
+
+    bootstrap_script_text: Optional[str]
+    if kwargs['bootstrap_command_file']:
+        with open(kwargs['bootstrap_command_file']) as f:
             bootstrap_script_text = f.read()
     elif kwargs['bootstrap_command']:
         bootstrap_script_text = kwargs['bootstrap_command']

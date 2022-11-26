@@ -1224,13 +1224,16 @@ class SQLQueryTestCase(BaseQueryTestCase):
 
     @classmethod
     def setUpClass(cls):
-        import asyncpg
+        try:
+            import asyncpg
+        except ImportError:
+            raise unittest.SkipTest('SQL tests skipped: asyncpg not installed')
 
         super().setUpClass()
         settings = cls.con.get_settings()
         pgaddr = settings.get('pgaddr')
         if pgaddr is None:
-            raise unittest.SkipTest('SQL tests requires devmode')
+            raise unittest.SkipTest('SQL tests skipped: not in devmode')
         pgaddr = json.loads(pgaddr)
 
         pgdsn = os.environ.get('EDGEDB_TEST_BACKEND_DSN')
@@ -1259,6 +1262,25 @@ class SQLQueryTestCase(BaseQueryTestCase):
            describe alter {qlquote.quote_literal(query)}
         ''')
         return await self.scon.fetch(rewritten)
+
+    async def squery_values(self, query):
+        res = await self.squery(query)
+        return [list(r.values()) for r in res]
+
+    def assert_shape(self, res, rows, cols, column_names=None):
+        """
+        Fail if query result does not confront the specified shape, defined in
+        terms of:
+        - number of rows,
+        - number of columns (not checked if there are not rows)
+        - column names.
+        """
+
+        self.assertEqual(len(res), rows)
+        if rows > 0:
+            self.assertEqual(len(res[0]), cols)
+        if column_names:
+            self.assertListEqual(column_names, list(res[0].keys()))
 
 
 class DumpCompatTestCaseMeta(TestCaseMeta):

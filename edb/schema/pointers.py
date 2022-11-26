@@ -678,6 +678,10 @@ class Pointer(referencing.ReferencedInheritingObject,
         std_source = schema.get('std::source', type=so.SubclassableObject)
         return self.issubclass(schema, std_source)
 
+    def is_link_target_property(self, schema: s_schema.Schema) -> bool:
+        std_target = schema.get('std::target', type=so.SubclassableObject)
+        return self.issubclass(schema, std_target)
+
     def is_endpoint_pointer(self, schema: s_schema.Schema) -> bool:
         std_source = schema.get('std::source', type=so.SubclassableObject)
         std_target = schema.get('std::target', type=so.SubclassableObject)
@@ -2643,6 +2647,8 @@ class AlterPointerLowerCardinality(
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> s_schema.Schema:
+        from edb.ir import utils as irutils
+
         orig_schema = schema
         schema = super()._alter_begin(schema, context)
         scls = self.scls
@@ -2692,6 +2698,13 @@ class AlterPointerLowerCardinality(
                     raise errors.SchemaError(
                         f'result of USING clause for the alteration of '
                         f'{vn} may not include a shape',
+                        context=self.source_context,
+                    )
+
+                if irutils.contains_dml(self.fill_expr.ir_statement):
+                    raise errors.SchemaError(
+                        f'USING clause for the alteration of {vn} '
+                        f'cannot include mutating statements',
                         context=self.source_context,
                     )
 
