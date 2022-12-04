@@ -708,10 +708,11 @@ def process_insert_body(
         if iterator is not None:
             pathctx.put_path_bond(select, iterator.path_id)
 
-    pathctx._put_path_output_var(
-        select, ir_stmt.subject.path_id, aspect='identity',
-        var=pgast.ColumnRef(name=['id']), env=ctx.env,
-    )
+    for aspect in ('value', 'identity'):
+        pathctx._put_path_output_var(
+            select, ir_stmt.subject.path_id, aspect=aspect,
+            var=pgast.ColumnRef(name=['id']), env=ctx.env,
+        )
 
     # Put the select that builds the tuples to insert into its own CTE.
     # We do this for two reasons:
@@ -836,6 +837,11 @@ def compile_policy_check(
         ictx.ptr_rel_overlays[None] = ictx.ptr_rel_overlays[None].copy()
         ictx.ptr_rel_overlays[None].update(
             ictx.ptr_rel_overlays[ir_stmt])
+
+        ictx.type_rel_overlays = ctx.type_rel_overlays.copy()
+        ictx.type_rel_overlays[None] = ictx.type_rel_overlays[None].copy()
+        ictx.type_rel_overlays[None].update(
+            ictx.type_rel_overlays[ir_stmt])
 
         dml_rvar = relctx.rvar_for_rel(dml_cte, ctx=ctx)
         relctx.include_rvar(ictx.rel, dml_rvar, path_id=subject_id, ctx=ictx)

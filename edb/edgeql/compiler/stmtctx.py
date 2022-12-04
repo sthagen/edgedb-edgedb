@@ -40,7 +40,6 @@ from edb.schema import sources as s_sources
 from edb.schema import types as s_types
 
 from edb.edgeql import ast as qlast
-from edb.edgeql import parser as qlparser
 
 from edb.common.ast import visitor as ast_visitor
 from edb.common import ordered
@@ -267,8 +266,6 @@ def fini_expression(
     group.infer_group_aggregates(ir, ctx=ctx)
 
     assert isinstance(ir, irast.Set)
-    source_map = {k: v for k, v in ctx.env.source_map.items()
-                  if isinstance(k, s_pointers.Pointer)}
     lparams = [
         p for p in ctx.env.query_parameters.values()
         if not p.is_sub_param
@@ -288,7 +285,6 @@ def fini_expression(
         params=params,
         globals=list(ctx.env.query_globals.values()),
         views=ctx.view_nodes,
-        source_map=source_map,
         scope_tree=ctx.env.path_scope,
         cardinality=cardinality,
         volatility=volatility,
@@ -707,7 +703,7 @@ def _declare_view_from_schema(
         subctx.expr_exposed = context.Exposure.UNEXPOSED
         view_expr = viewcls.get_expr(ctx.env.schema)
         assert view_expr is not None
-        view_ql = qlparser.parse(view_expr.text)
+        view_ql = view_expr.qlast
         viewcls_name = viewcls.get_name(ctx.env.schema)
         assert isinstance(view_ql, qlast.Expr), 'expected qlast.Expr'
         view_set = declare_view(view_ql, alias=viewcls_name,
