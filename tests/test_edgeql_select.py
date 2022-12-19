@@ -1684,6 +1684,10 @@ class TestEdgeQLSelect(tb.QueryTestCase):
             ],
         )
 
+    async def test_edgeql_select_id_01(self):
+        # allow assigning id to a computed (#4781)
+        await self.con.query('SELECT schema::Type { XYZ := .id};')
+
     async def test_edgeql_select_reverse_link_01(self):
         await self.assert_query_result(
             r'''
@@ -3077,6 +3081,13 @@ class TestEdgeQLSelect(tb.QueryTestCase):
         await self.con.execute(r'''
             DROP FUNCTION concat3(sep: std::str, VARIADIC s: std::str);
         ''')
+
+    async def test_edgeql_select_func_08(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r'function "sum\(arg0: std::str\)" does not exist'):
+            async with self.con.transaction():
+                await self.con.query(r"with x := 'a', select sum(x);")
 
     async def test_edgeql_select_exists_01(self):
         await self.assert_query_result(

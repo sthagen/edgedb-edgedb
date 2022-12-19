@@ -613,7 +613,7 @@ def ptr_step_set(
         source_context: Optional[parsing.ParserContext],
         ignore_computable: bool=False,
         ctx: context.ContextLevel) -> irast.Set:
-    ptrcls = resolve_ptr(
+    ptrcls, path_id_ptrcls = resolve_ptr_with_intersections(
         source,
         ptr_name,
         upcoming_intersections=upcoming_intersections,
@@ -624,6 +624,7 @@ def ptr_step_set(
 
     return extend_path(
         path_tip, ptrcls, direction,
+        path_id_ptrcls=path_id_ptrcls,
         ignore_computable=ignore_computable, ctx=ctx)
 
 
@@ -649,6 +650,23 @@ def resolve_ptr(
     near_endpoint: s_obj.Object,
     pointer_name: str,
     *,
+    direction: s_pointers.PointerDirection = (
+        s_pointers.PointerDirection.Outbound
+    ),
+    source_context: Optional[parsing.ParserContext] = None,
+    track_ref: Optional[Union[qlast.Base, Literal[False]]],
+    ctx: context.ContextLevel,
+) -> s_pointers.Pointer:
+    return resolve_ptr_with_intersections(
+        near_endpoint, pointer_name,
+        direction=direction, source_context=source_context,
+        track_ref=track_ref, ctx=ctx)[0]
+
+
+def resolve_ptr_with_intersections(
+    near_endpoint: s_obj.Object,
+    pointer_name: str,
+    *,
     upcoming_intersections: Sequence[s_types.Type] = (),
     far_endpoints: Iterable[s_obj.Object] = (),
     direction: s_pointers.PointerDirection = (
@@ -657,7 +675,15 @@ def resolve_ptr(
     source_context: Optional[parsing.ParserContext] = None,
     track_ref: Optional[Union[qlast.Base, Literal[False]]],
     ctx: context.ContextLevel,
-) -> s_pointers.Pointer:
+) -> tuple[s_pointers.Pointer, s_pointers.Pointer]:
+    """Resolve a pointer, taking into account upcoming intersections.
+
+    The key trickiness here is that *two* pointers are returned:
+      * one that (for backlinks) includes just the pointers that actually
+        may be used
+      * one for use in path ids, that does not do that filtering, so that
+        path factoring works properly.
+    """
 
     if not isinstance(near_endpoint, s_sources.Source):
         # Reference to a property on non-object
@@ -667,7 +693,7 @@ def resolve_ptr(
     ptr: Optional[s_pointers.Pointer] = None
 
     if direction is s_pointers.PointerDirection.Outbound:
-        ptr = near_endpoint.maybe_get_ptr(
+        path_id_ptr = ptr = near_endpoint.maybe_get_ptr(
             ctx.env.schema,
             s_name.UnqualName(pointer_name),
         )
@@ -680,26 +706,32 @@ def resolve_ptr(
                     ref.get_target(ctx.env.schema), ctx=ctx)
 
     else:
-        ptrs = near_endpoint.getrptrs(ctx.env.schema, pointer_name,
-                                      sources=far_endpoints)
+        assert isinstance(near_endpoint, s_types.Type)
+        concrete_near_endpoint = schemactx.concretify(near_endpoint, ctx=ctx)
+        ptrs = concrete_near_endpoint.getrptrs(
+            ctx.env.schema, pointer_name, sources=far_endpoints)
         if ptrs:
             # If this reverse pointer access is followed by
             # intersections, we filter out any pointers that
-            # couldn't be picked up by the intersections. This avoids
-            # creating spurious dependencies when reverse
-            # links are used in schemas.
-            dep_ptrs = {
-                ptr for ptr in ptrs
-                if (src := ptr.get_source(ctx.env.schema))
-                and all(
-                    src.issubclass(ctx.env.schema, typ)
-                    or any(
-                        dsrc.issubclass(ctx.env.schema, typ)
-                        for dsrc in src.descendants(ctx.env.schema)
-                    )
-                    for typ in upcoming_intersections
-                )
-            }
+            # couldn't be picked up by the intersections.
+            # If a pointer doesn't get picked up, we look to see
+            # if any of its children might.
+            #
+            # This both allows us to avoid creating spurious
+            # dependencies when reverse links are used in schemas
+            # and to generate a precise set of possible pointers.
+            dep_ptrs = set()
+            wl = list(ptrs)
+            while wl:
+                ptr = wl.pop()
+                if (src := ptr.get_source(ctx.env.schema)):
+                    if all(
+                        src.issubclass(ctx.env.schema, typ)
+                        for typ in upcoming_intersections
+                    ):
+                        dep_ptrs.add(ptr)
+                    else:
+                        wl.extend(ptr.children(ctx.env.schema))
 
             if track_ref is not False:
                 for p in dep_ptrs:
@@ -729,7 +761,7 @@ def resolve_ptr(
                     )
 
             opaque = not far_endpoints
-            ptr = schemactx.get_union_pointer(
+            concrete_ptr = schemactx.get_union_pointer(
                 ptrname=s_name.UnqualName(pointer_name),
                 source=near_endpoint,
                 direction=direction,
@@ -738,9 +770,25 @@ def resolve_ptr(
                 modname=ctx.derived_target_module,
                 ctx=ctx,
             )
+            path_id_ptr = ptr = concrete_ptr
+            # If we have an upcoming intersection that has actual
+            # pointer targets, we want to put the filtered down
+            # version into the AST, so that we can more easily use
+            # that information in compilation.  But we still need the
+            # *full* union in the path_ids, for factoring.
+            if dep_ptrs and upcoming_intersections:
+                ptr = schemactx.get_union_pointer(
+                    ptrname=s_name.UnqualName(pointer_name),
+                    source=near_endpoint,
+                    direction=direction,
+                    components=dep_ptrs,
+                    opaque=opaque,
+                    modname=ctx.derived_target_module,
+                    ctx=ctx,
+                )
 
-    if ptr is not None:
-        return ptr
+    if ptr and path_id_ptr:
+        return ptr, path_id_ptr
 
     if isinstance(near_endpoint, s_links.Link):
         vname = near_endpoint.get_verbosename(ctx.env.schema, with_parent=True)
@@ -775,6 +823,7 @@ def extend_path(
     ptrcls: s_pointers.Pointer,
     direction: PtrDir = PtrDir.Outbound,
     *,
+    path_id_ptrcls: Optional[s_pointers.Pointer] = None,
     ignore_computable: bool = False,
     same_computable_scope: bool = False,
     srcctx: Optional[parsing.ParserContext]=None,
@@ -798,14 +847,22 @@ def extend_path(
 
     orig_ptrcls = ptrcls
 
+    # If there is a particular specified ptrcls for the pathid, use
+    # it, otherwise use the actual ptrcls. This comes up with
+    # intersections on backlinks, where we want to use a precise ptr
+    # in the IR for compilation reasons but need a path_id that is
+    # independent of intersections.
+    path_id_ptrcls = path_id_ptrcls or ptrcls
+
     # Find the pointer definition site.
     # This makes it so that views don't change path ids unless they are
     # introducing some computation.
     ptrcls = ptrcls.get_nearest_defined(ctx.env.schema)
+    path_id_ptrcls = path_id_ptrcls.get_nearest_defined(ctx.env.schema)
 
     path_id = pathctx.extend_path_id(
         src_path_id,
-        ptrcls=ptrcls,
+        ptrcls=path_id_ptrcls,
         direction=direction,
         ns=ctx.path_id_namespace,
         ctx=ctx,
@@ -820,7 +877,7 @@ def extend_path(
         source=source_set,
         target=target_set,
         direction=direction,
-        ptrref=not_none(path_id.rptr()),
+        ptrref=typegen.ptr_to_ptrref(ptrcls, ctx=ctx),
         is_definition=False,
     )
 
@@ -1051,6 +1108,9 @@ def type_intersection_set(
             elif stype.issubclass(ctx.env.schema, component_endpoint):
                 assert isinstance(stype, s_objtypes.ObjectType)
                 if rptr.direction is s_pointers.PointerDirection.Inbound:
+                    # assert isinstance(component, irast.PointerRef)
+                    # rptr_specialization.append(component)
+
                     narrow_ptr = stype.getptr(
                         ctx.env.schema,
                         component.shortname.get_local_name(),
@@ -1455,21 +1515,33 @@ def _get_schema_computed_ctx(
     @contextlib.contextmanager
     def newctx() -> Iterator[context.ContextLevel]:
         with ctx.detached() as subctx:
-            source_stype = get_set_type(source, ctx=ctx)
-
             source_scope = pathctx.get_set_scope(rptr.source, ctx=ctx)
             if source_scope and source_scope.namespaces:
                 subctx.path_id_namespace |= source_scope.namespaces
 
-            inner_path_id = pathctx.get_path_id(source_stype, ctx=subctx)
+            # Get the type of the actual location where the computed pointer
+            # was defined in the schema, since that is the type that must
+            # be used in the view map, since that is the type that might
+            # be *referenced in the definition*.
+            ptr = typegen.ptrcls_from_ptrref(rptr.ptrref, ctx=ctx)
+            assert isinstance(ptr, s_pointers.Pointer)
+            ptr = ptr.maybe_get_topmost_concrete_base(ctx.env.schema) or ptr
+            src = ptr.get_source(ctx.env.schema)
 
-            remapped_source = new_set_from_set(
-                rptr.source,
-                rptr=rptr.source.rptr,
-                ctx=ctx,
-            )
-            key = inner_path_id.strip_namespace(inner_path_id.namespace)
-            subctx.view_map[key] = ((inner_path_id, remapped_source),)
+            # If the source is an abstract pointer, then we don't have
+            # a full path to bind in the computed. Otherwise use a
+            # path derived from the pointer source.
+            if not (
+                isinstance(src, s_pointers.Pointer)
+                and src.generic(ctx.env.schema)
+            ):
+                inner_path_id = not_none(irast.PathId.from_pointer(
+                    ctx.env.schema, ptr, namespace=subctx.path_id_namespace,
+                ).src_path())
+                remapped_source = new_set_from_set(
+                    rptr.source, rptr=rptr.source.rptr, ctx=ctx
+                )
+                update_view_map(inner_path_id, remapped_source, ctx=subctx)
 
             yield subctx
 

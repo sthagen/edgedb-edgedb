@@ -1284,6 +1284,22 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
                 '''
             )
 
+    async def test_edgeql_props_back_08(self):
+        await self.assert_query_result(
+            r'''
+            select Card { name, z := .<deck[IS Bot] { name, x := @count }}
+            filter .name = 'Dragon';
+            ''',
+            [
+                {
+                    "name": "Dragon",
+                    "z": tb.bag([
+                        {"x": 1, "name": "Dave"},
+                    ])
+                }
+            ]
+        )
+
     async def test_edgeql_props_intersect_01(self):
         await self.assert_query_result(
             r'''
@@ -1338,3 +1354,23 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
                     insert Src { l := assert_single(Tgt { @y := "..." }) };
                 '''
             )
+
+    async def test_edgeql_props_tuples_01(self):
+        await self.con.execute(r'''
+            create type Org;
+            create type Foo {
+                create multi link orgs -> Org {
+                    create property roles -> tuple<role1: bool, role2: bool>;
+                }
+            };
+            insert Org;
+            insert Foo { orgs := (select Org {
+                @roles := (role1 := true, role2 := false) }) };
+        ''')
+
+        await self.assert_query_result(
+            '''
+            select Foo.orgs@roles.role1;
+            ''',
+            [True],
+        )

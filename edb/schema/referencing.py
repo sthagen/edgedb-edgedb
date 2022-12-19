@@ -416,7 +416,7 @@ class ReferencedObjectCommandBase(sd.QualifiedObjectCommand[ReferencedT]):
         be the context of the `create/alter/etc type` command.
         """
         ctxcls = cls.get_referrer_context_class()
-        return context.get(ctxcls)  # type: ignore
+        return context.get(ctxcls)
 
     @classmethod
     def get_referrer_context_or_die(
@@ -1459,7 +1459,13 @@ class DeleteReferencedInheritingObject(
                     details=f'{vn} is inherited from:\n- {pnames}'
                 )
 
-        for child in referrer.children(schema):
+        # Sort the children by reverse inheritance order amongst them.
+        # So if we are T and have children A and B and A <: B, we want to
+        # process A first, since we need to rebase it away from T, and then
+        # dropping A will also drop B.
+        for child in reversed(
+            sd.sort_by_inheritance(schema, referrer.children(schema))
+        ):
             assert isinstance(child, so.QualifiedObject)
             child_coll = child.get_field_value(schema, refdict.attr)
             fq_refname_in_child = self._classname_from_name(
