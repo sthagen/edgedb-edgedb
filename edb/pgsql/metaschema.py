@@ -5015,16 +5015,16 @@ def _generate_schema_alias_view(
     )
 
 
-def _generate_sql_information_schema() -> List[dbops.View]:
-    sql_ident = 'information_schema.sql_identifier'
-    sql_str = 'information_schema.character_data'
-    sql_bool = 'information_schema.yes_or_no'
-    sql_card = 'information_schema.cardinal_number'
-    tables_and_columns = [
-        dbops.View(
-            name=('edgedbsql', 'tables'),
-            query=(
-                f'''
+def _generate_sql_information_schema() -> List[dbops.Command]:
+
+    system_columns = ['tableoid', 'xmin', 'cmin', 'xmax', 'cmax', 'ctid']
+
+    # A helper view that contains all data tables we expose over SQL, excluding
+    # introspection tables.
+    # It contains table & schema names and associated module id.
+    virtual_tables = dbops.View(
+        name=('edgedbsql', 'virtual_tables'),
+        query='''
         WITH obj_ty AS (
             SELECT
                 id,
@@ -5032,11 +5032,12 @@ def _generate_sql_information_schema() -> List[dbops.View]:
                     WHEN 'default' THEN 'public'
                     ELSE SPLIT_PART(name, '::', 1)
                 END AS schema_name,
+                SPLIT_PART(name, '::', 1) AS module_name,
                 SPLIT_PART(name, '::', 2) AS table_name
             FROM edgedb."_SchemaObjectType"
             WHERE internal IS NOT TRUE
         ),
-        tables (id, schema_name, table_name) AS ((
+        all_tables (id, schema_name, module_name, table_name) AS ((
             SELECT * FROM obj_ty
         ) UNION ALL (
             WITH qualified_links AS (
@@ -5049,35 +5050,74 @@ def _generate_sql_information_schema() -> List[dbops.View]:
                 GROUP BY link.id, link.cardinality
                 HAVING link.cardinality = 'Many' OR COUNT(*) > 2
             )
-            SELECT link.id, obj_ty.schema_name,
+            SELECT link.id, obj_ty.schema_name, obj_ty.module_name,
                 CONCAT(obj_ty.table_name, '.', link.name) AS table_name
             FROM edgedb."_SchemaLink" link
             JOIN obj_ty ON obj_ty.id = link.source
             WHERE link.id IN (SELECT * FROM qualified_links)
         ) UNION ALL (
             -- multi properties
-            SELECT prop.id, obj_ty.schema_name,
+            SELECT prop.id, obj_ty.schema_name, obj_ty.module_name,
                 CONCAT(obj_ty.table_name, '.', prop.name) AS table_name
             FROM edgedb."_SchemaProperty" AS prop
             JOIN obj_ty ON obj_ty.id = prop.source
             WHERE prop.computable IS NOT TRUE
-              AND prop.internal IS NOT TRUE
-              AND prop.cardinality = 'Many'
+            AND prop.internal IS NOT TRUE
+            AND prop.cardinality = 'Many'
         ))
+        SELECT at.id, schema_name, table_name, sm.id as module_id
+        FROM all_tables at
+        JOIN edgedb."_SchemaModule" sm ON sm.name = at.module_name
+        WHERE schema_name not in ('cfg', 'sys', 'schema', 'std')
+        '''
+    )
+    # A few tables in here were causing problems, so let's hide them as an
+    # implementation detail.
+    # To be more specific:
+    # - following tables were missing from information_schema:
+    #   Link.properties, ObjectType.links, ObjectType.properties
+    # - even though introspection worked, I wasn't able to select from some
+    #   tables in cfg and sys
+
+    # For making up oids of schemas that represent modules
+    uuid_to_oid = dbops.Function(
+        name=('edgedbsql', 'uuid_to_oid'),
+        args=(
+            ('id', 'uuid'),
+        ),
+        returns=('oid',),
+        volatility='immutable',
+        text="""
+            SELECT (
+                ('x' || substring(id::text, 2, 7))::bit(28)::bigint
+                 + 40000)::oid;
+        """
+    )
+
+    sql_ident = 'information_schema.sql_identifier'
+    sql_str = 'information_schema.character_data'
+    sql_bool = 'information_schema.yes_or_no'
+    sql_card = 'information_schema.cardinal_number'
+    tables_and_columns = [
+        dbops.View(
+            name=('edgedbsql', 'tables'),
+            query=(
+                f'''
         SELECT
-            'postgres'::{sql_ident} AS table_catalog,
-            schema_name::{sql_ident} AS table_schema,
-            table_name::{sql_ident} AS table_name,
-            'BASE TABLE'::{sql_str} AS table_type,
-            NULL::{sql_ident} AS self_referencing_column_name,
-            NULL::{sql_str} AS reference_generation,
-            NULL::{sql_ident} AS user_defined_type_catalog,
-            NULL::{sql_ident} AS user_defined_type_schema,
-            NULL::{sql_ident} AS user_defined_type_name,
-            'NO'::{sql_bool} AS is_insertable_into,
-            'NO'::{sql_bool} AS is_typed,
-            NULL::{sql_str} AS commit_action
-        FROM tables
+            edgedb.get_current_database()::{sql_ident} AS table_catalog,
+            vt.schema_name::{sql_ident} AS table_schema,
+            vt.table_name::{sql_ident} AS table_name,
+            ist.table_type,
+            ist.self_referencing_column_name,
+            ist.reference_generation,
+            ist.user_defined_type_catalog,
+            ist.user_defined_type_schema,
+            ist.user_defined_type_name,
+            ist.is_insertable_into,
+            ist.is_typed,
+            ist.commit_action
+        FROM information_schema.tables ist
+        JOIN edgedbsql.virtual_tables vt ON vt.id::text = ist.table_name
             '''
             ),
         ),
@@ -5085,133 +5125,23 @@ def _generate_sql_information_schema() -> List[dbops.View]:
             name=('edgedbsql', 'columns'),
             query=(
                 f'''
-        WITH obj_ty AS (
-            SELECT id,
-                CASE SPLIT_PART(name, '::', 1)
-                    WHEN 'default' THEN 'public'
-                    ELSE SPLIT_PART(name, '::', 1) END AS schema_name,
-                SPLIT_PART(name, '::', 2) AS table_name
-            FROM edgedb."_SchemaObjectType"
-            WHERE internal IS NOT TRUE
-        ),
-        columns (schema_name, table_name, name, required, type_name) AS ((
-            -- pointers of objects
-            SELECT
-                obj_ty.schema_name, obj_ty.table_name, pointers.name,
-                pointers.required, pointers.type_name
-            FROM obj_ty
-            JOIN (( -- properties
-                SELECT prop.source, prop.name, COALESCE(prop.required, FALSE),
-                    ty.name
-                FROM edgedb."_SchemaProperty" AS prop
-                LEFT JOIN edgedb."_SchemaType" ty ON ty.id = prop.target
-                WHERE prop.internal IS NOT TRUE
-                    AND prop.computable IS NOT TRUE
-                    AND COALESCE(prop.cardinality = 'One', TRUE)
-            ) UNION ALL ( -- link ids
-                SELECT
-                    source, name || '_id', COALESCE(required, FALSE),
-                    'std::uuid'
-                FROM edgedb."_SchemaLink"
-                WHERE computable IS NOT TRUE
-                    AND name != '__type__'
-                    AND COALESCE(cardinality = 'One', TRUE)
-            )) pointers(source, name, required, type_name)
-                ON obj_ty.id = pointers.source
-        ) UNION ALL (
-            -- properties of links
-            WITH qualified_links AS (
-                -- multi links and links with at least one property
-                -- (besides source and target)
-                SELECT link.id
-                FROM edgedb."_SchemaLink" link
-                JOIN edgedb."_SchemaProperty" AS prop ON link.id = prop.source
-                WHERE prop.computable IS NOT TRUE AND prop.internal IS NOT TRUE
-                GROUP BY link.id, link.cardinality
-                HAVING link.cardinality = 'Many' OR COUNT(*) > 2
-            ),
-            links AS (
-                SELECT link.id, obj_ty.schema_name,
-                    CONCAT(obj_ty.table_name, '.', link.name) AS table_name
-                FROM edgedb."_SchemaLink" link
-                JOIN obj_ty ON obj_ty.id = link.source
-                WHERE link.id IN (SELECT * FROM qualified_links)
-            )
-            SELECT links.schema_name,
-                links.table_name,
-                prop.name,
-                COALESCE(prop.required, FALSE),
-                CASE prop.name
-                    WHEN 'source' THEN 'std::uuid'
-                    WHEN 'target' THEN 'std::uuid'
-                    ELSE ty.name
-                END
-            FROM edgedb."_SchemaProperty" AS prop
-            JOIN links ON links.id = prop.source
-            LEFT JOIN edgedb."_SchemaType" ty ON prop.target = ty.id
-            WHERE prop.computable IS NOT TRUE AND prop.internal IS NOT TRUE
-        ) UNION ALL (
-            -- multi properties
-            WITH prop_tables AS (
-                SELECT obj_ty.schema_name,
-                    CONCAT(obj_ty.table_name, '.', prop.name) AS table_name,
-                    ty.name as target_type
-                FROM edgedb."_SchemaProperty" AS prop
-                JOIN obj_ty ON obj_ty.id = prop.source
-                LEFT JOIN edgedb."_SchemaType" ty ON prop.target = ty.id
-                WHERE prop.computable IS NOT TRUE
-                  AND prop.internal IS NOT TRUE
-                  AND prop.cardinality = 'Many'
-            )
-            SELECT schema_name, table_name, col.name, TRUE,
-                CASE col.name
-                    WHEN 'source' THEN 'std::uuid'
-                    ELSE target_type
-                END
-            FROM prop_tables
-            CROSS JOIN (VALUES ('source'), ('target')) col(name)
-        ))
         SELECT
-            'postgres'::{sql_ident} AS table_catalog,
-            schema_name::{sql_ident} AS table_schema,
-            table_name::{sql_ident} AS table_name,
-            name::{sql_ident} AS column_name,
+            edgedb.get_current_database()::{sql_ident} AS table_catalog,
+            vt.schema_name::{sql_ident} AS table_schema,
+            vt.table_name::{sql_ident} AS table_name,
+            COALESCE(
+                sp.name || case when sl.id is not null then '_id' else '' end,
+                isc.column_name
+            )::{sql_ident} AS column_name,
             ROW_NUMBER() OVER (
-                PARTITION BY schema_name, table_name
-                ORDER BY CASE WHEN name = 'id' THEN 0 ELSE 1 END, name
-            )::{sql_card} AS ordinal_position,
-            NULL::{sql_str} AS column_default,
-            CASE
-                WHEN required THEN 'NO'
-                ELSE 'YES'
-            END::{sql_bool} AS is_nullable,
-            CASE type_name
-                WHEN 'std::anyreal' THEN 'double precision'
-                WHEN 'std::anyint' THEN 'bigint'
-                WHEN 'std::anyfloat' THEN 'double precision'
-                WHEN 'std::anynumeric' THEN 'character varying'
-                WHEN 'std::anyenum' THEN 'USER-DEFINED'
-                WHEN 'std::bool' THEN 'boolean'
-                WHEN 'std::bytes' THEN 'bytea'
-                WHEN 'std::uuid' THEN 'uuid'
-                WHEN 'std::str' THEN 'character varying'
-                WHEN 'std::json' THEN 'jsonb'
-                WHEN 'std::duration' THEN 'interval'
-                WHEN 'std::int16' THEN 'smallint'
-                WHEN 'std::int32' THEN 'integer'
-                WHEN 'std::int64' THEN 'bigint'
-                WHEN 'std::float32' THEN 'real'
-                WHEN 'std::float64' THEN 'double precision'
-                WHEN 'std::decimal' THEN 'numeric'
-                WHEN 'std::JsonEmpty' THEN 'jsonb'
-                WHEN 'std::bigint' THEN 'USER-DEFINED'
-                WHEN 'cal::local_datetime' THEN 'USER-DEFINED'
-                WHEN 'cal::local_date' THEN 'USER-DEFINED'
-                WHEN 'cal::local_time' THEN 'USER-DEFINED'
-                WHEN 'cal::relative_duration' THEN 'USER-DEFINED'
-                WHEN 'cal::date_duration' THEN 'USER-DEFINED'
-                ELSE 'USER-DEFINED'
-            END::{sql_str} AS data_type,
+                PARTITION BY vt.schema_name, vt.table_name
+                ORDER BY
+                    CASE WHEN isc.column_name = 'id' THEN 0 ELSE 1 END,
+                    COALESCE(sp.name, isc.column_name)
+            ) AS ordinal_position,
+            isc.column_default,
+            isc.is_nullable,
+            isc.data_type,
             NULL::{sql_card} AS character_maximum_length,
             NULL::{sql_card} AS character_octet_length,
             NULL::{sql_card} AS numeric_precision,
@@ -5229,7 +5159,7 @@ def _generate_sql_information_schema() -> List[dbops.View]:
             NULL::{sql_ident} AS domain_catalog,
             NULL::{sql_ident} AS domain_schema,
             NULL::{sql_ident} AS domain_name,
-            'postgres'::{sql_ident} AS udt_catalog,
+            edgedb.get_current_database()::{sql_ident} AS udt_catalog,
             'pg_catalog'::{sql_ident} AS udt_schema,
             NULL::{sql_ident} AS udt_name,
             NULL::{sql_ident} AS scope_catalog,
@@ -5248,7 +5178,11 @@ def _generate_sql_information_schema() -> List[dbops.View]:
             'NEVER'::{sql_str} AS is_generated,
             NULL::{sql_str} AS generation_expression,
             'YES'::{sql_bool} AS is_updatable
-        FROM columns
+        FROM information_schema.columns isc
+        JOIN edgedbsql.virtual_tables vt ON vt.id::text = isc.table_name
+        LEFT JOIN edgedb."_SchemaPointer" sp ON sp.id::text = isc.column_name
+        LEFT JOIN edgedb."_SchemaLink" sl ON sl.id::text = isc.column_name
+        WHERE column_name != '__type__'
             '''
             ),
         ),
@@ -5258,16 +5192,96 @@ def _generate_sql_information_schema() -> List[dbops.View]:
         dbops.View(
             name=("edgedbsql", "pg_namespace"),
             query="""
-        SELECT * FROM pg_namespace WHERE nspname IN ('pg_catalog', 'pg_toast')
+        SELECT oid, nspname, nspowner, nspacl,
+            tableoid, xmin, cmin, xmax, cmax, ctid
+        FROM pg_namespace
+        WHERE nspname IN ('pg_catalog', 'pg_toast', 'information_schema')
+        UNION ALL
+        SELECT edgedbsql.uuid_to_oid(t.module_id), t.schema_name, 10, NULL,
+            NULL, NULL, NULL, NULL, NULL, NULL
+        FROM (
+            SELECT DISTINCT schema_name, module_id
+            FROM edgedbsql.virtual_tables
+        ) t
         """,
         ),
         dbops.View(
             name=("edgedbsql", "pg_type"),
             query="""
-        SELECT pg_type.*
-        FROM pg_type
-        JOIN pg_namespace pn ON pg_type.typnamespace = pn.oid
-        WHERE nspname IN ('pg_catalog', 'pg_toast')
+        SELECT
+            pt.oid,
+            pt.typname,
+            pt.typnamespace,
+            {0},
+            pt.tableoid, pt.xmin, pt.cmin, pt.xmax, pt.cmax, pt.ctid
+        FROM pg_type pt
+        JOIN pg_namespace pn ON pt.typnamespace = pn.oid
+        WHERE nspname IN ('pg_catalog', 'pg_toast', 'information_schema')
+        UNION ALL
+        SELECT pt.oid,
+            vt.table_name,
+            edgedbsql.uuid_to_oid(vt.module_id) as typnamespace,
+            {0},
+            pt.tableoid, pt.xmin, pt.cmin, pt.xmax, pt.cmax, pt.ctid
+        FROM pg_type pt
+        join edgedbsql.virtual_tables vt ON vt.id::text = pt.typname
+        """.format(
+                ",".join(
+                    f"pt.{col}"
+                    for col, _ in sql_introspection.PG_CATALOG["pg_type"][3:]
+                )
+            ),
+        ),
+        dbops.View(
+            name=("edgedbsql", "pg_class"),
+            query="""
+        SELECT pc.*, pc.tableoid, pc.xmin, pc.cmin, pc.xmax, pc.cmax, pc.ctid
+        FROM pg_class pc
+        JOIN pg_namespace pn ON pc.relnamespace = pn.oid
+        WHERE nspname IN ('pg_catalog', 'pg_toast', 'information_schema')
+        UNION ALL
+        SELECT
+            oid,
+            vt.table_name as relname,
+            edgedbsql.uuid_to_oid(vt.module_id) as relnamespace,
+            reltype,
+            reloftype,
+            relowner,
+            relam,
+            relfilenode,
+            reltablespace,
+            relpages,
+            reltuples,
+            relallvisible,
+            reltoastrelid,
+            relhasindex,
+            relisshared,
+            relpersistence,
+            relkind,
+            relnatts,
+            relchecks,
+            relhasrules,
+            relhastriggers,
+            relhassubclass,
+            relrowsecurity,
+            relforcerowsecurity,
+            relispopulated,
+            relreplident,
+            relispartition,
+            relrewrite,
+            relfrozenxid,
+            relminmxid,
+            relacl,
+            reloptions,
+            relpartbound,
+            pc.tableoid,
+            pc.xmin,
+            pc.cmin,
+            pc.xmax,
+            pc.cmax,
+            pc.ctid
+        FROM pg_class pc
+        JOIN edgedbsql.virtual_tables vt ON vt.id::text = pc.relname
         """,
         ),
         dbops.View(
@@ -5297,24 +5311,144 @@ def _generate_sql_information_schema() -> List[dbops.View]:
             attacl,
             attoptions,
             attfdwoptions,
-            null::int[] as attmissingval
-        FROM pg_attribute
-        JOIN pg_type pt ON pt.oid = pg_attribute.atttypid
-        JOIN pg_namespace pn ON pt.typnamespace = pn.oid
-        WHERE nspname IN ('pg_catalog', 'pg_toast')
+            null::int[] as attmissingval,
+            pa.tableoid,
+            pa.xmin,
+            pa.cmin,
+            pa.xmax,
+            pa.cmax,
+            pa.ctid
+        FROM pg_attribute pa
+        JOIN pg_class pc ON pa.atttypid = pc.oid
+        JOIN pg_namespace pn ON pc.relnamespace = pn.oid
+        WHERE nspname IN ('pg_catalog', 'pg_toast', 'information_schema')
+        UNION ALL
+        SELECT attrelid,
+            COALESCE(
+                sp.name || case when sl.id is not null then '_id' else '' end,
+                pa.attname
+            ) AS attname,
+            atttypid,
+            attstattarget,
+            attlen,
+            attnum,
+            attndims,
+            attcacheoff,
+            atttypmod,
+            attbyval,
+            attstorage,
+            attalign,
+            attnotnull,
+            atthasdef,
+            atthasmissing,
+            attidentity,
+            attgenerated,
+            attisdropped,
+            attislocal,
+            attinhcount,
+            attcollation,
+            attacl,
+            attoptions,
+            attfdwoptions,
+            null::int[] as attmissingval,
+            pa.tableoid,
+            pa.xmin,
+            pa.cmin,
+            pa.xmax,
+            pa.cmax,
+            pa.ctid
+        FROM pg_attribute pa
+        JOIN pg_class pc ON pc.oid = pa.attrelid
+        JOIN edgedbsql.virtual_tables vt ON vt.id::text = pc.relname
+        LEFT JOIN edgedb."_SchemaPointer" sp ON sp.id::text = pa.attname
+        LEFT JOIN edgedb."_SchemaLink" sl ON sl.id::text = pa.attname
+        WHERE pa.attname NOT IN ('__type__')
         """,
         ),
         dbops.View(
             name=("edgedbsql", "pg_range"),
             query="""
-        SELECT pg_range.*
-        FROM pg_range
-        JOIN pg_type pt ON pt.oid = pg_range.rngtypid
+        SELECT pr.*, pr.tableoid, pr.xmin, pr.cmin, pr.xmax, pr.cmax, pr.ctid
+        FROM pg_range pr
+        JOIN pg_type pt ON pt.oid = pr.rngtypid
         JOIN pg_namespace pn ON pt.typnamespace = pn.oid
-        WHERE nspname IN ('pg_catalog', 'pg_toast')
+        WHERE nspname IN ('pg_catalog', 'pg_toast', 'information_schema')
         """,
         ),
     ]
+
+    def construct_pg_view(table_name: str, columns: List[str]) -> dbops.View:
+        if table_name in (
+            'pg_aggregate',
+            'pg_am',
+            'pg_amop',
+            'pg_amproc',
+            'pg_attrdef',
+            'pg_attribute',
+            'pg_auth_members',
+            'pg_authid',
+            'pg_cast',
+            'pg_class',
+            'pg_collation',
+            'pg_constraint',
+            'pg_conversion',
+            'pg_database',
+            'pg_db_role_setting',
+            'pg_default_acl',
+            'pg_depend',
+            'pg_description',
+            'pg_enum',
+            'pg_event_trigger',
+            'pg_extension',
+            'pg_foreign_data_wrapper',
+            'pg_foreign_server',
+            'pg_foreign_table',
+            'pg_index',
+            'pg_inherits',
+            'pg_init_privs',
+            'pg_language',
+            'pg_largeobject',
+            'pg_largeobject_metadata',
+            'pg_namespace',
+            'pg_opclass',
+            'pg_operator',
+            'pg_opfamily',
+            'pg_partitioned_table',
+            'pg_policy',
+            'pg_proc',
+            'pg_publication',
+            'pg_publication_rel',
+            'pg_range',
+            'pg_replication_origin',
+            'pg_rewrite',
+            'pg_seclabel',
+            'pg_sequence',
+            'pg_shdepend',
+            'pg_shdescription',
+            'pg_shseclabel',
+            'pg_statistic',
+            'pg_statistic_ext',
+            'pg_statistic_ext_data',
+            'pg_subscription',
+            'pg_subscription_rel',
+            'pg_tablespace',
+            'pg_transform',
+            'pg_trigger',
+            'pg_ts_config',
+            'pg_ts_config_map',
+            'pg_ts_dict',
+            'pg_ts_parser',
+            'pg_ts_template',
+            'pg_type',
+            'pg_user_mapping',
+        ):
+            columns = list(columns) + system_columns
+
+        columns_sql = ','.join('o.' + c for c in columns)
+        return dbops.View(
+            name=("edgedbsql", table_name),
+            query=f"SELECT {columns_sql} FROM pg_catalog.{table_name} o",
+        )
 
     # We expose most of the views as empty tables, just to prevent errors when
     # the tools do introspection.
@@ -5322,7 +5456,7 @@ def _generate_sql_information_schema() -> List[dbops.View]:
     # views that expose the actual data.
     # I've been cautious about exposing too much data, for example limiting
     # pg_type to pg_catalog and pg_toast namespaces.
-    return tables_and_columns + [
+    views = [virtual_tables] + tables_and_columns + [
         dbops.View(
             name=("edgedbsql", table_name),
             query="SELECT {} LIMIT 0".format(
@@ -5333,22 +5467,32 @@ def _generate_sql_information_schema() -> List[dbops.View]:
             ),
         )
         for table_name, columns in sql_introspection.INFORMATION_SCHEMA.items()
-        if table_name not in ["tables", "columns"]
+        if table_name not in ['tables', 'columns']
     ] + pg_catalog_views + [
-        dbops.View(
-            name=("edgedbsql", table_name),
-            query="SELECT {} LIMIT 0".format(
-                ",".join(
-                    f'NULL::{type or "text"} AS {name}'
-                    for name, type in columns
-                )
-            ),
-        )
+        construct_pg_view(table_name, [c for c, _ in columns])
         for table_name, columns in sql_introspection.PG_CATALOG.items()
         if table_name not in [
-            "pg_type", "pg_attribute", "pg_namespace", "pg_range"
+            'pg_type',
+            'pg_attribute',
+            'pg_namespace',
+            'pg_range',
+            'pg_class',
+
+            # Some tables contain abstract columns (i.e. anyarray) so they
+            # cannot be created into a view. So let's just hide these tables.
+            'pg_pltemplate',
+            'pg_stats',
+            'pg_stats_ext_exprs',
+            'pg_statistic',
+            'pg_statistic_ext',
+            'pg_statistic_ext_data',
         ]
     ]
+
+    return (
+        [dbops.CreateFunction(uuid_to_oid)]
+        + [dbops.CreateView(view) for view in views]
+    )
 
 
 def get_support_views(
@@ -5433,8 +5577,7 @@ def get_support_views(
     for alias_view in sys_alias_views:
         commands.add_command(dbops.CreateView(alias_view, or_replace=True))
 
-    for view in _generate_sql_information_schema():
-        commands.add_command(dbops.CreateView(view, or_replace=True))
+    commands.add_commands(_generate_sql_information_schema())
 
     return commands
 

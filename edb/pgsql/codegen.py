@@ -665,7 +665,7 @@ class SQLSourceGenerator(codegen.SourceGenerator):
         self.write(node.val)
 
     def visit_BooleanConstant(self, node: pgast.BooleanConstant) -> None:
-        self.write(node.val)
+        self.write('TRUE' if node.val else 'FALSE')
 
     def visit_StringConstant(self, node: pgast.StringConstant) -> None:
         self.write(common.quote_literal(node.val))
@@ -871,8 +871,7 @@ class SQLSourceGenerator(codegen.SourceGenerator):
 
     def visit_CollateClause(self, node: pgast.CollateClause) -> None:
         self.visit(node.arg)
-        self.write(' COLLATE ')
-        self.visit(node.collname)
+        self.write(f' COLLATE {node.collname}')
 
     def visit_CoalesceExpr(self, node: pgast.CoalesceExpr) -> None:
         self.write('COALESCE(')

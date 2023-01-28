@@ -229,7 +229,7 @@ def get_set_rvar(
             null_query = rvars.main.rvar.query
             assert isinstance(
                 null_query, (pgast.SelectStmt, pgast.NullRelation))
-            null_query.where_clause = pgast.BooleanConstant(val='FALSE')
+            null_query.where_clause = pgast.BooleanConstant(val=False)
 
         result_rvar = _include_rvars(rvars, scope_stmt=scope_stmt, ctx=subctx)
         for aspect in rvars.main.aspects:
@@ -1270,7 +1270,10 @@ def process_set_as_subquery(
         semi_join = False
 
         if ir_source is not None:
-            if ir_source.path_id != ctx.current_insert_path_id:
+            if (
+                ir_source.path_id != ctx.current_insert_path_id
+                and not irutils.is_trivial_free_object(ir_source)
+            ):
                 # This is a computable pointer.  In order to ensure that
                 # the volatile functions in the pointer expression are called
                 # the necessary number of times, we must inject a
@@ -1280,6 +1283,17 @@ def process_set_as_subquery(
                 # If the source is an insert that we are in the middle
                 # of doing, we don't have a volatility ref to add, so
                 # skip it based on the current_insert_path_id check.
+
+                # Note also that we skip this when the source is a
+                # trivial free object reference. A trivial free object
+                # reference is always executed exactly once (if there
+                # is an outer iterator of some kind, we'll pick up
+                # *that* volatility ref) and, unlike other shapes, may
+                # contain DML. We disable the volatility ref for
+                # trival free objects then both as a minor
+                # optimization and to avoid it interfering with DML in
+                # the object (since the volatility ref would not be
+                # visible in DML CTEs).
                 path_id = ir_source.path_id
                 newctx.volatility_ref += (
                     lambda _stmt, xctx: relctx.maybe_get_path_var(
@@ -1474,7 +1488,7 @@ def process_set_as_membership_expr(
             # A NULL argument to the array variant will produce NULL, so we
             # need to coalesce if that is possible.
             if needs_coalesce:
-                empty_val = str(negated).upper()
+                empty_val = negated
                 set_expr = pgast.CoalesceExpr(args=[
                     set_expr, pgast.BooleanConstant(val=empty_val)])
 

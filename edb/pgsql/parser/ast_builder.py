@@ -505,6 +505,7 @@ def _build_base_expr(node: Node, c: Context) -> pgast.BaseExpr:
             "ParamRef": _build_param_ref,
             "SetToDefault": _build_keyword("DEFAULT"),
             "SQLValueFunction": _build_sql_value_function,
+            "CollateClause": _build_collate_clause,
         },
         [_build_base_range_var, _build_indirection_op],  # type: ignore
     )
@@ -582,6 +583,14 @@ def _build_keyword(name: str) -> Builder[pgast.Keyword]:
 
 def _build_param_ref(n: Node, c: Context) -> pgast.ParamRef:
     return pgast.ParamRef(number=n["number"], context=_build_context(n, c))
+
+
+def _build_collate_clause(n: Node, c: Context) -> pgast.CollateClause:
+    return pgast.CollateClause(
+        arg=_build_base_expr(n['arg'], c),
+        collname='.'.join(_list(n, c, 'collname', _build_str)),
+        context=_build_context(n, c),
+    )
 
 
 def _build_sql_value_function(n: Node, c: Context) -> pgast.SQLValueFunction:
@@ -843,7 +852,45 @@ def _build_array_expr(n: Node, c: Context) -> pgast.ArrayExpr:
 
 
 def _build_a_expr(n: Node, c: Context) -> pgast.BaseExpr:
-    name = _build_str(n["name"][0], c)
+    names: List[str] = _list(n, c, 'name', _build_str)
+    if names[0] == 'pg_catalog':
+        names.pop(0)
+    name = names.pop(0)
+
+    {
+        'A_Expr': {
+            'kind': 'AEXPR_OP',
+            'name': [
+                {'String': {'str': 'pg_catalog'}},
+                {'String': {'str': '~'}},
+            ],
+            'lexpr': {
+                'ColumnRef': {
+                    'fields': [
+                        {'String': {'str': 'c'}},
+                        {'String': {'str': 'relname'}},
+                    ],
+                    'location': 224,
+                }
+            },
+            'rexpr': {
+                'CollateClause': {
+                    'arg': {
+                        'A_Const': {
+                            'val': {'String': {'str': '^(user)$'}},
+                            'location': 257,
+                        }
+                    },
+                    'collname': [
+                        {'String': {'str': 'pg_catalog'}},
+                        {'String': {'str': 'default'}},
+                    ],
+                    'location': 268,
+                }
+            },
+            'location': 234,
+        }
+    }
 
     if n["kind"] == "AEXPR_OP":
         pass
@@ -1031,10 +1078,19 @@ def _build_on_conflict(n: Node, c: Context) -> pgast.OnConflictClause:
     return pgast.OnConflictClause(
         action=_build_str(n["action"], c),
         infer=_maybe(n, c, "infer", _build_infer_clause),
-        target_list=_build_targets(n, c, "targetList"),
+        target_list=_build_on_conflict_targets(n, c, "targetList"),
         where=_maybe(n, c, "where", _build_base_expr),
         context=_build_context(n, c),
     )
+
+
+def _build_on_conflict_targets(
+    n: Node, c: Context, key: str
+) -> Optional[List[pgast.InsertTarget | pgast.MultiAssignRef]]:
+    if _probe(n, [key, 0, "ResTarget", "val", "MultiAssignRef"]):
+        return [_build_multi_assign_ref(n[key], c)]
+    else:
+        return _maybe_list(n, c, key, _build_insert_target)
 
 
 def _build_star(_n: Node, _c: Context) -> pgast.Star | str:
