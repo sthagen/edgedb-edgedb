@@ -254,7 +254,7 @@ class Anchor(Expr):
 
 
 class SpecialAnchor(Anchor):
-    __abstract_node__ = True
+    pass
 
 
 class Source(SpecialAnchor):  # __source__
@@ -1271,6 +1271,51 @@ class DropAccessPolicy(DropObject, AccessPolicyCommand):
     pass
 
 
+class TriggerCommand(ObjectDDL):
+
+    __abstract_node__ = True
+    object_class: qltypes.SchemaObjectClass = (
+        qltypes.SchemaObjectClass.TRIGGER)
+
+
+class CreateTrigger(CreateObject, TriggerCommand):
+    timing: qltypes.TriggerTiming
+    kinds: typing.List[qltypes.TriggerKind]
+    scope: qltypes.TriggerScope
+    expr: Expr
+
+
+class AlterTrigger(AlterObject, TriggerCommand):
+    pass
+
+
+class DropTrigger(DropObject, TriggerCommand):
+    pass
+
+
+class RewriteCommand(ObjectDDL):
+
+    __abstract_node__ = True
+    object_class: qltypes.SchemaObjectClass = (
+        qltypes.SchemaObjectClass.REWRITE
+    )
+
+
+class CreateRewrite(CreateObject, RewriteCommand):
+    kinds: typing.List[qltypes.RewriteKind]
+    expr: Expr
+
+
+class AlterRewrite(AlterObject, RewriteCommand):
+    kinds: typing.List[qltypes.RewriteKind]
+    pass
+
+
+class DropRewrite(DropObject, RewriteCommand):
+    kinds: typing.List[qltypes.RewriteKind]
+    pass
+
+
 class Language(s_enum.StrEnum):
     SQL = 'SQL'
     EdgeQL = 'EDGEQL'
@@ -1426,7 +1471,7 @@ class ModuleDeclaration(SDL):
     # The 'name' is treated same as in CreateModule, for consistency,
     # since this declaration also implies creating a module.
     name: ObjectRef
-    declarations: typing.List[DDL]
+    declarations: typing.List[typing.Union[NamedDDL, ModuleDeclaration]]
 
 
 class Schema(SDL):

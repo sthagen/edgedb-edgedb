@@ -1405,6 +1405,65 @@ class DropConcreteIndexStmt(Nonterm):
 
 
 #
+# CREATE REWRITE
+#
+
+commands_block(
+    'CreateRewrite',
+    CreateAnnotationValueStmt,
+    SetFieldStmt,
+)
+
+
+class CreateRewriteStmt(Nonterm):
+    def reduce_CreateRewrite(self, *kids):
+        """%reduce
+            CREATE REWRITE RewriteKindList
+            USING ParenExpr
+            OptCreateRewriteCommandsBlock
+        """
+        _, _, kinds, _, expr, commands = kids
+        print(expr.val)
+        self.val = qlast.CreateRewrite(
+            kinds=kinds.val,
+            expr=expr.val,
+            commands=commands.val,
+        )
+
+
+commands_block(
+    'AlterRewrite',
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
+    DropAnnotationValueStmt,
+    SetFieldStmt,
+    ResetFieldStmt,
+    UsingStmt,
+    opt=False
+)
+
+
+class AlterRewriteStmt(Nonterm):
+    def reduce_AlterRewrite(self, _a, _r, kinds, commands):
+        r"""%reduce \
+            ALTER REWRITE RewriteKindList \
+            AlterRewriteCommandsBlock \
+        """
+        self.val = qlast.AlterRewrite(
+            kinds=kinds.val,
+            commands=commands.val,
+        )
+
+
+class DropRewriteStmt(Nonterm):
+    def reduce_DropRewrite(self, _d, _r, kinds):
+        r"""%reduce DROP REWRITE RewriteKindList"""
+        self.val = qlast.DropRewrite(
+            kinds=kinds.val
+        )
+
+
+#
 # CREATE PROPERTY
 #
 class CreatePropertyStmt(Nonterm):
@@ -1432,6 +1491,9 @@ commands_block(
     CreateAnnotationValueStmt,
     AlterAnnotationValueStmt,
     DropAnnotationValueStmt,
+    CreateRewriteStmt,
+    AlterRewriteStmt,
+    DropRewriteStmt,
     opt=False
 )
 
@@ -1481,7 +1543,8 @@ commands_block(
     SetRequiredInCreateStmt,
     CreateAnnotationValueStmt,
     AlterAnnotationValueStmt,
-    CreateConcreteConstraintStmt
+    CreateConcreteConstraintStmt,
+    CreateRewriteStmt,
 )
 
 
@@ -1647,6 +1710,9 @@ commands_block(
     CreateConcreteConstraintStmt,
     AlterConcreteConstraintStmt,
     DropConcreteConstraintStmt,
+    CreateRewriteStmt,
+    AlterRewriteStmt,
+    DropRewriteStmt,
     opt=False
 )
 
@@ -1689,6 +1755,7 @@ commands_block(
     CreateConcreteConstraintStmt,
     CreateConcretePropertyStmt,
     CreateConcreteIndexStmt,
+    CreateRewriteStmt,
 )
 
 
@@ -1728,6 +1795,9 @@ commands_block(
     CreateConcreteIndexStmt,
     AlterConcreteIndexStmt,
     DropConcreteIndexStmt,
+    CreateRewriteStmt,
+    AlterRewriteStmt,
+    DropRewriteStmt,
     opt=False
 )
 
@@ -1785,6 +1855,7 @@ commands_block(
     CreateConcreteIndexStmt,
     commondl.OnTargetDeleteStmt,
     commondl.OnSourceDeleteStmt,
+    CreateRewriteStmt,
 )
 
 
@@ -1881,6 +1952,9 @@ commands_block(
     commondl.OnSourceDeleteStmt,
     OnTargetDeleteResetStmt,
     OnSourceDeleteResetStmt,
+    CreateRewriteStmt,
+    AlterRewriteStmt,
+    DropRewriteStmt,
     opt=False
 )
 
@@ -1917,7 +1991,7 @@ class DropConcreteLinkStmt(Nonterm):
 
 
 #
-# CREATE GLOBAL
+# CREATE ACCESS POLICY
 #
 
 commands_block(
@@ -2022,6 +2096,73 @@ class DropAccessPolicyStmt(Nonterm):
 
 
 #
+# CREATE TRIGGER
+#
+
+commands_block(
+    'CreateTrigger',
+    CreateAnnotationValueStmt,
+    SetFieldStmt,
+)
+
+
+class CreateTriggerStmt(Nonterm):
+    def reduce_CreateTrigger(self, *kids):
+        """%reduce
+            CREATE TRIGGER UnqualifiedPointerName
+            TriggerTiming TriggerKindList
+            FOR TriggerScope
+            DO ParenExpr
+            OptCreateTriggerCommandsBlock
+        """
+        _, _, name, timing, kinds, _, scope, _, expr, commands = kids
+        self.val = qlast.CreateTrigger(
+            name=name.val,
+            timing=timing.val,
+            kinds=kinds.val,
+            scope=scope.val,
+            expr=expr.val,
+            commands=commands.val,
+        )
+
+
+# TODO: commands to change timing/kind/scope?
+commands_block(
+    'AlterTrigger',
+    CreateAnnotationValueStmt,
+    AlterAnnotationValueStmt,
+    DropAnnotationValueStmt,
+    RenameStmt,
+    UsingStmt,
+    SetFieldStmt,
+    ResetFieldStmt,
+    opt=False
+)
+
+
+class AlterTriggerStmt(Nonterm):
+    def reduce_AlterTrigger(self, *kids):
+        r"""%reduce \
+            ALTER TRIGGER UnqualifiedPointerName \
+            AlterTriggerCommandsBlock \
+        """
+        _, _, name, commands = kids
+        self.val = qlast.AlterTrigger(
+            name=name.val,
+            commands=commands.val,
+        )
+
+
+class DropTriggerStmt(Nonterm):
+    def reduce_DropTrigger(self, *kids):
+        r"""%reduce DROP TRIGGER UnqualifiedPointerName"""
+        _, _, name = kids
+        self.val = qlast.DropTrigger(
+            name=name.val
+        )
+
+
+#
 # CREATE TYPE
 #
 
@@ -2040,6 +2181,8 @@ commands_block(
     AlterConcreteIndexStmt,
     CreateAccessPolicyStmt,
     AlterAccessPolicyStmt,
+    CreateTriggerStmt,
+    AlterTriggerStmt,
 )
 
 
@@ -2097,6 +2240,9 @@ commands_block(
     CreateAccessPolicyStmt,
     AlterAccessPolicyStmt,
     DropAccessPolicyStmt,
+    CreateTriggerStmt,
+    AlterTriggerStmt,
+    DropTriggerStmt,
     opt=False
 )
 
@@ -2229,7 +2375,7 @@ class CreateModuleStmt(Nonterm):
     def reduce_CREATE_MODULE_ModuleName_OptIfNotExists_OptCreateCommandsBlock(
             self, *kids):
         self.val = qlast.CreateModule(
-            name=qlast.ObjectRef(module=None, name='.'.join(kids[2].val)),
+            name=qlast.ObjectRef(module=None, name='::'.join(kids[2].val)),
             create_if_not_exists=kids[3].val,
             commands=kids[4].val
         )
@@ -2242,7 +2388,7 @@ class AlterModuleStmt(Nonterm):
     def reduce_ALTER_MODULE_ModuleName_AlterCommandsBlock(
             self, *kids):
         self.val = qlast.AlterModule(
-            name=qlast.ObjectRef(module=None, name='.'.join(kids[2].val)),
+            name=qlast.ObjectRef(module=None, name='::'.join(kids[2].val)),
             commands=kids[3].val
         )
 
@@ -2253,7 +2399,7 @@ class AlterModuleStmt(Nonterm):
 class DropModuleStmt(Nonterm):
     def reduce_DROP_MODULE_ModuleName(self, *kids):
         self.val = qlast.DropModule(
-            name=qlast.ObjectRef(module=None, name='.'.join(kids[2].val))
+            name=qlast.ObjectRef(module=None, name='::'.join(kids[2].val))
         )
 
 

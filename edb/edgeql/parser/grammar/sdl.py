@@ -169,11 +169,6 @@ class SDLCommandBlock(Nonterm):
         self.val = stmts.val
 
 
-class DotName(Nonterm):
-    def reduce_ModuleName(self, *kids):
-        self.val = '.'.join(part for part in kids[0].val)
-
-
 class SDLProductionHelper:
     def _passthrough(self, *cmds):
         self.val = cmds[0].val
@@ -322,11 +317,7 @@ class ModuleDeclaration(Nonterm):
         # names and aren't nested module blocks.
         declarations = block.val
         for decl in declarations:
-            if isinstance(decl, qlast.ModuleDeclaration):
-                raise errors.EdgeQLSyntaxError(
-                    "nested module declaration is not allowed",
-                    context=decl.context)
-            elif isinstance(decl, qlast.ExtensionCommand):
+            if isinstance(decl, qlast.ExtensionCommand):
                 raise errors.EdgeQLSyntaxError(
                     "'using extension' cannot be used inside a module block",
                     context=decl.context)
@@ -342,7 +333,7 @@ class ModuleDeclaration(Nonterm):
 
         self.val = qlast.ModuleDeclaration(
             # mirror what we do in CREATE MODULE
-            name=qlast.ObjectRef(module=None, name=".".join(module_name.val)),
+            name=qlast.ObjectRef(module=None, name='::'.join(module_name.val)),
             declarations=declarations,
         )
 
@@ -685,6 +676,42 @@ class ConcreteIndexDeclarationShort(Nonterm, commondl.ProcessIndexMixin):
 
 
 #
+# Mutation rewrites
+#
+sdl_commands_block(
+    'CreateRewrite',
+    SetField,
+    SetAnnotation
+)
+
+
+class RewriteDeclarationBlock(Nonterm):
+    def reduce_CreateRewrite(self, _r, kinds, _u, expr, commands):
+        """%reduce
+            REWRITE RewriteKindList
+            USING ParenExpr
+            CreateRewriteSDLCommandsBlock
+        """
+        self.val = qlast.CreateRewrite(
+            kinds=kinds.val,
+            expr=expr.val,
+            commands=commands.val,
+        )
+
+
+class RewriteDeclarationShort(Nonterm):
+    def reduce_CreateRewrite(self, _r, kinds, _u, expr):
+        """%reduce
+            REWRITE RewriteKindList
+            USING ParenExpr
+        """
+        self.val = qlast.CreateRewrite(
+            kinds=kinds.val,
+            expr=expr.val,
+        )
+
+
+#
 # Properties
 #
 class PropertyDeclaration(Nonterm):
@@ -720,6 +747,8 @@ sdl_commands_block(
     SetAnnotation,
     ConcreteConstraintBlock,
     ConcreteConstraintShort,
+    RewriteDeclarationBlock,
+    RewriteDeclarationShort,
 )
 
 
@@ -895,6 +924,8 @@ sdl_commands_block(
     ConcretePropertyShort,
     ConcreteIndexDeclarationBlock,
     ConcreteIndexDeclarationShort,
+    RewriteDeclarationShort,
+    RewriteDeclarationBlock,
 )
 
 
@@ -938,6 +969,8 @@ sdl_commands_block(
     ConcreteIndexDeclarationShort,
     commondl.OnTargetDeleteStmt,
     commondl.OnSourceDeleteStmt,
+    RewriteDeclarationShort,
+    RewriteDeclarationBlock,
 )
 
 
@@ -1142,6 +1175,54 @@ class AccessPolicyDeclarationShort(Nonterm):
 
 
 #
+# Triggers
+#
+sdl_commands_block(
+    'CreateTrigger',
+    SetField,
+    SetAnnotation
+)
+
+
+class TriggerDeclarationBlock(Nonterm):
+    def reduce_CreateTrigger(self, *kids):
+        """%reduce
+            TRIGGER NodeName
+            TriggerTiming TriggerKindList
+            FOR TriggerScope
+            DO ParenExpr
+            CreateTriggerSDLCommandsBlock
+        """
+        _, name, timing, kinds, _, scope, _, expr, commands = kids
+        self.val = qlast.CreateTrigger(
+            name=name.val,
+            timing=timing.val,
+            kinds=kinds.val,
+            scope=scope.val,
+            expr=expr.val,
+            commands=commands.val,
+        )
+
+
+class TriggerDeclarationShort(Nonterm):
+    def reduce_CreateTrigger(self, *kids):
+        """%reduce
+            TRIGGER NodeName
+            TriggerTiming TriggerKindList
+            FOR TriggerScope
+            DO ParenExpr
+        """
+        _, name, timing, kinds, _, scope, _, expr = kids
+        self.val = qlast.CreateTrigger(
+            name=name.val,
+            timing=timing.val,
+            kinds=kinds.val,
+            scope=scope.val,
+            expr=expr.val,
+        )
+
+
+#
 # Object Types
 #
 
@@ -1159,6 +1240,8 @@ sdl_commands_block(
     ConcreteIndexDeclarationShort,
     AccessPolicyDeclarationBlock,
     AccessPolicyDeclarationShort,
+    TriggerDeclarationBlock,
+    TriggerDeclarationShort,
 )
 
 

@@ -704,7 +704,9 @@ class SQLSourceGenerator(codegen.SourceGenerator):
         self.write(common.qname(*node.name))
 
         self.write('(')
-        if node.agg_distinct:
+        if node.agg_star:
+            self.write("*")
+        elif node.agg_distinct:
             self.write('DISTINCT ')
         self.visit_list(node.args, newlines=False)
 
@@ -1057,6 +1059,21 @@ class SQLSourceGenerator(codegen.SourceGenerator):
 
         if node.with_no_data:
             self.write(' WITH NO DATA')
+
+    def visit_MinMaxExpr(self, node: pgast.MinMaxExpr) -> None:
+        self.write(node.op)
+        self.write('(')
+        self.visit_list(node.args)
+        self.write(')')
+
+    def visit_LockStmt(self, node: pgast.LockStmt) -> None:
+        self.write('LOCK TABLE ')
+        self.visit_list(node.relations)
+        self.write(' IN ')
+        self.write(node.mode)
+        self.write(' MODE')
+        if node.no_wait:
+            self.write(' NOWAIT')
 
 
 generate_source = SQLSourceGenerator.to_source

@@ -2633,29 +2633,43 @@ class LocalTimeInFunction(dbops.Function):
     """Cast text into time using ISO8601 spec."""
     text = r'''
         SELECT
-            CASE WHEN val !~ (
-                    '^\s*(' ||
-                        '(\d{2}(:\d{2}(:\d{2}(\.\d+)?)?)?|\d{2,6}(\.\d+)?)' ||
-                    ')\s*$'
-                )
+            CASE WHEN date_part('hour', x.t) = 24
             THEN
                 edgedb.raise(
                     NULL::time,
                     'invalid_datetime_format',
                     msg => (
-                        'invalid input syntax for type time: '
+                        'cal::local_time field value out of range: '
                         || quote_literal(val)
-                    ),
-                    detail => (
-                        '{"hint":"Please use ISO8601 format. Examples: '
-                        || '18:43:27 or 18:43 Alternatively '
-                        || '\"to_local_time\" function provides custom '
-                        || 'formatting options."}'
                     )
                 )
             ELSE
-                val::time
-            END;
+                x.t
+            END
+        FROM (
+            SELECT
+                CASE WHEN val !~ ('^\s*(' ||
+                        '(\d{2}(:\d{2}(:\d{2}(\.\d+)?)?)?|\d{2,6}(\.\d+)?)' ||
+                    ')\s*$')
+                THEN
+                    edgedb.raise(
+                        NULL::time,
+                        'invalid_datetime_format',
+                        msg => (
+                            'invalid input syntax for type time: '
+                            || quote_literal(val)
+                        ),
+                        detail => (
+                            '{"hint":"Please use ISO8601 format. Examples: '
+                            || '18:43:27 or 18:43 Alternatively '
+                            || '\"to_local_time\" function provides custom '
+                            || 'formatting options."}'
+                        )
+                    )
+                ELSE
+                    val::time
+                END as t
+        ) as x;
     '''
 
     def __init__(self) -> None:
@@ -5375,6 +5389,29 @@ def _generate_sql_information_schema() -> List[dbops.Command]:
         WHERE nspname IN ('pg_catalog', 'pg_toast', 'information_schema')
         """,
         ),
+        dbops.View(
+            name=("edgedbsql", "pg_database"),
+            query="""
+        SELECT
+            oid,
+            edgedb.get_current_database()::name as datname,
+            datdba,
+            encoding,
+            datcollate,
+            datctype,
+            datistemplate,
+            datallowconn,
+            datconnlimit,
+            datlastsysoid,
+            datfrozenxid,
+            datminmxid,
+            dattablespace,
+            datacl,
+            tableoid, xmin, cmin, xmax, cmax, ctid
+        FROM pg_database
+        WHERE datname LIKE '%_edgedb'
+        """,
+        ),
     ]
 
     def construct_pg_view(table_name: str, columns: List[str]) -> dbops.View:
@@ -5477,6 +5514,7 @@ def _generate_sql_information_schema() -> List[dbops.Command]:
             'pg_namespace',
             'pg_range',
             'pg_class',
+            'pg_database',
 
             # Some tables contain abstract columns (i.e. anyarray) so they
             # cannot be created into a view. So let's just hide these tables.

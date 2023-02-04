@@ -56,6 +56,7 @@ from edb.schema import pointers as s_pointers
 from edb.schema import pseudo as s_pseudo
 from edb.schema import roles as s_roles
 from edb.schema import sources as s_sources
+from edb.schema import triggers as s_triggers
 from edb.schema import types as s_types
 from edb.schema import version as s_ver
 from edb.schema import utils as s_utils
@@ -775,6 +776,45 @@ class AlterAccessPolicy(
 class DeleteAccessPolicy(
     AccessPolicyCommand,
     adapts=s_policies.DeleteAccessPolicy,
+):
+    pass
+
+
+class TriggerCommand(MetaCommand):
+    pass
+
+
+class CreateTrigger(
+    TriggerCommand,
+    adapts=s_triggers.CreateTrigger,
+):
+    pass
+
+
+class RenameTrigger(
+    TriggerCommand,
+    adapts=s_triggers.RenameTrigger,
+):
+    pass
+
+
+class RebaseTrigger(
+    TriggerCommand,
+    adapts=s_triggers.RebaseTrigger,
+):
+    pass
+
+
+class AlterTrigger(
+    TriggerCommand,
+    adapts=s_triggers.AlterTrigger,
+):
+    pass
+
+
+class DeleteTrigger(
+    TriggerCommand,
+    adapts=s_triggers.DeleteTrigger,
 ):
     pass
 
@@ -2890,10 +2930,21 @@ class CompositeMetaCommand(MetaCommand):
         ptrnames: Dict[sn.UnqualName, Tuple[str, Tuple[str, ...]]],
         pg_schema: Optional[str] = None,
     ) -> Optional[str]:
+
+        cols = []
+
+        if pg_schema not in ('edgedbss',):
+            cols.extend([
+                ('tableoid', 'tableoid', True),
+                ('xmin', 'xmin', True),
+                ('cmin', 'cmin', True),
+                ('xmax', 'xmax', True),
+                ('cmax', 'cmax', True),
+                ('ctid', 'ctid', True),
+            ])
+
         if isinstance(obj, s_sources.Source):
             ptrs = dict(obj.get_pointers(schema).items(schema))
-
-            cols = []
 
             for ptrname, (alias, pgtype) in ptrnames.items():
                 ptr = ptrs.get(ptrname)
@@ -2912,10 +2963,10 @@ class CompositeMetaCommand(MetaCommand):
                 else:
                     return None
         else:
-            cols = [
+            cols.extend(
                 (str(ptrname), alias, True)
                 for ptrname, (alias, _) in ptrnames.items()
-            ]
+            )
 
         tabname = common.get_backend_name(
             schema,

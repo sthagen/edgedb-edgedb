@@ -74,7 +74,9 @@ def param_to_str(ident: str) -> str:
 
 
 def module_to_str(module: str) -> str:
-    return '.'.join([ident_to_str(part) for part in module.split('.')])
+    return '::'.join([
+        any_ident_to_str(part) for part in module.split('::')
+    ])
 
 
 class EdgeQLSourceGeneratorError(errors.InternalServerError):
@@ -150,6 +152,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 f'No method to generate code for {node.__class__.__name__}')
 
     def _block_ws(self, change: int, newlines: bool = True) -> None:
+        """Block whitespace"""
         if newlines:
             self.indentation += change
             self.new_lines = 1
@@ -368,7 +371,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         self._write_keywords('GROUP')
         self._block_ws(1)
         if node.subject_alias:
-            self.write(any_ident_to_str(node.subject_alias), ' := ')
+            self.write(ident_to_str(node.subject_alias), ' := ')
         self.visit(node.subject)
         self._block_ws(-1)
         if node.using is not None:
@@ -418,7 +421,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             self.write(ident_to_str(node.alias))
             self._write_keywords(' AS ')
         self._write_keywords('MODULE ')
-        self.write(any_ident_to_str(node.module))
+        self.write(module_to_str(node.module))
 
     def visit_SortExpr(self, node: qlast.SortExpr) -> None:
         self.visit(node.path)
@@ -765,6 +768,9 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         self.write(ident_to_str(node.name))
 
     def visit_Anchor(self, node: qlast.Anchor) -> None:
+        self.write(node.name)
+
+    def visit_SpecialAnchor(self, node: qlast.SpecialAnchor) -> None:
         self.write(node.name)
 
     def visit_Subject(self, node: qlast.Subject) -> None:
@@ -1490,6 +1496,92 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
 
     def visit_DropAccessPolicy(self, node: qlast.DropAccessPolicy) -> None:
         self._visit_DropObject(node, 'ACCESS POLICY', unqualified=True)
+
+    def _format_trigger_kinds(self, kinds: List[qltypes.TriggerKind]) -> str:
+        # Canonicalize the order, since the schema loses track
+        kinds = [k for k in list(qltypes.TriggerKind) if k in kinds]
+        skinds = ', '.join(str(kind).lower() for kind in kinds)
+        return skinds
+
+    def visit_CreateTrigger(
+        self,
+        node: qlast.CreateTrigger
+    ) -> None:
+        def after_name() -> None:
+            self._block_ws(1)
+            self._write_keywords(str(node.timing) + ' ')
+            self._write_keywords(
+                self._format_trigger_kinds(node.kinds) + ' ')
+
+            self._block_ws(0)
+            self._write_keywords('FOR ' + str(node.scope) + ' ')
+
+            self._write_keywords('DO ')
+            self.write('(')
+            self.visit(node.expr)
+            self.write(')')
+
+        keywords = []
+        keywords.extend(['TRIGGER'])
+        self._visit_CreateObject(
+            node, *keywords, after_name=after_name, unqualified=True)
+        # This is left hanging from after_name, so that subcommands
+        # get double indented
+        self.indentation -= 1
+
+    def visit_AlterTrigger(self, node: qlast.AlterTrigger) -> None:
+        self._visit_AlterObject(node, 'TRIGGER', unqualified=True)
+
+    def visit_DropTrigger(self, node: qlast.DropTrigger) -> None:
+        self._visit_DropObject(node, 'TRIGGER', unqualified=True)
+
+    def _format_rewrite_kinds(self, kinds: List[qltypes.RewriteKind]) -> str:
+        # Canonicalize the order, since the schema loses track
+        kinds = [k for k in list(qltypes.RewriteKind) if k in kinds]
+        skinds = ', '.join(str(kind).lower() for kind in kinds)
+        return skinds
+
+    def visit_CreateRewrite(
+        self,
+        node: qlast.CreateRewrite
+    ) -> None:
+        def an() -> None:
+            self._block_ws(1)
+            self._write_keywords(self._format_rewrite_kinds(node.kinds) + ' ')
+
+            self._block_ws(0)
+
+            self._write_keywords('USING ')
+            self.write('(')
+            self.visit(node.expr)
+            self.write(')')
+
+        keywords = []
+        keywords.extend(['REWRITE'])
+        self._visit_CreateObject(
+            node, *keywords, after_name=an, unqualified=True, named=False
+        )
+        # This is left hanging from after_name, so that subcommands
+        # get double indented
+        self.indentation -= 1
+
+    def visit_AlterRewrite(self, node: qlast.AlterRewrite) -> None:
+        def an() -> None:
+            self._block_ws(1)
+            self._write_keywords(self._format_rewrite_kinds(node.kinds) + ' ')
+
+        self._visit_AlterObject(
+            node, 'REWRITE', after_name=an, unqualified=True, named=False
+        )
+
+    def visit_DropRewrite(self, node: qlast.DropRewrite) -> None:
+        def an() -> None:
+            self._block_ws(1)
+            self._write_keywords(self._format_rewrite_kinds(node.kinds) + ' ')
+
+        self._visit_DropObject(
+            node, 'REWRITE', after_name=an, unqualified=True, named=False
+        )
 
     def visit_CreateScalarType(self, node: qlast.CreateScalarType) -> None:
         keywords = []
