@@ -32,7 +32,6 @@ from . import quote as edgeql_quote
 from . import qltypes
 
 
-_module_name_re = re.compile(r'^(?!=\d)\w+(\.(?!=\d)\w+)*$')
 _BYTES_ESCAPE_RE = re.compile(b'[\\\'\x00-\x1f\x7e-\xff]')
 _NON_PRINTABLE_RE = re.compile(
     r'[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u0080-\u009F\n]')
@@ -57,25 +56,15 @@ def _bytes_escape(match: Match[bytes]) -> bytes:
         return b'\\x%02x' % char[0]
 
 
-def any_ident_to_str(ident: str) -> str:
-    if _module_name_re.match(ident):
-        return ident
-    else:
-        return ident_to_str(ident)
-
-
-def ident_to_str(ident: str, allow_num: bool=False) -> str:
-    return edgeql_quote.quote_ident(ident, allow_num=allow_num)
-
-
 def param_to_str(ident: str) -> str:
     return '$' + edgeql_quote.quote_ident(
         ident, allow_reserved=True, allow_num=True)
 
 
-def module_to_str(module: str) -> str:
+def ident_to_str(ident: str, allow_num: bool=False) -> str:
     return '::'.join([
-        any_ident_to_str(part) for part in module.split('::')
+        edgeql_quote.quote_ident(part, allow_num=allow_num)
+        for part in ident.split('::')
     ])
 
 
@@ -374,7 +363,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             self.write(ident_to_str(node.subject_alias), ' := ')
         self.visit(node.subject)
         self._block_ws(-1)
-        if node.using is not None:
+        if node.using:
             self._write_keywords('USING')
             self._block_ws(1)
             self.visit_list(node.using, newlines=False)
@@ -421,7 +410,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             self.write(ident_to_str(node.alias))
             self._write_keywords(' AS ')
         self._write_keywords('MODULE ')
-        self.write(module_to_str(node.module))
+        self.write(ident_to_str(node.module))
 
     def visit_SortExpr(self, node: qlast.SortExpr) -> None:
         self.visit(node.path)
@@ -916,7 +905,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         render_commands: bool = True,
         unqualified: bool = False,
         named: bool = True,
-        group_by_system_comment: bool = False
+        group_by_system_comment: bool = False,
     ) -> None:
         self._visit_aliases(node)
         if self.sdlmode:
@@ -951,7 +940,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         unqualified: bool = False,
         named: bool = True,
         ignored_cmds: Optional[AbstractSet[qlast.DDLOperation]] = None,
-        group_by_system_comment: bool = False
+        group_by_system_comment: bool = False,
     ) -> None:
         self._visit_aliases(node)
         if self.sdlmode:
@@ -986,7 +975,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         *object_keywords: str,
         unqualified: bool = False,
         after_name: Optional[Callable[[], None]] = None,
-        named: bool = True
+        named: bool = True,
     ) -> None:
         self._visit_aliases(node)
         self._write_keywords('DROP', *object_keywords)
@@ -1620,46 +1609,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         self,
         node: qlast.CreateConcreteProperty
     ) -> None:
-        keywords = []
-        if self.sdlmode and node.declared_overloaded:
-            keywords.append('OVERLOADED')
-            if node.is_required:
-                keywords.append('REQUIRED')
-        else:
-            if node.is_required is True:
-                keywords.append('REQUIRED')
-            elif node.is_required is False:
-                keywords.append('OPTIONAL')
-            # else: `is_required` is None
-        if node.cardinality:
-            keywords.append(node.cardinality.as_ptr_qual().upper())
-        keywords.append('PROPERTY')
-
-        pure_computable = (
-            len(node.commands) == 0
-            or (
-                len(node.commands) == 1
-                and isinstance(node.commands[0], qlast.SetField)
-                and node.commands[0].name == 'expr'
-                and not isinstance(node.target, qlast.TypeExpr)
-            )
-        )
-
-        def after_name() -> None:
-            self._ddl_visit_bases(node)
-            if node.target is not None:
-                if isinstance(node.target, qlast.TypeExpr):
-                    self.write(' -> ')
-                    self.visit(node.target)
-                elif pure_computable:
-                    # computable
-                    self.write(' := (')
-                    self.visit(node.target)
-                    self.write(')')
-
-        self._visit_CreateObject(
-            node, *keywords, after_name=after_name, unqualified=True,
-            render_commands=not pure_computable)
+        self.visit_CreateConcretePointer(node, kind='PROPERTY')
 
     def _process_AlterConcretePointer_for_SDL(
         self,
@@ -1731,9 +1681,10 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
     def visit_DropLink(self, node: qlast.DropLink) -> None:
         self._visit_DropObject(node, 'ABSTRACT LINK')
 
-    def visit_CreateConcreteLink(
+    def visit_CreateConcretePointer(
         self,
-        node: qlast.CreateConcreteLink
+        node: qlast.CreateConcretePointer,
+        kind: Optional[str],
     ) -> None:
         keywords = []
 
@@ -1749,7 +1700,8 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             # else: node.is_required is None
         if node.cardinality:
             keywords.append(node.cardinality.as_ptr_qual().upper())
-        keywords.append('LINK')
+        if kind:
+            keywords.append(kind)
 
         def after_name() -> None:
             self._ddl_visit_bases(node)
@@ -1776,6 +1728,18 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
         self._visit_CreateObject(
             node, *keywords, after_name=after_name, unqualified=True,
             render_commands=not pure_computable)
+
+    def visit_CreateConcreteUnknownPointer(
+        self,
+        node: qlast.CreateConcreteLink
+    ) -> None:
+        self.visit_CreateConcretePointer(node, kind=None)
+
+    def visit_CreateConcreteLink(
+        self,
+        node: qlast.CreateConcreteLink
+    ) -> None:
+        self.visit_CreateConcretePointer(node, kind='LINK')
 
     def visit_AlterConcreteLink(self, node: qlast.AlterConcreteLink) -> None:
         keywords = []
@@ -2353,10 +2317,10 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             self._write_keywords(' ALIAS ')
             self.write(ident_to_str(node.alias))
             self._write_keywords(' AS MODULE ')
-            self.write(node.module)
+            self.write(ident_to_str(node.module))
         else:
             self._write_keywords(' MODULE ')
-            self.write(node.module)
+            self.write(ident_to_str(node.module))
 
     def visit_SessionResetAllAliases(
         self,

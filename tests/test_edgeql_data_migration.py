@@ -10045,17 +10045,11 @@ class TestEdgeQLDataMigration(EdgeQLDataMigrationTestCase):
             '''
         )
 
-        async with self.assertRaisesRegexTx(
-            edgedb.SchemaError, "cannot include mutating statements"
-        ):
-            try:
-                await self.fast_forward_describe_migration(
-                    user_input=[
-                        'insert test::Organization { name := "default" }'
-                    ]
-                )
-            except Exception as e:
-                raise e.__cause__
+        await self.fast_forward_describe_migration(
+            user_input=[
+                'insert test::Organization { name := "default" }'
+            ]
+        )
 
     async def test_edgeql_migration_user_input_06(self):
         await self.migrate('''
@@ -11319,6 +11313,16 @@ class TestEdgeQLDataMigration(EdgeQLDataMigrationTestCase):
 
             abstract type Foo extending A, B;
             type Bar extending Foo;
+        """)
+
+    async def test_edgeql_migration_nested_backticks_01(self):
+        await self.migrate(r"""
+            module nested { type Test };
+        """)
+
+        await self.migrate(r"""
+            module nested { type Test };
+            module `back``ticked` { type Test };
         """)
 
 

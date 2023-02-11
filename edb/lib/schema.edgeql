@@ -58,6 +58,8 @@ CREATE SCALAR TYPE schema::TriggerKind
 CREATE SCALAR TYPE schema::TriggerScope
     EXTENDING enum<All, Each>;
 
+CREATE SCALAR TYPE schema::RewriteKind
+    EXTENDING enum<`Update`, `Insert`>;
 
 CREATE SCALAR TYPE schema::MigrationGeneratedBy
     EXTENDING enum<DevMode, DDLStatement>;
@@ -266,6 +268,10 @@ CREATE TYPE schema::Index
 {
     CREATE PROPERTY expr -> std::str;
     CREATE PROPERTY except_expr -> std::str;
+    CREATE MULTI LINK params EXTENDING schema::ordered -> schema::Parameter {
+        ON TARGET DELETE ALLOW;
+    };
+    CREATE PROPERTY kwargs -> array<tuple<name: str, expr: str>>;
 };
 
 
@@ -296,6 +302,11 @@ CREATE TYPE schema::AccessPolicy
 
 
 CREATE TYPE schema::Trigger
+    EXTENDING
+        schema::InheritingObject, schema::AnnotationSubject;
+
+
+CREATE TYPE schema::Rewrite
     EXTENDING
         schema::InheritingObject, schema::AnnotationSubject;
 
@@ -443,6 +454,11 @@ ALTER TYPE schema::Trigger {
   CREATE PROPERTY expr -> std::str;
 };
 
+ALTER TYPE schema::Rewrite {
+  CREATE REQUIRED LINK subject -> schema::Pointer;
+  CREATE REQUIRED PROPERTY kind -> schema::TriggerKind;
+  CREATE REQUIRED PROPERTY expr -> std::str;
+};
 
 CREATE TYPE schema::Link EXTENDING schema::Pointer, schema::Source;
 
@@ -454,7 +470,12 @@ ALTER TYPE schema::Pointer {
     CREATE LINK source -> schema::Source;
     CREATE LINK target -> schema::Type {
         ON TARGET DELETE DEFERRED RESTRICT;
-    }
+    };
+    CREATE MULTI LINK rewrites
+            EXTENDING schema::reference -> schema::Rewrite {
+        CREATE CONSTRAINT std::exclusive;
+        ON TARGET DELETE ALLOW;
+    };
 };
 
 

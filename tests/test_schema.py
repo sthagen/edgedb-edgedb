@@ -34,6 +34,7 @@ from edb.schema import ddl as s_ddl
 from edb.schema import links as s_links
 from edb.schema import name as s_name
 from edb.schema import objtypes as s_objtypes
+from edb.schema import properties as s_props
 
 from edb.testbase import lang as tb
 from edb.tools import test
@@ -532,6 +533,30 @@ class TestSchema(tb.BaseSchemaLoadTest):
     def test_schema_bad_type_15(self):
         """
             scalar type Foo;
+        """
+
+    @tb.must_fail(errors.InvalidDefinitionError,
+                  "index of object type 'test::Foo' was already declared")
+    def test_schema_bad_type_16(self):
+        """
+            type Foo {
+                property val -> str;
+                index on (.val);
+                index on (.val);
+            };
+        """
+
+    @tb.must_fail(errors.InvalidDefinitionError,
+                  "index 'fts::textsearch' of object type 'test::Foo' "
+                  "was already declared")
+    def test_schema_bad_type_17(self):
+        """
+            type Foo {
+                property val -> str;
+                index fts::textsearch(language:='enlgish') on (.val);
+                index fts::textsearch(language:='italian') on (.val);
+                index fts::textsearch(language:='enlgish') on (.val);
+            };
         """
 
     def test_schema_computable_cardinality_inference_01(self):
@@ -1485,7 +1510,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
             next(iter(obj.get_indexes(
                 schema).objects(schema))).get_verbosename(
                     schema, with_parent=True),
-            "index 'foo_7770702d' of object type 'test::Object1'",
+            "index of object type 'test::Object1'",
         )
 
     def test_schema_advanced_types(self):
@@ -3503,6 +3528,30 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         '''
 
         self._assert_migration_consistency(schema)
+
+    def test_schema_pointer_kind_infer_01(self):
+        tschema = r'''
+        type Bar;
+        scalar type scl extending str;
+        type Foo {
+            name: str;
+            foo: Foo;
+            bar: Bar;
+            or_: Foo | Bar;
+            array1: array<str>;
+            array2: array<scl>;
+        };
+        '''
+
+        schema = self._assert_migration_consistency(tschema)
+
+        obj = schema.get('default::Foo')
+        obj.getptr(schema, s_name.UnqualName('name'), type=s_props.Property)
+        obj.getptr(schema, s_name.UnqualName('array1'), type=s_props.Property)
+        obj.getptr(schema, s_name.UnqualName('array2'), type=s_props.Property)
+        obj.getptr(schema, s_name.UnqualName('foo'), type=s_links.Link)
+        obj.getptr(schema, s_name.UnqualName('bar'), type=s_links.Link)
+        obj.getptr(schema, s_name.UnqualName('or_'), type=s_links.Link)
 
     def test_schema_migrations_equivalence_01(self):
         self._assert_migration_equivalence([r"""
@@ -5909,7 +5958,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 property last_name -> str;
                 property name := .first_name ++ ' ' ++ .last_name;
                 # an index on a computable
-                index on (.name);
+                index fts::textsearch(language := 'english') on (.name);
             }
         """])
 

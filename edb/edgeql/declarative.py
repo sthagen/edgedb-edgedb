@@ -49,6 +49,7 @@ from edb.edgeql import tracer as qltracer
 
 from edb.schema import annos as s_anno
 from edb.schema import constraints as s_constr
+from edb.schema import indexes as s_indexes
 from edb.schema import links as s_links
 from edb.schema import name as s_name
 from edb.schema import objects as s_obj
@@ -236,8 +237,18 @@ def get_verbosename_from_fqname(
         ofobj, name = str(fq_name).split('@', 1)
         _, name = name.split('::')
         ofobj = f" of object type '{ofobj}'"
+    elif isinstance(traceobj, qltracer.ConcreteIndex):
+        clsname = 'index'
+        ofobj, name = str(fq_name).split('@', 1)
+        name, _ = name.split('@@', 1)
+        if name == str(s_indexes.DEFAULT_INDEX):
+            name = ''
+        ofobj = f" of object type '{ofobj}'"
 
-    return f"{clsname} '{name}'{ofobj}"
+    if name:
+        return f"{clsname} '{name}'{ofobj}"
+    else:
+        return f"{clsname}{ofobj}"
 
 
 class InheritanceGraphEntry(TypedDict):
@@ -369,6 +380,8 @@ def sdl_to_ddl(
                     ctx.objects[fq_name] = qltracer.Annotation(fq_name)
                 elif isinstance(decl_ast, qlast.CreateGlobal):
                     ctx.objects[fq_name] = qltracer.Global(fq_name)
+                elif isinstance(decl_ast, qlast.CreateIndex):
+                    ctx.objects[fq_name] = qltracer.Index(fq_name)
                 else:
                     raise AssertionError(
                         f'unexpected SDL declaration: {decl_ast}')
@@ -670,6 +683,17 @@ def _trace_item_layout(
             ctx.objects[trigger_name] = qltracer.Trigger(
                 trigger_name, source=obj)
 
+        elif isinstance(decl, qlast.CreateConcreteIndex):
+            # Validate that the index exists at all.
+            _validate_schema_ref(decl, ctx=ctx)
+            _, idx_fq_name = ctx.get_fq_name(decl)
+
+            idx_name = s_name.QualName(
+                module=fq_name.module,
+                name=f'{fq_name.name}@{idx_fq_name}',
+            )
+            ctx.objects[idx_name] = qltracer.ConcreteIndex(idx_name)
+
 
 RECURSION_GUARD: Set[s_name.QualName] = set()
 
@@ -870,6 +894,17 @@ def trace_ConcretePointer(
     deps: List[Dependency] = []
     if isinstance(node.target, qlast.TypeExpr):
         deps.append(TypeDependency(texpr=node.target))
+
+        # If the link/property specifier was left off the SDL, fill it
+        # in here.
+        if isinstance(node, qlast.CreateConcreteUnknownPointer):
+            typ = _resolve_type_expr(node.target, ctx=ctx)
+            cls = (
+                qlast.CreateConcreteLink
+                if typ.is_object_type() else qlast.CreateConcreteProperty
+            )
+            node = node.replace(__class__=cls)
+
     elif isinstance(node.target, qlast.Expr):
         deps.append(ExprDependency(expr=node.target))
     elif node.target is None:
@@ -1320,7 +1355,7 @@ def _get_bases(
 def _resolve_type_expr(
     texpr: qlast.TypeExpr,
     *,
-    ctx: LayoutTraceContext,
+    ctx: LayoutTraceContext | DepTraceContext,
 ) -> qltracer.TypeLike:
 
     if isinstance(texpr, qlast.TypeName):
@@ -1364,6 +1399,7 @@ TRACER_TO_REAL_TYPE_MAP = {
     qltracer.Annotation: s_anno.Annotation,
     qltracer.Property: s_props.Property,
     qltracer.Link: s_links.Link,
+    qltracer.Index: s_indexes.Index,
 }
 
 
@@ -1372,7 +1408,7 @@ def _get_local_obj(
     tracer_type: Type[qltracer.NamedObject],
     sourcectx: Optional[parsing.ParserContext],
     *,
-    ctx: LayoutTraceContext,
+    ctx: LayoutTraceContext | DepTraceContext,
 ) -> Optional[qltracer.NamedObject]:
 
     obj = ctx.objects.get(refname)
@@ -1401,7 +1437,7 @@ def _resolve_type_name(
     ref: qlast.BaseObjectRef,
     *,
     tracer_type: Type[qltracer.NamedObject],
-    ctx: LayoutTraceContext,
+    ctx: LayoutTraceContext | DepTraceContext,
 ) -> qltracer.ObjectLike:
 
     refname = ctx.get_ref_name(ref)
@@ -1442,6 +1478,9 @@ def _get_tracer_type(
     elif isinstance(decl, (qlast.CreateLink,
                            qlast.CreateConcreteLink)):
         tracer_type = qltracer.Link
+    elif isinstance(decl, (qlast.CreateIndex,
+                           qlast.CreateConcreteIndex)):
+        tracer_type = qltracer.Index
 
     return tracer_type
 
@@ -1460,6 +1499,10 @@ def _validate_schema_ref(
     local_obj = _get_local_obj(refname, tracer_type, decl.context, ctx=ctx)
 
     if local_obj is None:
+        if (tracer_type is qltracer.Index and
+                refname == s_indexes.DEFAULT_INDEX):
+            return
+
         _resolve_schema_ref(
             refname,
             type=tracer_type,
@@ -1473,7 +1516,7 @@ def _resolve_schema_ref(
     type: Type[qltracer.NamedObject],
     sourcectx: Optional[parsing.ParserContext],
     *,
-    ctx: LayoutTraceContext,
+    ctx: LayoutTraceContext | DepTraceContext,
 ) -> s_obj.SubclassableObject:
     real_type = TRACER_TO_REAL_TYPE_MAP[type]
     try:

@@ -80,8 +80,19 @@ class Global(NamedObject):
     pass
 
 
+class Index(NamedObject):
+    pass
+
+
+class ConcreteIndex(NamedObject):
+    pass
+
+
 class Type(NamedObject):
     def is_scalar(self) -> bool:
+        return False
+
+    def is_object_type(self) -> bool:
         return False
 
 
@@ -154,6 +165,9 @@ class ObjectType(Type, Source):
     def is_scalar(self) -> bool:
         return False
 
+    def is_object_type(self) -> bool:
+        return True
+
 
 class Alias(ObjectType):
     pass
@@ -171,6 +185,9 @@ class UnionType(Type):
         component_ids = sorted(str(t.get_name(schema)) for t in self.types)
         nqname = f"({' | '.join(component_ids)})"
         return sn.QualName(name=nqname, module='__derived__')
+
+    def is_object_type(self) -> bool:
+        return True
 
 
 class Pointer(Source):
