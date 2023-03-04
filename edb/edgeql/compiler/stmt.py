@@ -485,8 +485,6 @@ def compile_InsertQuery(
         stmt.conflict_checks = conflicts.compile_inheritance_conflict_checks(
             stmt, stmt_subject_stype, ctx=ictx)
 
-        ctx.env.dml_stmts.add(stmt)
-
         if expr.unless_conflict is not None:
             constraint_spec, else_branch = expr.unless_conflict
 
@@ -513,7 +511,7 @@ def compile_InsertQuery(
             )
 
         if pol_condition := policies.compile_dml_write_policies(
-            mat_stype, result, mode=qltypes.AccessKind.Insert, ctx=ctx
+            mat_stype, result, mode=qltypes.AccessKind.Insert, ctx=ictx
         ):
             stmt.write_policies[mat_stype.id] = pol_condition
 
@@ -562,7 +560,7 @@ def compile_UpdateQuery(
             context=expr.context,
         )
 
-    # Record this node in the list of potential DML expressions.
+    # Record this node in the list of DML statements.
     ctx.env.dml_exprs.append(expr)
 
     with ctx.subquery() as ictx:
@@ -617,8 +615,6 @@ def compile_UpdateQuery(
                 exprtype=s_types.ExprType.Update,
                 ctx=bodyctx)
 
-        ctx.env.dml_stmts.add(stmt)
-
         result = setgen.class_set(
             mat_stype, path_id=stmt.subject.path_id, ctx=ctx,
         )
@@ -634,11 +630,11 @@ def compile_UpdateQuery(
 
         for dtype in schemactx.get_all_concrete(mat_stype, ctx=ctx):
             if read_pol := policies.compile_dml_read_policies(
-                dtype, result, mode=qltypes.AccessKind.UpdateRead, ctx=ctx
+                dtype, result, mode=qltypes.AccessKind.UpdateRead, ctx=ictx
             ):
                 stmt.read_policies[dtype.id] = read_pol
             if write_pol := policies.compile_dml_write_policies(
-                dtype, result, mode=qltypes.AccessKind.UpdateWrite, ctx=ctx
+                dtype, result, mode=qltypes.AccessKind.UpdateWrite, ctx=ictx
             ):
                 stmt.write_policies[dtype.id] = write_pol
 
@@ -754,7 +750,7 @@ def compile_DeleteQuery(
 
         for dtype in schemactx.get_all_concrete(mat_stype, ctx=ctx):
             if pol_cond := policies.compile_dml_read_policies(
-                dtype, result, mode=qltypes.AccessKind.Delete, ctx=ctx
+                dtype, result, mode=qltypes.AccessKind.Delete, ctx=ictx
             ):
                 stmt.read_policies[dtype.id] = pol_cond
 
@@ -1034,7 +1030,7 @@ def compile_Shape(
         ctx.env.compiled_stmts[subctx.qlstmt] = stmt
         subctx.class_view_overrides = subctx.class_view_overrides.copy()
 
-        with ctx.new() as exposed_ctx:
+        with subctx.new() as exposed_ctx:
             exposed_ctx.expr_exposed = context.Exposure.UNEXPOSED
             expr = dispatch.compile(shape_expr, ctx=exposed_ctx)
 
@@ -1138,6 +1134,9 @@ def fini_stmt(
 
     view: Optional[s_types.Type]
     path_id: Optional[irast.PathId]
+
+    if isinstance(irstmt, irast.MutatingStmt):
+        ctx.env.dml_stmts.add(irstmt)
 
     if (isinstance(t, s_pseudo.PseudoType)
             and t.is_any(ctx.env.schema)):
