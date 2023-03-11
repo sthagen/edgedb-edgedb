@@ -135,8 +135,7 @@ def compile_SelectQuery(
 
         stmt.where = clauses.compile_where_clause(expr.where, ctx=sctx)
 
-        stmt.orderby = clauses.compile_orderby_clause(
-            expr.orderby, ctx=sctx)
+        stmt.orderby = clauses.compile_orderby_clause(expr.orderby, ctx=sctx)
 
         stmt.offset = clauses.compile_limit_offset_clause(
             expr.offset, ctx=sctx)
@@ -414,10 +413,13 @@ def compile_InsertQuery(
         expr: qlast.InsertQuery, *,
         ctx: context.ContextLevel) -> irast.Set:
 
-    if ctx.in_conditional is not None:
+    if ctx.disallow_dml:
         raise errors.QueryError(
-            'INSERT statements cannot be used inside conditional '
-            'expressions',
+            f'INSERT statements cannot be used {ctx.disallow_dml}',
+            hint=(
+                f'To resolve this try to factor out the mutation '
+                f'expression into the top-level WITH block.'
+            ),
             context=expr.context,
         )
 
@@ -554,9 +556,13 @@ def _get_dunder_type_ptrref(ctx: context.ContextLevel) -> irast.PointerRef:
 def compile_UpdateQuery(
         expr: qlast.UpdateQuery, *, ctx: context.ContextLevel) -> irast.Set:
 
-    if ctx.in_conditional is not None:
+    if ctx.disallow_dml:
         raise errors.QueryError(
-            'UPDATE statements cannot be used inside conditional expressions',
+            f'UPDATE statements cannot be used {ctx.disallow_dml}',
+            hint=(
+                f'To resolve this try to factor out the mutation '
+                f'expression into the top-level WITH block.'
+            ),
             context=expr.context,
         )
 
@@ -650,9 +656,13 @@ def compile_UpdateQuery(
 def compile_DeleteQuery(
         expr: qlast.DeleteQuery, *, ctx: context.ContextLevel) -> irast.Set:
 
-    if ctx.in_conditional is not None:
+    if ctx.disallow_dml:
         raise errors.QueryError(
-            'DELETE statements cannot be used inside conditional expressions',
+            f'DELETE statements cannot be used {ctx.disallow_dml}',
+            hint=(
+                f'To resolve this try to factor out the mutation '
+                f'expression into the top-level WITH block.'
+            ),
             context=expr.context,
         )
 
@@ -1442,7 +1452,6 @@ def compile_query_subject(
             view_rptr=view_rptr,
             view_name=view_name,
             exprtype=exprtype,
-            parser_context=expr.context,
             ctx=ctx,
         )
 
