@@ -1296,22 +1296,18 @@ def _get_compile_options(
 
     return qlcompiler.CompilerOptions(
         modaliases=ctx.state.current_tx().get_modaliases(),
-        # XXX: All this is_explain checks need to be removed once we
-        # have a real solution to this problem
         implicit_tid_in_shapes=(
             can_have_implicit_fields and ctx.inline_typeids
-            and not is_explain
         ),
         implicit_tname_in_shapes=(
             can_have_implicit_fields and ctx.inline_typenames
-            and not is_explain
         ),
         implicit_id_in_shapes=(
             can_have_implicit_fields and ctx.inline_objectids
         ),
         constant_folding=not disable_constant_folding,
         json_parameters=ctx.json_parameters,
-        implicit_limit=ctx.implicit_limit if not is_explain else 0,
+        implicit_limit=ctx.implicit_limit,
         bootstrap_mode=ctx.bootstrap_mode,
         apply_query_rewrites=(
             not ctx.bootstrap_mode
@@ -1340,6 +1336,14 @@ def _compile_ql_explain(
     analyze = 'ANALYZE true, ' if ql.analyze else ''
     exp_command = f'EXPLAIN ({analyze}FORMAT JSON, VERBOSE true)'
 
+    ctx = dataclasses.replace(
+        ctx,
+        inline_typeids=False,
+        inline_typenames=False,
+        implicit_limit=0,
+        output_format=enums.OutputFormat.BINARY,
+    )
+
     query = _compile_ql_query(
         ctx, ql.query, script_info=script_info,
         is_explain=True, cacheable=False)
@@ -1358,6 +1362,7 @@ def _compile_ql_explain(
     return dataclasses.replace(
         query,
         is_explain=True,
+        append_rollback=ql.analyze,
         cacheable=False,
         sql=(sql_bytes,),
         sql_hash=sql_hash,
@@ -1486,7 +1491,8 @@ def _compile_ql_query(
                 global_schema=ir.schema._global_schema,
                 base_schema=s_schema.FlatSchema(),
             )
-        query_asts = pickle.dumps((ql, ir, qtree))
+        config_vals = _get_compilation_config_vals(ctx)
+        query_asts = pickle.dumps((ql, ir, qtree, config_vals))
     else:
         query_asts = None
 
@@ -1579,7 +1585,6 @@ def _compile_ql_transaction(
         action = dbstate.TxAction.DECLARE_SAVEPOINT
 
         sp_name = ql.name
-        sp_id = sp_id
 
     elif isinstance(ql, qlast.ReleaseSavepoint):
         ctx.state.current_tx().release_savepoint(ql.name)
@@ -1963,6 +1968,9 @@ def _try_compile(
             if comp.is_explain:
                 unit.is_explain = True
                 unit.query_asts = comp.query_asts
+
+            if comp.append_rollback:
+                unit.append_rollback = True
 
             if is_trailing_stmt:
                 unit.cardinality = comp.cardinality
@@ -2491,6 +2499,14 @@ def _get_config_val(
         current_tx.get_system_config(),
         allow_unrecognized=True,
     )
+
+
+def _get_compilation_config_vals(ctx: CompileContext) -> Any:
+    return {
+        k: _get_config_val(ctx, k)
+        for k in ctx.compiler_state.config_spec
+        if ctx.compiler_state.config_spec[k].affects_compilation
+    }
 
 
 _OUTPUT_FORMAT_MAP = {

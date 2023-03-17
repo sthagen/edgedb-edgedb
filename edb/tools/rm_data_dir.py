@@ -1,7 +1,7 @@
 #
 # This source file is part of the EdgeDB open source project.
 #
-# Copyright 2020-present MagicStack Inc. and the EdgeDB authors.
+# Copyright 2021-present MagicStack Inc. and the EdgeDB authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,11 +16,19 @@
 # limitations under the License.
 #
 
-# If the hashes break, it is fine to change them, I think?
-CREATE MIGRATION m1xpafeaeinvq562zlqkqgcjgdpqds45jr6eybmxm5kzmpzadvvamq
-ONTO m1nnh3uhlwn5vfe7dfhyyxxjafsxniljyuzov6avzqeyddw2qpkw7q {
-    SET message := "test";
-    CREATE TYPE default::Test1;
-};
 
-CREATE TYPE default::Test2;
+import shutil
+
+from edb.common import devmode
+from edb.tools.edb import edbcommands
+
+
+@edbcommands.command("rm-data-dir")
+def rm_data_dir():
+    """Remove the local development data directory if present"""
+    data_dir = devmode.get_dev_mode_data_dir()
+    if data_dir.exists():
+        shutil.rmtree(data_dir)
+        print("Removed the local dev data directory.")
+    else:
+        print("The local dev data directory does not exist.")
