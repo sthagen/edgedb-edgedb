@@ -2237,45 +2237,43 @@ def process_link_update(
         # is executed in the snapshot where the above DELETE from
         # the link table is not visible.  Hence, we need to use
         # the ON CONFLICT clause to resolve this.
-        conflict_inference = []
-        conflict_exc_row = []
+        conflict_inference = [
+            pgast.ColumnRef(name=[col])
+            for col in conflict_cols
+        ]
 
-        for col in conflict_cols:
-            conflict_inference.append(
-                pgast.ColumnRef(name=[col])
-            )
-            conflict_exc_row.append(
-                pgast.ColumnRef(name=['excluded', col])
-            )
+        target_cols = [
+            col
+            for col in cols
+            if col.name[0] not in conflict_cols
+        ]
 
-        conflict_data = pgast.SelectStmt(
-            target_list=[
-                pgast.ResTarget(
-                    val=pgast.ColumnRef(
-                        name=[data_cte.name, pgast.Star()]))
-            ],
-            from_clause=[
-                pgast.RelRangeVar(relation=data_cte)
-            ],
-            where_clause=astutils.new_binop(
-                lexpr=pgast.ImplicitRowExpr(args=conflict_inference),
-                rexpr=pgast.ImplicitRowExpr(args=conflict_exc_row),
-                op='='
-            )
-        )
-
-        conflict_clause = pgast.OnConflictClause(
-            action='update',
-            infer=pgast.InferClause(
-                index_elems=conflict_inference
-            ),
-            target_list=[
-                pgast.MultiAssignRef(
-                    columns=cols,
-                    source=conflict_data
+        if len(target_cols) == 0:
+            conflict_clause = pgast.OnConflictClause(
+                action='nothing',
+                infer=pgast.InferClause(
+                    index_elems=conflict_inference
                 )
-            ]
-        )
+            )
+        else:
+            conflict_data = pgast.RowExpr(
+                args=[
+                    pgast.ColumnRef(name=['excluded', col.name[0]])
+                    for col in target_cols
+                ],
+            )
+            conflict_clause = pgast.OnConflictClause(
+                action='update',
+                infer=pgast.InferClause(
+                    index_elems=conflict_inference
+                ),
+                target_list=[
+                    pgast.MultiAssignRef(
+                        columns=target_cols,
+                        source=conflict_data
+                    )
+                ]
+            )
 
     updcte = pgast.CommonTableExpr(
         name=ctx.env.aliases.get(hint='i'),
@@ -2546,6 +2544,56 @@ def process_link_values(
     )
 
     return link_rows, specified_cols
+
+
+def process_delete_body(
+    *,
+    ir_stmt: irast.DeleteStmt,
+    delete_cte: pgast.CommonTableExpr,
+    dml_parts: DMLParts,
+    typeref: irast.TypeRef,
+    ctx: context.CompilerContextLevel,
+) -> None:
+    """Finalize DELETE on an object.
+
+    The actual DELETE was generated in gen_dml_cte, so we only
+    have work to do here if there are link tables to clean up.
+    """
+    ctx.toplevel_stmt.append_cte(delete_cte)
+
+    pointers = ir_stmt.links_to_delete[typeref.id]
+
+    for ptrref in pointers:
+        target_rvar = relctx.range_for_ptrref(
+            ptrref, for_mutation=True, only_self=True, ctx=ctx)
+        # assert isinstance(target_rvar, pgast.RelRangeVar)
+        # assert isinstance(target_rvar.relation, pgast.Relation)
+        # relation = target_rvar.relation
+
+        range_rvar = pgast.RelRangeVar(
+            relation=delete_cte,
+            alias=pgast.Alias(
+                aliasname=ctx.env.aliases.get(hint='range')
+            )
+        )
+
+        where_clause = astutils.new_binop(
+            lexpr=pgast.ColumnRef(name=[
+                target_rvar.alias.aliasname, 'source'
+            ]),
+            op='=',
+            rexpr=pathctx.get_rvar_path_identity_var(
+                range_rvar, ir_stmt.result.path_id, env=ctx.env)
+        )
+        del_query = pgast.DeleteStmt(
+            relation=target_rvar,
+            where_clause=where_clause,
+            using_clause=[range_rvar],
+        )
+        ctx.toplevel_stmt.append_cte(pgast.CommonTableExpr(
+            query=del_query,
+            name=ctx.env.aliases.get(hint='mlink')
+        ))
 
 
 # Trigger compilation
