@@ -353,6 +353,7 @@ def make_func_param(
 
 class Parameter(
     so.ObjectFragment,
+    so.Object,  # Help reflection figure out the right db MRO
     ParameterLike,
     qlkind=ft.SchemaObjectClass.PARAMETER,
     data_safe=True,
@@ -1665,7 +1666,7 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
             if (
                 self.has_attribute_value("code")
                 or self.has_attribute_value("nativecode")
-            ):
+            ) and not self.has_attribute_value('impl_is_strict'):
                 self.set_attribute_value(
                     'impl_is_strict',
                     _params_are_all_required_singletons(cp, schema),
@@ -1922,7 +1923,7 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
                     nativecode_expr = astnode.nativecode
                 else:
                     assert astnode.code.code is not None
-                    nativecode_expr = qlparser.parse(astnode.code.code)
+                    nativecode_expr = qlparser.parse_query(astnode.code.code)
 
                 nativecode = s_expr.Expression.from_ast(
                     nativecode_expr,
@@ -2137,7 +2138,7 @@ class AlterFunction(AlterCallableObject[Function], FunctionCommand):
                 astnode.code.language is qlast.Language.EdgeQL
                 and astnode.code.code is not None
             ):
-                nativecode_expr = qlparser.parse(astnode.code.code)
+                nativecode_expr = qlparser.parse_query(astnode.code.code)
             else:
                 cmd.set_attribute_value(
                     'code',

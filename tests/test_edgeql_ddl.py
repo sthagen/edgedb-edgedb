@@ -6587,25 +6587,9 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             create type X;
         """)
 
-        # We can't set a default that uses a global when creating a new
-        # pointer, since it would need to run *now* and populate the data
-        async with self.assertRaisesRegexTx(
-            edgedb.UnsupportedFeatureError,
-            r"globals may not be used when converting/populating data "
-            r"in migrations"
-        ):
-            await self.con.execute("""
-                alter type X {
-                    create property foo -> str {
-                        set default := (global foo);
-                    }
-                };
-            """)
-
         await self.con.execute("""
             set global foo := "test"
         """)
-        # But we *can* do it when creating a brand new type
         await self.con.execute("""
             create type Y {
                 create property foo -> str {
@@ -6850,6 +6834,61 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             await self.con.execute("""
                 alter global foo set type str using ('lol');
             """)
+
+    async def test_edgeql_ddl_global_default(self):
+        await self.con.execute('''
+            create global foo -> str;
+            create type Foo;
+        ''')
+
+        # Should work; no data in the table to cause trouble
+        await self.con.execute('''
+            alter type Foo { create required property name -> str {
+                set default := (global foo);
+            } }
+        ''')
+
+        await self.con.execute('''
+            set global foo := "test";
+            insert Foo;
+            reset global foo;
+        ''')
+
+        await self.assert_query_result(
+            '''
+                select Foo { name }
+            ''',
+            [{'name': "test"}],
+        )
+
+        # Should fail because there is data
+        async with self.assertRaisesRegexTx(
+            edgedb.MissingRequiredError,
+            r"missing value for required property"
+        ):
+            await self.con.execute('''
+                alter type Foo { create required property name2 -> str {
+                    set default := (global foo);
+                } }
+            ''')
+
+        await self.con.execute('''
+            alter global foo set default := "!";
+        ''')
+
+        # Try it again now that there is a default
+        await self.con.execute('''
+            alter type Foo { create required property name2 -> str {
+                set default := (global foo);
+            } }
+        ''')
+
+        await self.assert_query_result(
+            '''
+                select Foo { name, name2 }
+            ''',
+            [{'name': "test", 'name2': "!"}],
+        )
 
     async def test_edgeql_ddl_property_computable_01(self):
         await self.con.execute('''\
@@ -7930,7 +7969,7 @@ type default::Foo {
     async def test_edgeql_ddl_extending_01(self):
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
-                r"Could not find consistent ancestor order for "
+                r"could not find consistent ancestor order for "
                 r"object type 'default::Merged1'"):
 
             await self.con.execute(r"""
@@ -7944,17 +7983,17 @@ type default::Foo {
             """)
 
     async def test_edgeql_ddl_extending_02(self):
-        await self.con.execute(r"""
-            CREATE TYPE ExtA2;
-            # Create two types with a different position of Object
-            # in the bases. This doesn't impact the linearized
-            # bases because Object is already implicitly included
-            # as the first element of the base types.
-            CREATE TYPE ExtC2 EXTENDING ExtA2, Object;
-            CREATE TYPE ExtD2 EXTENDING Object, ExtA2;
-            # extending from both of these types
-            CREATE TYPE Merged2 EXTENDING ExtC2, ExtD2;
-        """)
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r"could not find consistent ancestor order for "
+                r"object type 'default::ExtD2'"):
+            await self.con.execute(r"""
+                CREATE TYPE ExtA2;
+                CREATE TYPE ExtC2 EXTENDING ExtA2, Object;
+                # This is busted because no ordering can be consistent
+                # with the base ordering here.
+                CREATE TYPE ExtD2 EXTENDING Object, ExtA2;
+            """)
 
     async def test_edgeql_ddl_extending_03(self):
         # Check that ancestors are recomputed properly on rebase.
@@ -8209,6 +8248,18 @@ type default::Foo {
             await self.con.execute("""
                 CREATE TYPE SomeObject6;
                 ALTER TYPE SomeObject6 EXTENDING FreeObject;
+            """)
+
+    async def test_edgeql_ddl_extending_07(self):
+        await self.con.execute(r"""
+            create type A;
+            create type B extending A;
+        """)
+        with self.assertRaisesRegex(
+                edgedb.SchemaError,
+                r"could not find consistent ancestor order"):
+            await self.con.execute(r"""
+                create type C extending A, B;
             """)
 
     async def test_edgeql_ddl_modules_01(self):
@@ -12553,6 +12604,42 @@ CREATE MIGRATION m14i24uhm6przo3bpl2lqndphuomfrtq3qdjaqdg6fza7h6m7tlbra
             ''',
             [{'generated_by': 'DDLStatement'}]
         )
+
+    async def test_edgeql_ddl_create_migration_04(self):
+        await self.con.execute('''
+            CREATE MIGRATION
+            {
+                create global foo -> str;
+                create type Foo;
+            };
+        ''')
+        await self.con.execute('''
+            insert Foo;
+        ''')
+
+        # Currently, SET GLOBAL is not allowed in migration scripts.
+        # Once we make it allowed, we will need to make it actually
+        # work, and there is a commented bit below to test that.
+        async with self.assertRaisesRegexTx(
+                edgedb.QueryError,
+                "Unexpected keyword 'global'"):
+            await self.con.execute('''
+                CREATE MIGRATION
+                {
+                    set global foo := "test";
+                    alter type Foo {
+                        create required property name -> str {
+                        set default := (global foo);
+                    }
+                };
+            ''')
+
+        # await self.assert_query_result(
+        #     '''
+        #     SELECT Foo.name
+        #     ''',
+        #     ['test'],
+        # )
 
     async def test_edgeql_ddl_naked_backlink_in_computable(self):
         await self.con.execute('''

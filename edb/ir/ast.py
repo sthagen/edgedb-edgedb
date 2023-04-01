@@ -702,7 +702,7 @@ class Statement(Command):
     dml_exprs: typing.List[qlast.Base]
     type_rewrites: typing.Dict[typing.Tuple[uuid.UUID, bool], Set]
     singletons: typing.List[PathId]
-    triggers: tuple[Trigger, ...]
+    triggers: tuple[tuple[Trigger, ...], ...]
 
 
 class TypeIntrospection(ImmutableExpr):
@@ -1082,6 +1082,9 @@ class MutatingStmt(Stmt, MutatingLikeStmt):
         factory=dict
     )
 
+    # Rewrites of the subject shape
+    rewrites: typing.Optional[Rewrites] = None
+
     @property
     def material_type(self) -> TypeRef:
         """The proper material type being operated on.
@@ -1113,13 +1116,14 @@ class Trigger(Base):
     expr: Set
     # All the relevant dml
     affected: set[tuple[TypeRef, MutatingStmt]]
+    all_affected_types: set[TypeRef]
     source_type: TypeRef
     kinds: set[qltypes.TriggerKind]
     scope: qltypes.TriggerScope
 
     # N.B: Semantically and in the external language, delete triggers
     # don't have a __new__ set, but we give it one in the
-    # implementation (identical) to the old set, to help make the
+    # implementation (identical to the old set), to help make the
     # implementation more uniform.
     new_set: Set
     old_set: typing.Optional[Set]
@@ -1140,6 +1144,19 @@ class InsertStmt(MutatingStmt):
     @property
     def material_type(self) -> TypeRef:
         return self.subject.typeref.real_material_type
+
+
+# N.B: The PointerRef corresponds to the *definition* point of the rewrite.
+RewritesOfType = typing.Dict[str, typing.Tuple[Set, BasePointerRef]]
+
+
+@dataclasses.dataclass(kw_only=True, frozen=True)
+class Rewrites:
+    subject_path_id: PathId
+
+    old_path_id: typing.Optional[PathId]
+
+    by_type: typing.Dict[TypeRef, RewritesOfType]
 
 
 class UpdateStmt(MutatingStmt, FilteredStmt):

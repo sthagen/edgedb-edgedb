@@ -1384,7 +1384,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
             CREATE MODULE default;
             CREATE TYPE default::A;
             CREATE TYPE default::B EXTENDING A;
-            CREATE TYPE default::C EXTENDING A, B;
+            CREATE TYPE default::C EXTENDING B, A;
         ''')
 
         orig_get_children = type(schema).get_children
@@ -7775,7 +7775,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 abstract type C extending B;
                 abstract type C2 extending C;
                 abstract type D;
-                type F extending C, C2, B;
+                type F extending C2, C, B;
             """,
             r"""
             """,
@@ -7807,8 +7807,8 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 abstract type C extending B;
                 abstract type C2 extending C;
                 abstract type D;
-                type F extending C, C2, B;
-                type F2 extending C, C2, B, F;
+                type F extending C2, C, B;
+                type F2 extending F, C2, C, B;
             """,
             r"""
             """,
@@ -7855,7 +7855,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
         tests = [iter(tests)] * 2
 
         for stmt_text, expected_output in zip(*tests):
-            qltree = qlparser.parse(stmt_text, {None: 'test'})
+            qltree = qlparser.parse_command(stmt_text, {None: 'test'})
             stmt = qlcompiler.compile_ast_to_ir(
                 qltree,
                 schema,
@@ -8874,11 +8874,11 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             # the links order is non-deterministic
             """
             CREATE TYPE schema::ObjectType
-            EXTENDING schema::InheritingObject,
+            EXTENDING schema::Source,
                       schema::ConsistencySubject,
-                      schema::AnnotationSubject,
+                      schema::InheritingObject,
                       schema::Type,
-                      schema::Source
+                      schema::AnnotationSubject
             {
                 CREATE MULTI LINK access_policies: schema::AccessPolicy {
                     EXTENDING schema::reference;
@@ -8908,12 +8908,12 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             'DESCRIBE TYPE schema::ObjectType AS SDL',
 
             """
-            type schema::ObjectType extending
-                    schema::InheritingObject,
-                    schema::ConsistencySubject,
-                    schema::AnnotationSubject,
-                    schema::Type,
-                    schema::Source
+            type schema::ObjectType
+            extending schema::Source,
+                      schema::ConsistencySubject,
+                      schema::InheritingObject,
+                      schema::Type,
+                      schema::AnnotationSubject
             {
                 multi link access_policies: schema::AccessPolicy {
                     extending schema::reference;

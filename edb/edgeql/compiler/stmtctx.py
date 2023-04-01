@@ -35,6 +35,7 @@ from edb.schema import name as s_name
 from edb.schema import objects as s_obj
 from edb.schema import objtypes as s_objtypes
 from edb.schema import pointers as s_pointers
+from edb.schema import rewrites as s_rewrites
 from edb.schema import schema as s_schema
 from edb.schema import sources as s_sources
 from edb.schema import types as s_types
@@ -86,11 +87,24 @@ def init_context(
         # references as singletons for the purposes of the overall
         # expression cardinality inference, so we set up the scope
         # tree in the necessary fashion.
-        for singleton in options.singletons:
+        had_optional = False
+        for singleton_ent in options.singletons:
+            singleton, optional = (
+                singleton_ent if isinstance(singleton_ent, tuple)
+                else (singleton_ent, False)
+            )
+            had_optional |= optional
             path_id = compile_anchor('__', singleton, ctx=ctx).path_id
-            ctx.env.path_scope.attach_path(path_id, context=None)
-            ctx.env.singletons.append(path_id)
+            ctx.env.path_scope.attach_path(
+                path_id, optional=optional, context=None)
+            if not optional:
+                ctx.env.singletons.append(path_id)
             ctx.iterator_path_ids |= {path_id}
+
+        # If we installed any optional singletons, run the rest of the
+        # compilation under a fence to protect them.
+        if had_optional:
+            ctx.path_scope = ctx.path_scope.attach_fence()
 
     for orig, remapped in options.type_remaps.items():
         rset = compile_anchor('__', remapped, ctx=ctx)
@@ -115,6 +129,12 @@ def init_context(
     if options.detached:
         ctx.path_id_namespace = frozenset({ctx.aliases.get('ns')})
 
+    if options.schema_object_context is s_rewrites.Rewrite:
+        assert ctx.partial_path_prefix
+        typ = setgen.get_set_type(ctx.partial_path_prefix, ctx=ctx)
+        assert isinstance(typ, s_objtypes.ObjectType)
+        ctx.active_rewrites |= {typ, *typ.descendants(ctx.env.schema)}
+
     ctx.derived_target_module = options.derived_target_module
     ctx.toplevel_result_view_name = options.result_view_name
     ctx.implicit_id_in_shapes = options.implicit_id_in_shapes
@@ -132,6 +152,8 @@ def fini_expression(
     ctx: context.ContextLevel,
 ) -> irast.Command:
 
+    ctx.path_scope = ctx.env.path_scope
+
     ir = eta_expand.eta_expand_ir(ir, toplevel=True, ctx=ctx)
 
     if (
@@ -141,7 +163,7 @@ def fini_expression(
         ir = setgen.scoped_set(ir, ctx=ctx)
 
     # Compile any triggers that were triggered by the query
-    ir_triggers = triggers.compile_triggers(ctx.env.dml_stmts, ctx=ctx)
+    ir_triggers = triggers.compile_triggers(ctx=ctx)
 
     # Collect all of the expressions stored in various side sets
     # that can make it into the output, so that we can make sure
@@ -157,7 +179,7 @@ def fini_expression(
         p.sub_params.decoder_ir for p in ctx.env.query_parameters.values()
         if p.sub_params and p.sub_params.decoder_ir
     ]
-    extra_exprs += [trigger.expr for trigger in ir_triggers]
+    extra_exprs += [trigger.expr for stage in ir_triggers for trigger in stage]
 
     all_exprs = [ir] + extra_exprs
 

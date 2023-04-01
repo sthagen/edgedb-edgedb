@@ -16,13 +16,12 @@
 # limitations under the License.
 #
 
+import edgedb
 
 import json
 import os.path
-import unittest
 
 from edb.testbase import server as tb
-from edb.server import pgconnparams
 from edb.common import assert_data_shape
 
 
@@ -55,67 +54,19 @@ class TestEdgeQLExplain(tb.QueryTestCase):
             update User set {
               todo += (select .owned_issues filter <int64>.number % 3 = 0)
             };
+
+            administer statistics_update();
         '''
     ]
-
-    @classmethod
-    async def _get_raw_sql_connection(cls):
-        """Get a raw connection to the underlying SQL server, if possible
-
-        We have to do this miserable hack in order to get access to ANALYZE
-        """
-        try:
-            import asyncpg
-        except ImportError:
-            raise unittest.SkipTest(
-                'explain tests skipped: asyncpg not installed')
-
-        settings = cls.con.get_settings()
-        pgaddr = settings.get('pgaddr')
-        if pgaddr is None:
-            raise unittest.SkipTest('explain tests skipped: not in devmode')
-        pgaddr = json.loads(pgaddr)
-
-        # Try to grab a password from the specified DSN, if one is
-        # present, since the pgaddr won't have a real one. (The non
-        # specified DSN test suite setup doesn't have one, so it is
-        # fine.)
-        password = None
-        spec_dsn = os.environ.get('EDGEDB_TEST_BACKEND_DSN')
-        if spec_dsn:
-            _, params = pgconnparams.parse_dsn(spec_dsn)
-            password = params.password
-
-        pgdsn = (
-            f'postgres:///{pgaddr["database"]}?user={pgaddr["user"]}'
-            f'&port={pgaddr["port"]}&host={pgaddr["host"]}'
-        )
-        if password is not None:
-            pgdsn += f'&password={password}'
-
-        return await asyncpg.connect(pgdsn)
-
-    @classmethod
-    async def _analyze_db(cls):
-        # HACK: Run ANALYZE so that test results are more deterministic
-        scon = await cls._get_raw_sql_connection()
-        try:
-            await scon.execute('ANALYZE')
-        finally:
-            await scon.close()
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls.loop.run_until_complete(cls._analyze_db())
 
     def assert_plan(self, data, shape, message=None):
         assert_data_shape.assert_data_shape(
             data, shape, fail=self.fail, message=message)
 
-    async def explain(self, query, *, analyze=False, con=None):
+    async def explain(self, query, *, execute=True, con=None):
+        no_ex = '(execute := False) ' if not execute else ''
         return json.loads(await (con or self.con).query_single(
-            f'explain {"analyze " if analyze else ""}{query}'
+            f'analyze {no_ex}{query}'
         ))[0]
 
     async def test_edgeql_explain_simple_01(self):
@@ -319,17 +270,12 @@ class TestEdgeQLExplain(tb.QueryTestCase):
                         }
                     ],
                     "nearest_context_plan": {
-                        "node_type": "Bitmap Heap Scan",
+                        # I've seen this as both Index Scan and Bitmap
+                        # Heap Scan with a subnode Bitmap Index Scan.
+                        # Just don't check, it's fine.
+                        # "node_type": "Index Scan",
                         "parent_relationship": "Outer",
                         "relation_name": "default::Issue",
-                        "plans": [
-                            {
-                                "node_type": "Bitmap Index Scan",
-                                "parent_relationship": "Outer",
-                                "index_name": (
-                                    "default::Issue.owner index"),
-                            }
-                        ],
                         # We get a stack of contexts back
                         "contexts": [
                             {
@@ -499,7 +445,7 @@ class TestEdgeQLExplain(tb.QueryTestCase):
         try:
             res = await self.explain('''
                 insert User { name := 'Fantix' }
-            ''', analyze=True, con=con)
+            ''', execute=True, con=con)
             self.assert_plan(res['plan'], {
                 'node_type': 'Nested Loop',
             })
@@ -516,7 +462,7 @@ class TestEdgeQLExplain(tb.QueryTestCase):
             ''')
             res = await self.explain('''
                 insert User { name := 'Fantix' }
-            ''', analyze=True)
+            ''', execute=True)
             self.assert_plan(res['plan'], {
                 'node_type': 'Nested Loop',
             })
@@ -533,3 +479,36 @@ class TestEdgeQLExplain(tb.QueryTestCase):
         self.assertFalse(await self.con.query('''
             select User { id, name } filter .name = 'Fantix'
         '''))
+
+    async def test_edgeql_explain_options_01(self):
+        res = await self.explain('''
+            select User
+        ''', execute=False)
+        self.assertNotIn('actual_startup_time', res['plan'])
+
+        res = json.loads(await self.con.query_single('''
+            analyze (buffers := True) select User
+        '''))[0]
+        self.assertIn('shared_read_blocks', res['plan'])
+
+        res = json.loads(await self.con.query_single('''
+            analyze (buffers := false) select User
+        '''))[0]
+        self.assertNotIn('shared_read_blocks', res['plan'])
+
+    async def test_edgeql_explain_options_02(self):
+        async with self.assertRaisesRegexTx(
+            edgedb.QueryError,
+            r"unknown ANALYZE argument"
+        ):
+            await self.con.query_single('''
+                analyze (bogus_argument := True) select User
+            ''')
+
+        async with self.assertRaisesRegexTx(
+            edgedb.QueryError,
+            r"incorrect type"
+        ):
+            await self.con.query_single('''
+                analyze (execute := "hell yeah") select User
+            ''')

@@ -40,6 +40,7 @@ from edb.pgsql import compiler as pg_compiler
 
 from edb import edgeql
 from edb.common import debug
+from edb.common import devmode
 from edb.common import verutils
 from edb.common import uuidgen
 
@@ -1327,14 +1328,54 @@ def _get_compile_options(
     )
 
 
+# Types and default values for EXPLAIN parameters
+EXPLAIN_PARAMS = dict(
+    buffers=('std::bool', False),
+    execute=('std::bool', True),
+)
+
+
 def _compile_ql_explain(
     ctx: CompileContext,
-    ql: qlast.Base,
+    ql: qlast.ExplainStmt,
     *,
     script_info: Optional[irast.ScriptInfo] = None,
 ) -> dbstate.BaseQuery:
-    analyze = 'ANALYZE true, ' if ql.analyze else ''
-    exp_command = f'EXPLAIN ({analyze}FORMAT JSON, VERBOSE true)'
+    args = {k: v for k, (_, v) in EXPLAIN_PARAMS.items()}
+
+    # Evaluate and typecheck arguments
+    if ql.args:
+        current_tx = ctx.state.current_tx()
+        schema = current_tx.get_schema(ctx.compiler_state.std_schema)
+
+        for el in ql.args.elements:
+            name = el.name.name
+            if name not in EXPLAIN_PARAMS:
+                raise errors.QueryError(
+                    f"unknown ANALYZE argument '{name}'",
+                    context=el.context,
+                )
+            arg_ir = qlcompiler.compile_ast_to_ir(
+                el.val,
+                schema=schema,
+                options=qlcompiler.CompilerOptions(
+                    modaliases=current_tx.get_modaliases(),
+                ),
+            )
+            exp_typ = schema.get(EXPLAIN_PARAMS[name][0])
+            if not arg_ir.stype.issubclass(schema, exp_typ):
+                raise errors.QueryError(
+                    f"incorrect type for ANALYZE argument '{name}': "
+                    f"expected '{exp_typ.get_name(schema)}', "
+                    f"got '{arg_ir.stype.get_name(schema)}'",
+                    context=el.context,
+                )
+
+            args[name] = ireval.evaluate_to_python_val(arg_ir.expr, schema)
+
+    analyze = 'ANALYZE true, ' if args['execute'] else ''
+    buffers = 'BUFFERS, ' if args['buffers'] else ''
+    exp_command = f'EXPLAIN ({analyze}{buffers}FORMAT JSON, VERBOSE true)'
 
     ctx = dataclasses.replace(
         ctx,
@@ -1344,9 +1385,12 @@ def _compile_ql_explain(
         output_format=enums.OutputFormat.BINARY,
     )
 
+    config_vals = _get_compilation_config_vals(ctx)
+    explain_data = (config_vals, args)
+
     query = _compile_ql_query(
         ctx, ql.query, script_info=script_info,
-        is_explain=True, cacheable=False)
+        explain_data=explain_data, cacheable=False)
     assert len(query.sql) == 1
 
     out_type_data, out_type_id = \
@@ -1362,13 +1406,42 @@ def _compile_ql_explain(
     return dataclasses.replace(
         query,
         is_explain=True,
-        append_rollback=ql.analyze,
+        append_rollback=args['execute'],
         cacheable=False,
         sql=(sql_bytes,),
         sql_hash=sql_hash,
         cardinality=enums.Cardinality.ONE,
         out_type_data=out_type_data,
         out_type_id=out_type_id.bytes,
+    )
+
+
+def _compile_ql_administer(
+    ctx: CompileContext,
+    ql: qlast.AdministerStmt,
+    *,
+    script_info: Optional[irast.ScriptInfo] = None,
+) -> dbstate.BaseQuery:
+    if not devmode.is_in_dev_mode():
+        raise errors.QueryError(
+            'ADMINISTER can only be executed in dev mode',
+            context=ql.context)
+
+    if ql.expr.func == 'statistics_update':
+        if ql.expr.args or ql.expr.kwargs:
+            raise errors.QueryError(
+                'statistics_update() does not take arguments',
+                context=ql.expr.context,
+            )
+        sql = (b'ANALYZE',)
+    else:
+        raise errors.QueryError(
+            'Unknown ADMINISTER function',
+            context=ql.expr.context,
+        )
+
+    return dbstate.MaintenanceQuery(
+        sql=sql,
     )
 
 
@@ -1379,9 +1452,10 @@ def _compile_ql_query(
     script_info: Optional[irast.ScriptInfo] = None,
     cacheable: bool = True,
     migration_block_query: bool = False,
-    is_explain: bool = False,
+    explain_data: object = None,
 ) -> dbstate.BaseQuery:
 
+    is_explain = explain_data is not None
     current_tx = ctx.state.current_tx()
 
     schema = current_tx.get_schema(ctx.compiler_state.std_schema)
@@ -1491,8 +1565,7 @@ def _compile_ql_query(
                 global_schema=ir.schema._global_schema,
                 base_schema=s_schema.FlatSchema(),
             )
-        config_vals = _get_compilation_config_vals(ctx)
-        query_asts = pickle.dumps((ql, ir, qtree, config_vals))
+        query_asts = pickle.dumps((ql, ir, qtree, explain_data))
     else:
         query_asts = None
 
@@ -1817,6 +1890,11 @@ def _compile_dispatch_ql(
             caps |= enums.Capability.MODIFICATIONS
         return (query, caps)
 
+    elif isinstance(ql, qlast.AdministerStmt):
+        query = _compile_ql_administer(ctx, ql, script_info=script_info)
+        caps = enums.Capability(0)
+        return (query, caps)
+
     else:
         query = _compile_ql_query(ctx, ql, script_info=script_info)
         caps = enums.Capability(0)
@@ -2081,6 +2159,9 @@ def _try_compile(
                 unit.config_ops.append(comp.config_op)
 
             unit.has_set = True
+
+        elif isinstance(comp, dbstate.MaintenanceQuery):
+            unit.sql = comp.sql
 
         elif isinstance(comp, dbstate.NullQuery):
             pass

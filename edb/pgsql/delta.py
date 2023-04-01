@@ -56,6 +56,7 @@ from edb.schema import operators as s_opers
 from edb.schema import pointers as s_pointers
 from edb.schema import pseudo as s_pseudo
 from edb.schema import roles as s_roles
+from edb.schema import rewrites as s_rewrites
 from edb.schema import sources as s_sources
 from edb.schema import triggers as s_triggers
 from edb.schema import types as s_types
@@ -840,6 +841,38 @@ class AlterTrigger(
 class DeleteTrigger(
     TriggerCommand,
     adapts=s_triggers.DeleteTrigger,
+):
+    pass
+
+
+class RewriteCommand(MetaCommand):
+    pass
+
+
+class CreateRewrite(
+    RewriteCommand,
+    adapts=s_rewrites.CreateRewrite,
+):
+    pass
+
+
+class RebaseRewrite(
+    RewriteCommand,
+    adapts=s_rewrites.RebaseRewrite,
+):
+    pass
+
+
+class AlterRewrite(
+    RewriteCommand,
+    adapts=s_rewrites.AlterRewrite,
+):
+    pass
+
+
+class DeleteRewrite(
+    RewriteCommand,
+    adapts=s_rewrites.DeleteRewrite,
 ):
     pass
 
@@ -4000,6 +4033,7 @@ class PointerMetaCommand(
         context: sd.CommandContext,
         *,
         fill_expr: Optional[s_expr.Expression],
+        is_default: bool=False,
     ) -> None:
         new_required = self.scls.get_required(schema)
 
@@ -4092,7 +4126,8 @@ class PointerMetaCommand(
                 schema=schema,
                 orig_schema=orig_schema,
                 context=context,
-                check_non_null=is_required and not is_multi
+                check_non_null=is_required and not is_multi,
+                allow_globals=is_default,
             )
 
             if not is_multi:
@@ -4400,6 +4435,7 @@ class PointerMetaCommand(
         target_as_singleton: bool = True,
         check_non_null: bool = False,
         produce_ctes: bool = True,
+        allow_globals: bool=False,
     ) -> Tuple[
         str,  # SQL
         bool,  # is_nullable
@@ -4435,6 +4471,7 @@ class PointerMetaCommand(
                 context,
                 conv_expr,
                 target_as_singleton=target_as_singleton,
+                make_globals_empty=allow_globals,
                 no_query_rewrites=True,
             )
         ir = conv_expr.irast
@@ -4457,6 +4494,7 @@ class PointerMetaCommand(
                     schema=orig_schema,
                 ),
                 target_as_singleton=target_as_singleton,
+                make_globals_empty=allow_globals,
                 no_query_rewrites=True,
             )
 
@@ -4901,7 +4939,8 @@ class LinkMetaCommand(PointerMetaCommand[s_links.Link]):
                 and not fills_required
             ):
                 self._alter_pointer_optionality(
-                    schema, schema, context, fill_expr=default)
+                    schema, schema, context,
+                    fill_expr=default, is_default=True)
             # If we're creating a required multi pointer without a SET
             # REQUIRED USING inside, run the alter_pointer_optionality
             # path to produce an error if there is existing data.
@@ -5370,7 +5409,8 @@ class PropertyMetaCommand(PointerMetaCommand[s_props.Property]):
                 and not prop.is_link_property(schema)
             ):
                 self._alter_pointer_optionality(
-                    schema, schema, context, fill_expr=default)
+                    schema, schema, context,
+                    fill_expr=default, is_default=True)
             # If we're creating a required multi pointer without a SET
             # REQUIRED USING inside, run the alter_pointer_optionality
             # path to produce an error if there is existing data.
@@ -5772,8 +5812,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
         aspect += '-t'
 
         # Postgres applies triggers in alphabetical order, and
-        # get_backend_name produces essentially cryptographically
-        # random trigger names.
+        # the names are uuids, which are not useful here.
         #
         # All we want for now is for source triggers to apply first,
         # though, so that a loop of objects with
@@ -5783,8 +5822,8 @@ class UpdateEndpointDeleteActions(MetaCommand):
         # Fortunately S comes before T.
         order_prefix = disposition[0]
 
-        return order_prefix + common.get_backend_name(
-            schema, target, catenate=False, aspect=aspect)[1]
+        name = common.get_backend_name(schema, target, catenate=False)
+        return f'{order_prefix}_{name[1]}_{aspect}'
 
     def get_trigger_proc_name(self, schema, target,
                               disposition, deferred=False, inline=False):
@@ -5805,8 +5844,8 @@ class UpdateEndpointDeleteActions(MetaCommand):
 
         aspect += '-f'
 
-        return common.get_backend_name(
-            schema, target, catenate=False, aspect=aspect)
+        name = common.get_backend_name(schema, target, catenate=False)
+        return (name[0], f'{name[1]}_{aspect}')
 
     def get_trigger_proc_text(self, target, links, *,
                               disposition, inline, schema):
