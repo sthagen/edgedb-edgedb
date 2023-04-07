@@ -11181,6 +11181,33 @@ class TestEdgeQLDataMigration(EdgeQLDataMigrationTestCase):
         await self.migrate(schema)
         await self.migrate(schema)
 
+    async def test_edgeql_migration_dml_rewrites_01(self):
+        await self.migrate(r"""
+            type Post {
+              required title: str;
+              modified: datetime {
+                rewrite insert, update using (datetime_of_statement())
+              }
+            }
+        """)
+        await self.migrate(r"""
+            type BlogPost {
+              required title: str;
+              modified: datetime {
+                rewrite insert, update using (datetime_of_statement())
+              }
+            }
+        """)
+        await self.migrate(r"""
+            type BlogPost {
+              required title: str;
+              modified: datetime {
+                rewrite insert, update using (datetime_of_transaction())
+              }
+            }
+        """)
+        await self.migrate('')
+
     async def test_edgeql_migration_globals_02(self):
         await self.migrate(r"""
             global current_user_id -> uuid;
@@ -11384,6 +11411,21 @@ class TestEdgeQLDataMigration(EdgeQLDataMigrationTestCase):
         """)
 
         await self.migrate("")
+
+    async def test_edgeql_migration_backlink_overloaded(self):
+        await self.migrate(r'''
+            type Target {
+                multi link meta_sources := .<target[is MetaSource];
+            }
+            abstract type MetaSource {
+                link target -> Target;
+            }
+
+            type Source extending MetaSource;
+            type ExternalSource extending MetaSource {
+                overloaded link target -> Target;
+            }
+        ''')
 
 
 class TestEdgeQLDataMigrationNonisolated(EdgeQLDataMigrationTestCase):
