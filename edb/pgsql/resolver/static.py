@@ -25,6 +25,7 @@ from typing import *
 from edb import errors
 
 from edb.pgsql import ast as pgast
+from edb.pgsql import parser as pgparser
 from edb.server import defines
 
 from . import context
@@ -35,12 +36,20 @@ Context = context.ResolverContextLevel
 
 @functools.singledispatch
 def eval(expr: pgast.BaseExpr, *, ctx: Context) -> Optional[pgast.BaseExpr]:
+    """
+    Tries to statically evaluate expr, recursing into sub-expressions.
+    Returns None if that is not possible.
+    """
     return None
 
 
 def eval_list(
     exprs: List[pgast.BaseExpr], *, ctx: Context
 ) -> Optional[List[pgast.BaseExpr]]:
+    """
+    Tries to statically evaluate exprs, recursing into sub-expressions.
+    Returns None if that is not possible.
+    """
     res = []
     for expr in exprs:
         r = eval(expr, ctx=ctx)
@@ -51,6 +60,12 @@ def eval_list(
 
 
 def name_in_pg_catalog(name: Sequence[str]) -> Optional[str]:
+    """
+    Strips `pg_catalog.` schema name from an SQL ident. Because pg_catalog is
+    always the first schema in search_path, every ident without schema name
+    defaults to is treaded
+    """
+
     if len(name) == 1 or name[0] == 'pg_catalog':
         return name[-1]
     return None
@@ -67,6 +82,10 @@ def eval_BaseConstant(
 def eval_TypeCast(
     expr: pgast.TypeCast, *, ctx: Context
 ) -> Optional[pgast.BaseExpr]:
+    pg_catalog_name = name_in_pg_catalog(expr.type_name.name)
+    if pg_catalog_name == 'regclass':
+        return cast_to_regclass(expr.arg, ctx)
+
     arg = eval(expr.arg, ctx=ctx)
     if not arg:
         return None
@@ -138,12 +157,65 @@ def eval_FuncCall(
         edgedb_version = buildmeta.get_version_line()
 
         return pgast.StringConstant(
-            val=" ".join([
-                "PostgreSQL",
-                defines.PGEXT_POSTGRES_VERSION,
-                f"(EdgeDB {edgedb_version}),",
-                platform.architecture()[0],
-            ]),
+            val=" ".join(
+                [
+                    "PostgreSQL",
+                    defines.PGEXT_POSTGRES_VERSION,
+                    f"(EdgeDB {edgedb_version}),",
+                    platform.architecture()[0],
+                ]
+            ),
+        )
+
+    if fn_name == "set_config":
+        # HACK: allow set_config('search_path', '', false) to support pg_dump
+        if args := eval_list(expr.args, ctx=ctx):
+            name, value, is_local = args
+            if (
+                isinstance(name, pgast.StringConstant)
+                and isinstance(value, pgast.StringConstant)
+                and isinstance(is_local, pgast.BooleanConstant)
+            ):
+                if (
+                    name.val == "search_path"
+                    and value.val == ""
+                    and not is_local.val
+                ):
+                    return value
+        raise errors.QueryError(
+            "function set_config is not supported", context=expr.context
+        )
+
+    if fn_name == 'current_setting':
+        arg = require_a_string_literal(expr, fn_name, ctx)
+
+        val = None
+        if arg == 'search_path':
+            val = ', '.join(ctx.options.search_path)
+        if val:
+            return pgast.StringConstant(val=val)
+        return expr
+
+    if fn_name == "pg_filenode_relation":
+        raise errors.QueryError(
+            f"function pg_catalog.{fn_name} is not supported",
+            context=expr.context,
+        )
+
+    if fn_name == "to_regclass":
+        arg = require_a_string_literal(expr, fn_name, ctx)
+        return to_regclass(arg, ctx=ctx)
+
+    cast_arg_to_regclass = {
+        'pg_relation_filenode',
+        'pg_relation_filepath',
+        'pg_relation_size',
+    }
+
+    if fn_name in cast_arg_to_regclass:
+        regclass_oid = cast_to_regclass(expr.args[0], ctx=ctx)
+        return pgast.FuncCall(
+            name=('pg_catalog', fn_name), args=[regclass_oid]
         )
 
     if fn_name in privilege_inquiry_functions_args:
@@ -162,14 +234,89 @@ def eval_FuncCall(
 
         # schema and table names need to be remapped. This is accomplished
         # with wrapper functions defined in metaschema.py.
-        if fn_name == 'has_schema_privilege':
-            return pgast.FuncCall(name=('edgedbsql', fn_name), args=fn_args)
-        if fn_name == 'has_table_privilege':
+        has_wrapper = {
+            'has_schema_privilege',
+            'has_table_privilege',
+            'has_column_privilege',
+        }
+        if fn_name in has_wrapper:
             return pgast.FuncCall(name=('edgedbsql', fn_name), args=fn_args)
 
         return pgast.FuncCall(name=('pg_catalog', fn_name), args=fn_args)
 
     return None
+
+
+def require_a_string_literal(
+    expr: pgast.FuncCall, fn_name: str, ctx: Context
+) -> str:
+    args = eval_list(expr.args, ctx=ctx)
+    if not (
+        args and len(args) == 1 and isinstance(args[0], pgast.StringConstant)
+    ):
+        raise errors.QueryError(
+            f"function pg_catalog.{fn_name} requires a string literal",
+            context=expr.context,
+        )
+
+    return args[0].val
+
+
+def cast_to_regclass(param: pgast.BaseExpr, ctx: Context) -> pgast.BaseExpr:
+    """
+    Equivalent to `::regclass` in SQL.
+
+    Converts a string constant or a oid to a "registered class"
+    (fully-qualified name of the table/index/sequence).
+    In practice, type of resulting expression is oid.
+    """
+
+    expr = eval(param, ctx=ctx)
+    if isinstance(expr, pgast.StringConstant):
+        return to_regclass(expr.val, ctx=ctx)
+    if isinstance(expr, pgast.NumericConstant):
+        return expr
+    raise errors.QueryError(
+        "casting to `regclass` requires a string or number literal",
+        context=param.context,
+    )
+
+
+def to_regclass(reg_class_name: str, ctx: Context) -> pgast.BaseExpr:
+    """
+    Equivalent to `to_regclass(text reg_class_name)` in SQL.
+
+    Parses a string as an SQL identifier (with optional schema name and
+    database name) and returns an SQL expression that evaluates to the
+    "registered class" of that ident.
+    """
+    from edb.pgsql.common import quote_literal as ql
+
+    try:
+        [stmt] = pgparser.parse(f'SELECT {reg_class_name}')
+        assert isinstance(stmt, pgast.SelectStmt)
+        [target] = stmt.target_list
+        assert isinstance(target.val, pgast.ColumnRef)
+        name = target.val.name
+    except Exception:
+        return pgast.NullConstant()
+
+    if len(name) < 2:
+        name = (ctx.options.search_path[0], name[0])
+
+    namespace, rel_name = name
+
+    # A bit hacky to parse SQL here, but I don't want to construct pgast
+    [stmt] = pgparser.parse(
+        f'''
+        SELECT pc.oid
+        FROM edgedbsql.pg_class pc
+        JOIN edgedbsql.pg_namespace pn ON pn.oid = pc.relnamespace
+        WHERE {ql(namespace)} = pn.nspname AND pc.relname = {ql(rel_name)}
+        '''
+    )
+    assert isinstance(stmt, pgast.SelectStmt)
+    return pgast.SubLink(operator=None, expr=stmt)
 
 
 def eval_current_schemas(
