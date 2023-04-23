@@ -1952,6 +1952,19 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 };
             """)
 
+    async def test_edgeql_ddl_default_12(self):
+        with self.assertRaisesRegex(
+            edgedb.QueryError,
+            'is part of a default cycle'
+        ):
+            await self.con.execute(r"""
+                CREATE TYPE Test3 {
+                    CREATE LINK d7 : Test3 {
+                        SET default := (INSERT Test3 {})
+                    }
+                }
+            """)
+
     async def test_edgeql_ddl_default_circular(self):
         await self.con.execute(r"""
             CREATE TYPE TestDefaultCircular {
@@ -5953,13 +5966,29 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         ''')
 
         async with self.assertRaisesRegexTx(
-                edgedb.SchemaError,
-                r'scalar type may not have a collection base type'):
-            await self.con.execute('''
+            edgedb.SchemaError,
+            r'scalar type may not have a collection base type',
+        ):
+            await self.con.execute(
+                '''
                 alter scalar type Foo {
                     drop extending str; extending array<str> last;
                 };
-            ''')
+            '''
+            )
+
+    async def test_edgeql_ddl_scalar_14(self):
+        async with self.assertRaisesRegexTx(
+            edgedb.UnsupportedFeatureError, r'unsupported range subtype'
+        ):
+            await self.con.execute(
+                '''
+                create scalar type Age extending int16;
+                create type User {
+                    create property age -> range<Age>;
+                };
+            '''
+            )
 
     async def test_edgeql_ddl_cast_01(self):
         await self.con.execute('''
