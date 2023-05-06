@@ -801,21 +801,21 @@ class Pointer(referencing.NamedReferencedInheritingObject,
     def get_implicit_bases(self, schema: s_schema.Schema) -> List[Pointer]:
         bases = super().get_implicit_bases(schema)
 
-        # True implicit bases for pointers will have a different source.
-        my_source = self.get_source(schema)
+        # True implicit bases for pointers will have the same name
+        my_name = self.get_shortname(schema)
         return [
             b for b in bases
-            if b.get_source(schema) != my_source
+            if b.get_shortname(schema) == my_name
         ]
 
     def get_implicit_ancestors(self, schema: s_schema.Schema) -> List[Pointer]:
         ancestors = super().get_implicit_ancestors(schema)
 
-        # True implicit ancestors for pointers will have a different source.
-        my_source = self.get_source(schema)
+        # True implicit ancestors for pointers will have the same name
+        my_name = self.get_shortname(schema)
         return [
             b for b in ancestors
-            if b.get_source(schema) != my_source
+            if b.get_shortname(schema) == my_name
         ]
 
     def has_user_defined_properties(self, schema: s_schema.Schema) -> bool:
@@ -2190,6 +2190,14 @@ class AlterPointer(
             target,
             inherited=pointer.field_is_inherited(schema, 'target'),
             computed=pointer.field_is_computed(schema, 'target'),
+        )
+
+    def is_data_safe(self) -> bool:
+        # HACK: expr ought to be managed by AlterSpecialObjectField
+        # the way that target/required/cardinality are.
+        return super().is_data_safe() and not (
+            self.get_attribute_value('expr') is not None
+            and self.get_orig_attribute_value('expr') is None
         )
 
 

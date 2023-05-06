@@ -9802,6 +9802,38 @@ class TestEdgeQLDataMigration(EdgeQLDataMigrationTestCase):
             ]
         )
 
+        # And changing a property to computed is NOT!
+        await self.start_migration('''
+            type Obj11 {
+                single property name := "test";
+            }
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'data_safe': False,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
+        # But just changing a computed is
+        await self.start_migration('''
+            type Obj11 {
+                single property name := "fffff";
+            }
+        ''')
+
+        await self.assert_describe_migration({
+            'confirmed': [],
+            'proposed': {
+                'data_safe': True,
+            },
+        })
+
+        await self.fast_forward_describe_migration()
+
     async def test_edgeql_migration_prompt_id_01(self):
         await self.start_migration('''
             type Bar { link spam -> Spam };
@@ -11425,6 +11457,30 @@ class TestEdgeQLDataMigration(EdgeQLDataMigrationTestCase):
             }
         ''')
 
+    async def test_edgeql_migration_to_computed_drop_exclusive(self):
+        await self.migrate(r'''
+            type User {
+              multi posts: Post {
+                constraint exclusive;
+              }
+              multi foo: int64 {
+                constraint exclusive;
+              }
+            }
+            type Post;
+        ''')
+
+        await self.migrate(r'''
+            type User {
+              multi link posts := .<user[is Post];
+              multi property foo := Post.num;
+            }
+            type Post {
+              user: User;
+              num: int64;
+            }
+        ''')
+
     async def test_edgeql_migration_alias_new_computed_01(self):
         await self.migrate(r'''
             global a_id -> str;
@@ -11474,6 +11530,52 @@ class TestEdgeQLDataMigration(EdgeQLDataMigrationTestCase):
                   constraint exclusive;
               }
               required property a_id := .x_id;
+            }
+        ''')
+
+    async def test_edgeql_migration_trigger_shift_01(self):
+        await self.migrate(r'''
+            type Log {
+                body: str;
+                timestamp: datetime {
+                    default := datetime_current();
+                }
+            }
+
+
+            abstract type Named {
+                required name: str;
+            }
+
+            type Person extending Named {
+                trigger log_insert after insert for each do (
+                    insert Log {
+                        body := __new__.__type__.name ++ ' ' ++ __new__.name,
+                    }
+                );
+            }
+        ''')
+
+        await self.migrate(r'''
+            type Log {
+                body: str;
+                timestamp: datetime {
+                    default := datetime_current();
+                }
+            }
+
+
+            abstract type Named {
+                required name: str;
+
+                trigger log_insert after insert for each do (
+                    insert Log {
+                        body := __new__.__type__.name ++ ' ' ++ __new__.name,
+                    }
+                );
+            }
+
+            type Person extending Named {
             }
         ''')
 

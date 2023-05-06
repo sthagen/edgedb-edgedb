@@ -3107,11 +3107,13 @@ class SysConfigSourceType(dbops.Enum):
                 'postgres default',
                 'postgres environment variable',
                 'postgres configuration file',
+                'environment variable',
+                'command line',
                 'postgres command line',
                 'postgres global',
+                'postgres client',
                 'system override',
                 'database',
-                'postgres client',
                 'postgres override',
                 'postgres interactive',
                 'postgres test',
@@ -3528,12 +3530,16 @@ class SysConfigFullFunction(dbops.Function):
             SELECT
                 s.name AS name,
                 s.value AS value,
-                'session' AS source,
-                FALSE AS from_backend  -- 'C' is for non-backend settings
+                (CASE
+                    WHEN s.type = 'A' THEN 'command line'
+                    WHEN s.type = 'E' THEN 'environment variable'
+                    ELSE 'session'
+                END) AS source,
+                FALSE AS from_backend  -- only 'B' is for backend settings
             FROM
                 _edgecon_state s
             WHERE
-                s.type = 'C'
+                s.type != 'B'
         ),
 
         pg_db_setting AS (
@@ -4409,9 +4415,54 @@ class FormatTypeFunction(dbops.Function):
         )
 
 
+class UuidGenerateV1mcFunction(dbops.Function):
+    def __init__(self, ext_schema: str) -> None:
+        super().__init__(
+            name=('edgedb', 'uuid_generate_v1mc'),
+            args=[],
+            returns=('uuid',),
+            volatility='volatile',
+            language='sql',
+            strict=True,
+            parallel_safe=True,
+            text=f'SELECT "{ext_schema}".uuid_generate_v1mc();'
+        )
+
+
+class UuidGenerateV4Function(dbops.Function):
+    def __init__(self, ext_schema: str) -> None:
+        super().__init__(
+            name=('edgedb', 'uuid_generate_v4'),
+            args=[],
+            returns=('uuid',),
+            volatility='volatile',
+            language='sql',
+            strict=True,
+            parallel_safe=True,
+            text=f'SELECT "{ext_schema}".uuid_generate_v4();'
+        )
+
+
+class UuidGenerateV5Function(dbops.Function):
+    def __init__(self, ext_schema: str) -> None:
+        super().__init__(
+            name=('edgedb', 'uuid_generate_v5'),
+            args=[
+                ('namespace', ('uuid',)),
+                ('name', ('text',)),
+            ],
+            returns=('uuid',),
+            volatility='immutable',
+            language='sql',
+            strict=True,
+            parallel_safe=True,
+            text=f'SELECT "{ext_schema}".uuid_generate_v5(namespace, name);'
+        )
+
+
 async def bootstrap(
     conn: pgcon.PGConnection,
-    config_spec: edbconfig.Spec
+    config_spec: edbconfig.Spec,
 ) -> None:
     cmds = [
         dbops.CreateSchema(name='edgedb'),
@@ -4423,6 +4474,9 @@ async def bootstrap(
         dbops.CreateTable(DBConfigTable()),
         dbops.CreateTable(DMLDummyTable()),
         dbops.Query(DMLDummyTable.SETUP_QUERY),
+        dbops.CreateFunction(UuidGenerateV1mcFunction('edgedbext')),
+        dbops.CreateFunction(UuidGenerateV4Function('edgedbext')),
+        dbops.CreateFunction(UuidGenerateV5Function('edgedbext')),
         dbops.CreateFunction(IntervalToMillisecondsFunction()),
         dbops.CreateFunction(SafeIntervalCastFunction()),
         dbops.CreateFunction(QuoteIdentFunction()),
@@ -4539,13 +4593,37 @@ async def bootstrap(
     await _execute_block(conn, block)
 
 
-async def create_pg_extensions(conn: pgcon.PGConnection) -> None:
+async def create_pg_extensions(
+    conn: pgcon.PGConnection,
+    backend_params: params.BackendRuntimeParams,
+) -> None:
+    ext_schema = backend_params.instance_params.ext_schema
     commands = dbops.CommandGroup()
     commands.add_commands([
-        dbops.CreateSchema(name='edgedbext'),
+        dbops.CreateSchema(name=ext_schema, conditional=True),
         dbops.CreateExtension(
-            dbops.Extension(name='uuid-ossp', schema='edgedbext'),
+            dbops.Extension(name='uuid-ossp', schema=ext_schema),
         ),
+    ])
+    block = dbops.PLTopBlock()
+    commands.generate(block)
+    await _execute_block(conn, block)
+
+
+async def patch_pg_extensions(
+    conn: pgcon.PGConnection,
+    backend_params: params.BackendRuntimeParams,
+) -> None:
+    ext_schema = backend_params.instance_params.ext_schema
+    commands = dbops.CommandGroup()
+    commands.add_commands([
+        dbops.CreateSchema(name=ext_schema, conditional=True),
+        dbops.CreateFunction(
+            UuidGenerateV1mcFunction(ext_schema), or_replace=True),
+        dbops.CreateFunction(
+            UuidGenerateV4Function(ext_schema), or_replace=True),
+        dbops.CreateFunction(
+            UuidGenerateV5Function(ext_schema), or_replace=True),
     ])
     block = dbops.PLTopBlock()
     commands.generate(block)
@@ -5561,7 +5639,11 @@ def _generate_sql_information_schema() -> List[dbops.Command]:
         WHERE nspname IN ('pg_catalog', 'pg_toast', 'information_schema',
                           'edgedb', 'edgedbstd')
         UNION ALL
-        SELECT edgedbsql.uuid_to_oid(t.module_id), t.schema_name, 10, NULL,
+        SELECT
+            edgedbsql.uuid_to_oid(t.module_id),
+            t.schema_name,
+            (SELECT oid FROM pg_roles WHERE rolname = CURRENT_USER LIMIT 1),
+            NULL,
             NULL, NULL, NULL, NULL, NULL, NULL
         FROM (
             SELECT DISTINCT schema_name, module_id
@@ -5920,7 +6002,7 @@ def _generate_sql_information_schema() -> List[dbops.Command]:
             stxstattarget,
             stxkeys,
             stxkind,
-            stxexprs,
+            NULL::pg_node_tree as stxexprs,
             tableoid, xmin, cmin, xmax, cmax, ctid
         FROM pg_statistic_ext
         """,
@@ -5936,29 +6018,6 @@ def _generate_sql_information_schema() -> List[dbops.Command]:
             NULL::oid AS stxdexpr,
             tableoid, xmin, cmin, xmax, cmax, ctid
         FROM pg_statistic_ext_data
-        """,
-        ),
-        dbops.View(
-            name=("edgedbsql", "pg_stats_ext_exprs"),
-            query="""
-        SELECT
-            schemaname,
-            tablename,
-            statistics_schemaname,
-            statistics_name,
-            statistics_owner,
-            expr,
-            null_frac,
-            avg_width,
-            n_distinct,
-            NULL::real[] AS most_common_vals,
-            most_common_freqs,
-            NULL::real[] AS histogram_bounds,
-            correlation,
-            NULL::real[] AS most_common_elems,
-            most_common_elem_freqs,
-            elem_count_histogram
-        FROM pg_stats_ext_exprs
         """,
         ),
         dbops.View(
@@ -6007,6 +6066,30 @@ def _generate_sql_information_schema() -> List[dbops.Command]:
             query="""
         SELECT *, tableoid, xmin, cmin, xmax, cmax, ctid
         FROM pg_trigger
+        WHERE FALSE
+        """,
+        ),
+        # Omit all subscriptions for now.
+        # This table is queried by pg_dump with COUNT(*) when user does not
+        # have permissions to access it. This should be allowed, but the
+        # view expands the query to all columns, which is not allowed.
+        # So we have to construct an empty view with correct signature that
+        # does not reference pg_subscription.
+        dbops.View(
+            name=("edgedbsql", "pg_subscription"),
+            query="""
+        SELECT
+            NULL::oid AS oid,
+            NULL::oid AS subdbid,
+            NULL::name AS subname,
+            NULL::oid AS subowner,
+            NULL::boolean AS subenabled,
+            NULL::text AS subconninfo,
+            NULL::name AS subslotname,
+            NULL::text AS subsynccommit,
+            NULL::oid AS subpublications,
+            tableoid, xmin, cmin, xmax, cmax, ctid
+        FROM pg_namespace
         WHERE FALSE
         """,
         ),
@@ -6063,7 +6146,6 @@ def _generate_sql_information_schema() -> List[dbops.Command]:
             'pg_statistic',
             'pg_statistic_ext',
             'pg_statistic_ext_data',
-            'pg_subscription',
             'pg_subscription_rel',
             'pg_tablespace',
             'pg_transform',
@@ -6130,6 +6212,7 @@ def _generate_sql_information_schema() -> List[dbops.Command]:
             'pg_index',
             'pg_constraint',
             'pg_trigger',
+            'pg_subscription',
         ]:
             continue
 
@@ -6319,7 +6402,12 @@ def get_support_views(
 
     conf = schema.get('cfg::Config', type=s_objtypes.ObjectType)
     cfg_views, _ = _generate_config_type_view(
-        schema, conf, scope=None, path=[], rptr=None)
+        schema,
+        conf,
+        scope=None,
+        path=[],
+        rptr=None,
+    )
     commands.add_commands([
         dbops.CreateView(dbops.View(name=tn, query=q), or_replace=True)
         for tn, q in cfg_views
@@ -6327,7 +6415,12 @@ def get_support_views(
 
     conf = schema.get('cfg::InstanceConfig', type=s_objtypes.ObjectType)
     cfg_views, _ = _generate_config_type_view(
-        schema, conf, scope=qltypes.ConfigScope.INSTANCE, path=[], rptr=None)
+        schema,
+        conf,
+        scope=qltypes.ConfigScope.INSTANCE,
+        path=[],
+        rptr=None,
+    )
     commands.add_commands([
         dbops.CreateView(dbops.View(name=tn, query=q), or_replace=True)
         for tn, q in cfg_views
@@ -6335,7 +6428,12 @@ def get_support_views(
 
     conf = schema.get('cfg::DatabaseConfig', type=s_objtypes.ObjectType)
     cfg_views, _ = _generate_config_type_view(
-        schema, conf, scope=qltypes.ConfigScope.DATABASE, path=[], rptr=None)
+        schema,
+        conf,
+        scope=qltypes.ConfigScope.DATABASE,
+        path=[],
+        rptr=None,
+    )
     commands.add_commands([
         dbops.CreateView(dbops.View(name=tn, query=q), or_replace=True)
         for tn, q in cfg_views
@@ -6803,7 +6901,7 @@ def _build_key_expr(key_components: List[str]) -> str:
         (SELECT
             (CASE WHEN array_position(q.v, NULL) IS NULL
              THEN
-                 edgedbext.uuid_generate_v5(
+                 edgedb.uuid_generate_v5(
                      '{DATABASE_ID_NAMESPACE}'::uuid,
                      array_to_string(q.v, ';')
                  )

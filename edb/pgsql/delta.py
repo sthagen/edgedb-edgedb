@@ -1179,10 +1179,12 @@ class FunctionCommand(MetaCommand):
                                           schema=nativecode.schema)
         ):
             # Add a cast and recompile it
-            qlexpr = qlcompiler.astutils.ensure_qlstmt(ql_ast.TypeCast(
-                type=s_utils.typeref_to_ast(schema, return_type),
-                expr=nativecode.qlast,
-            ))
+            qlexpr = qlcompiler.astutils.ensure_ql_query(
+                ql_ast.TypeCast(
+                    type=s_utils.typeref_to_ast(schema, return_type),
+                    expr=nativecode.qlast,
+                )
+            )
             nativecode = self._compile_edgeql_function(
                 schema,
                 context,
@@ -1340,7 +1342,9 @@ class FunctionCommand(MetaCommand):
                 explicit_top_cast=irtyputils.type_to_typeref(  # note: no cache
                     schema, func.get_return_type(schema)),
                 output_format=compiler.OutputFormat.NATIVE,
-                use_named_params=True)
+                use_named_params=True,
+                backend_runtime_params=context.backend_runtime_params,
+            )
 
         return self.make_function(func, body, schema), replace
 
@@ -5203,10 +5207,11 @@ class AlterLink(LinkMetaCommand, adapts=s_links.AlterLink):
 
         if not is_abs and (was_comp and not is_comp):
             self._create_link(link, schema, orig_schema, context)
-        elif not is_abs and (not was_comp and is_comp):
-            self._delete_link(link, schema, orig_schema, context)
 
         schema = super()._alter_innards(schema, context)
+
+        if not is_abs and (not was_comp and is_comp):
+            self._delete_link(link, schema, orig_schema, context)
 
         # We check whether otd has changed, rather than whether
         # it is an attribute on this alter, because it might
@@ -5668,11 +5673,12 @@ class AlterProperty(PropertyMetaCommand, adapts=s_props.AlterProperty):
 
         if src and (was_comp and not is_comp):
             self._create_property(prop, src, schema, orig_schema, context)
-        elif src and (not was_comp and is_comp):
-            self._delete_property(
-                prop, src.scls, src.op, schema, orig_schema, context)
 
         schema = super()._alter_innards(schema, context)
+
+        if src and (not was_comp and is_comp):
+            self._delete_property(
+                prop, src.scls, src.op, schema, orig_schema, context)
 
         if self.metadata_only:
             return schema
@@ -6616,7 +6622,7 @@ class UpdateEndpointDeleteActions(MetaCommand):
                 name=proc_name, text=proc_text, volatility='volatile',
                 returns='trigger', language='plpgsql')
 
-            self.pgops.add(dbops.CreateOrReplaceFunction(trig_func))
+            self.pgops.add(dbops.CreateFunction(trig_func, or_replace=True))
 
             self.pgops.add(dbops.CreateTrigger(
                 trigger, neg_conditions=[dbops.TriggerExists(

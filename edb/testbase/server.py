@@ -1081,11 +1081,15 @@ class DatabaseTestCase(ClusterTestCase, ConnectedTestCaseMixin):
             if script:
                 cls.loop.run_until_complete(cls.con.execute(script))
 
+    @staticmethod
+    def get_set_up():
+        return os.environ.get('EDGEDB_TEST_CASES_SET_UP', 'run')
+
     @classmethod
     def tearDownClass(cls):
         script = ''
 
-        class_set_up = os.environ.get('EDGEDB_TEST_CASES_SET_UP', 'run')
+        class_set_up = cls.get_set_up()
 
         if cls.TEARDOWN and class_set_up != 'skip':
             script = cls.TEARDOWN.strip()
@@ -1411,6 +1415,11 @@ class StableDumpTestCase(QueryTestCase, CLITestCaseMixin):
             await asyncio.to_thread(
                 self.run_cli, '-d', dbname, 'restore', f.name
             )
+
+        # Cycle the connection to avoid state mismatches
+        await self.con.aclose()
+        self.con = await self.connect(database=dbname)
+
         await check_method(self)
 
     async def check_dump_restore(self, check_method):
@@ -1488,6 +1497,9 @@ class StablePGDumpTestCase(BaseQueryTestCase):
             import asyncpg
         except ImportError:
             raise unittest.SkipTest('SQL tests skipped: asyncpg not installed')
+
+        if cls.get_set_up() == 'inplace':
+            raise unittest.SkipTest('SQL dump tests skipped in single db mode')
 
         super().setUpClass()
         conargs = cls.get_connect_args()
@@ -1885,6 +1897,7 @@ class _EdgeDBServer:
         jwt_sub_allowlist_file: Optional[os.PathLike] = None,
         jwt_revocation_list_file: Optional[os.PathLike] = None,
         env: Optional[Dict[str, str]] = None,
+        extra_args: Optional[List[str]] = None,
     ) -> None:
         self.bind_addrs = bind_addrs
         self.auto_shutdown_after = auto_shutdown_after
@@ -1915,6 +1928,7 @@ class _EdgeDBServer:
         self.jwt_sub_allowlist_file = jwt_sub_allowlist_file
         self.jwt_revocation_list_file = jwt_revocation_list_file
         self.env = env
+        self.extra_args = extra_args
 
     async def wait_for_server_readiness(self, stream: asyncio.StreamReader):
         while True:
@@ -2074,6 +2088,9 @@ class _EdgeDBServer:
             cmd += ['--jwt-revocation-list-file',
                     self.jwt_revocation_list_file]
 
+        if self.extra_args:
+            cmd.extend(self.extra_args)
+
         if self.debug:
             print(
                 f'Starting EdgeDB cluster with the following params:\n'
@@ -2198,6 +2215,7 @@ def start_edgedb_server(
     jwt_sub_allowlist_file: Optional[os.PathLike] = None,
     jwt_revocation_list_file: Optional[os.PathLike] = None,
     env: Optional[Dict[str, str]] = None,
+    extra_args: Optional[List[str]] = None,
 ):
     if not devmode.is_in_dev_mode() and not runstate_dir:
         if backend_dsn or adjacent_to:
@@ -2247,6 +2265,7 @@ def start_edgedb_server(
         jwt_sub_allowlist_file=jwt_sub_allowlist_file,
         jwt_revocation_list_file=jwt_revocation_list_file,
         env=env,
+        extra_args=extra_args,
     )
 
 
@@ -2389,7 +2408,20 @@ def get_cases_by_shard(cases, selected_shard, total_shards, verbosity, stats):
     return cases
 
 
-def find_available_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("localhost", 0))
-        return sock.getsockname()[1]
+def find_available_port(max_value=None) -> int:
+    if max_value is None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("localhost", 0))
+            return sock.getsockname()[1]
+    elif max_value > 1024:
+        port = max_value
+        while port > 1024:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.bind(("localhost", port))
+                    return port
+            except IOError:
+                port -= 1
+        raise RuntimeError("cannot find an available port")
+    else:
+        raise ValueError("max_value must be greater than 1024")
