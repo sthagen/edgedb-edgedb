@@ -79,7 +79,7 @@ from . import status
 from . import ddl
 
 if TYPE_CHECKING:
-    from edb.server import pgcon
+    from edb.server import metaschema
 
 
 EMPTY_MAP = immutables.Map()
@@ -225,7 +225,7 @@ def new_compiler(
     ))
 
 
-async def new_compiler_from_pg(con: pgcon.PGConnection) -> Compiler:
+async def new_compiler_from_pg(con: metaschema.PGConnection) -> Compiler:
     num_patches = await get_patch_count(con)
 
     return new_compiler(
@@ -290,7 +290,7 @@ def new_compiler_context(
     return ctx
 
 
-async def get_patch_count(backend_conn: pgcon.PGConnection) -> int:
+async def get_patch_count(backend_conn: metaschema.PGConnection) -> int:
     """Get the number of applied patches."""
     num_patches = await backend_conn.sql_fetch_val(
         b'''
@@ -303,7 +303,7 @@ async def get_patch_count(backend_conn: pgcon.PGConnection) -> int:
 
 
 async def load_cached_schema(
-    backend_conn: pgcon.PGConnection,
+    backend_conn: metaschema.PGConnection,
     patches: int,
     key: str,
 ) -> s_schema.Schema:
@@ -323,14 +323,14 @@ async def load_cached_schema(
 
 
 async def load_std_schema(
-    backend_conn: pgcon.PGConnection,
+    backend_conn: metaschema.PGConnection,
     patches: int,
 ) -> s_schema.Schema:
     return await load_cached_schema(backend_conn, patches, 'stdschema')
 
 
 async def load_schema_intro_query(
-    backend_conn: pgcon.PGConnection,
+    backend_conn: metaschema.PGConnection,
     patches: int,
     kind: str,
 ) -> str:
@@ -345,7 +345,7 @@ async def load_schema_intro_query(
 
 
 async def load_schema_class_layout(
-    backend_conn: pgcon.PGConnection,
+    backend_conn: metaschema.PGConnection,
     patches: int,
 ) -> s_refl.SchemaClassLayout:
     key = f'classlayout{pg_patches.get_version_key(patches)}'
@@ -668,8 +668,14 @@ class Compiler:
                     **args
                 )
                 resolved = pg_resolver.resolve(stmt, schema, options)
-                source = pg_codegen.generate_source(resolved)
-                unit = dbstate.SQLQueryUnit(query=source)
+                source, tl_data = (
+                    pg_codegen.generate_source_with_translation_data(
+                        resolved
+                    ))
+
+                unit = dbstate.SQLQueryUnit(
+                    query=source,
+                    translation_data=tl_data)
 
             tx_state.apply(unit)
             unit.stmt_name = b"s" + hashlib.sha1(
