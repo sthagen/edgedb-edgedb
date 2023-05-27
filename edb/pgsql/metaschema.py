@@ -4703,7 +4703,7 @@ def ptr_col_name(
 ) -> str:
     prop = obj.getptr(schema, s_name.UnqualName(propname))
     psi = types.get_pointer_storage_info(prop, schema=schema)
-    return psi.column_name  # type: ignore[no-any-return]
+    return psi.column_name
 
 
 def format_fields(
@@ -5955,7 +5955,7 @@ def _generate_sql_information_schema() -> List[dbops.Command]:
             datistemplate,
             datallowconn,
             datconnlimit,
-            datlastsysoid,
+            0::oid AS datlastsysoid,
             datfrozenxid,
             datminmxid,
             dattablespace,
