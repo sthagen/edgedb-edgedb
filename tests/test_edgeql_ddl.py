@@ -568,6 +568,12 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             };
         """)
 
+        await self.con.execute(
+            """
+            INSERT TestSelfLink1 { foo1 := 'hello' };
+            """
+        )
+
     async def test_edgeql_ddl_15(self):
         await self.con.execute(r"""
             CREATE TYPE TestSelfLink2 {
@@ -608,7 +614,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             CREATE TYPE TestSelfLink3 {
                 CREATE PROPERTY foo3 -> std::str;
                 CREATE PROPERTY bar3 -> std::str {
-                    SET default := TestSelfLink3.foo3;
+                    SET default := .foo3;
                 };
             };
         """)
@@ -1957,13 +1963,42 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             edgedb.QueryError,
             'is part of a default cycle'
         ):
-            await self.con.execute(r"""
+            await self.con.execute(
+                r"""
                 CREATE TYPE Test3 {
                     CREATE LINK d7 : Test3 {
                         SET default := (INSERT Test3 {})
                     }
                 }
-            """)
+                """
+            )
+
+    async def test_edgeql_ddl_default_13(self):
+        # defaults are detached: when referencing the source object (User),
+        # the cardinality is many.
+        # (you can still use partial path prefix)
+
+        with self.assertRaisesRegex(
+            edgedb.QueryError,
+            'possibly more than one element returned by an expression',
+        ):
+            await self.con.execute(
+                r"""
+                create type User;
+
+                create type Project {
+                    create required link owner -> User;
+                };
+
+                alter type User {
+                    create link default_project -> Project {
+                        set default := (insert Project {
+                            owner := User
+                        })
+                    };
+                };
+                """
+            )
 
     async def test_edgeql_ddl_default_circular(self):
         await self.con.execute(r"""
@@ -5945,7 +5980,8 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         ''')
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
-                r'cannot change concrete base of a scalar type'):
+                r'cannot change concrete base of scalar type '
+                r'default::Foo from std::str to std::int64'):
             await self.con.execute('''
                 alter scalar type Foo {
                     drop extending str;
@@ -11272,7 +11308,8 @@ type default::Foo {
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
-                'enumeration must be the only supertype specified'):
+                "cannot add supertype scalar type 'std::str' to enum type "
+                "default::Color"):
             await self.con.execute('''
                 ALTER SCALAR TYPE Color EXTENDING str FIRST;
             ''')
@@ -11282,8 +11319,7 @@ type default::Foo {
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
-                'cannot add another enum as supertype, '
-                'use EXTENDING without position qualification'):
+                'cannot add supertype enum<Bad> to enum type default::Color'):
             await self.con.execute('''
                 ALTER SCALAR TYPE Color
                     EXTENDING enum<Bad> LAST;
@@ -11294,7 +11330,7 @@ type default::Foo {
 
         with self.assertRaisesRegex(
                 edgedb.SchemaError,
-                'cannot set more than one enum as supertype'):
+                'enum default::Color may not have multiple supertypes'):
             await self.con.execute('''
                 ALTER SCALAR TYPE Color
                     EXTENDING enum<Bad>, enum<AlsoBad>;
@@ -12262,7 +12298,7 @@ type default::Foo {
 
     async def test_edgeql_ddl_index_01(self):
         with self.assertRaisesRegex(
-            edgedb.ResultCardinalityMismatchError,
+            edgedb.SchemaDefinitionError,
             r"possibly more than one element returned by the index expression",
             _line=4, _col=34
         ):
@@ -12275,7 +12311,7 @@ type default::Foo {
 
     async def test_edgeql_ddl_index_02(self):
         with self.assertRaisesRegex(
-            edgedb.ResultCardinalityMismatchError,
+            edgedb.SchemaDefinitionError,
             r"possibly more than one element returned by the index expression",
             _line=5, _col=34
         ):
@@ -12289,7 +12325,7 @@ type default::Foo {
 
     async def test_edgeql_ddl_index_03(self):
         with self.assertRaisesRegex(
-            edgedb.ResultCardinalityMismatchError,
+            edgedb.SchemaDefinitionError,
             r"possibly more than one element returned by the index expression",
             _line=5, _col=34
         ):
@@ -13135,6 +13171,18 @@ CREATE MIGRATION m14i24uhm6przo3bpl2lqndphuomfrtq3qdjaqdg6fza7h6m7tlbra
         await self._simple_rename_ref_tests(
             """CREATE ALIAS Alias := Note { command := .note ++ "!" };""",
             """DROP ALIAS Alias;""",
+        )
+
+    async def test_edgeql_ddl_describe_nested_module_01(self):
+        await self.con.execute(r"""
+            create module foo;
+            create module foo::bar;
+            create type foo::bar::T;
+        """)
+
+        await self.assert_query_result(
+            "describe module foo::bar;",
+            ['create type foo::bar::T;'],
         )
 
     async def test_edgeql_ddl_drop_multi_prop_01(self):
@@ -15873,3 +15921,45 @@ class TestDDLNonIsolated(tb.DDLTestCase):
             await self.con.execute('''
                 drop extension package ltree_broken VERSION '1.0'
             ''')
+
+    async def test_edgeql_ddl_reindex(self):
+        await self.con.execute('''
+            create type Tgt;
+            create type Foo {
+                create property foo -> str {
+                    create constraint exclusive;
+                };
+                create property bar -> str;
+                create index on (.foo);
+                create constraint exclusive on ((.foo, .bar));
+                create link tgt -> Tgt {
+                    create property foo -> str;
+                };
+                create link tgts -> Tgt {
+                    create property foo -> str;
+                };
+            };
+            create module test;
+            create type test::Bar extending Foo;
+        ''')
+        await self.con.execute('''
+            administer reindex(Foo)
+        ''')
+        await self.con.execute('''
+            administer reindex(Foo.foo)
+        ''')
+        await self.con.execute('''
+            administer reindex(Foo.bar)
+        ''')
+        await self.con.execute('''
+            administer reindex(Foo.tgt)
+        ''')
+        await self.con.execute('''
+            administer reindex(Foo.tgts)
+        ''')
+        await self.con.execute('''
+            administer reindex(test::Bar)
+        ''')
+        await self.con.execute('''
+            administer reindex(Object)
+        ''')
