@@ -6426,6 +6426,38 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             }
         """])
 
+    def test_schema_migrations_equivalence_constraint_11(self):
+        self._assert_migration_equivalence([r"""
+            type Foo {
+              required property name -> str {
+                constraint max_len_value(200) {
+                  errmessage := "name is too long";
+                }
+              }
+              constraint exclusive on (.name) {
+                errmessage := "exclusivity!";
+              }
+            }
+        """, r"""
+            type Foo {
+              required property name -> str {
+                constraint max_len_value(201) {
+                  errmessage := "name is too long";
+                }
+              }
+              constraint exclusive on (.name) {
+                errmessage := "exclusivity!";
+              }
+            }
+        """, r"""
+            type Foo {
+              required property name -> str;
+              constraint exclusive on (.name) {
+                errmessage := "exclusivity!";
+              }
+            }
+        """])
+
     def test_schema_migrations_equivalence_policies_01(self):
         self._assert_migration_equivalence([r"""
             type X {
@@ -8045,6 +8077,49 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                 };
             """,
             r"""
+            """,
+        ])
+
+    def test_schema_migrations_implicit_type_01(self):
+        self._assert_migration_equivalence([
+            r"""
+                abstract type Pinnable {
+                    property pinned := __source__ in <Pinnable>{};
+                }
+            """,
+            r"""
+                abstract type Pinnable {
+                    property pinned := __source__ in <Pinnable>{};
+                }
+                type Foo extending Pinnable {}
+            """,
+        ])
+
+    def test_schema_migrations_implicit_type_02(self):
+        self._assert_migration_equivalence([
+            r"""
+                abstract type Person {
+                    multi link friends : Person{
+                        constraint expression on (
+                                __subject__ != __subject__@source
+                            );
+                    };
+
+                }
+            """,
+            r"""
+                abstract type Person {
+                    multi link friends : Person{
+                        constraint expression on (
+                                __subject__ != __subject__@source
+                            );
+                    };
+
+                }
+
+                type Employee extending Person{
+                    department: str;
+                }
             """,
         ])
 

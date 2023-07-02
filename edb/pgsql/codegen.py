@@ -18,9 +18,11 @@
 
 
 from __future__ import annotations
-from typing import Sequence
 
 from typing import *
+
+import collections
+import dataclasses
 
 from edb import errors
 
@@ -31,63 +33,86 @@ from edb.common import exceptions
 from edb.common import markup
 
 
-class SQLSourceGeneratorContext(markup.MarkupExceptionContext):
-    title = 'SQL Source Generator Context'
+def generate(
+    node: pgast.Base,
+    *,
+    indent_with: str = ' ' * 4,
+    add_line_information: bool = False,
+    pretty: bool = True,
+    reordered: bool = False,
+    with_translation_data: bool = False,
+) -> SQLSource:
+    # Main entrypoint
 
-    def __init__(
-        self,
-        node: pgast.Base,
-        chunks_generated: Optional[Sequence[str]] = None,
-    ):
-        self.node = node
-        self.chunks_generated = chunks_generated
+    generator = SQLSourceGenerator(
+        opts=codegen.Options(
+            indent_with=indent_with,
+            add_line_information=add_line_information,
+            pretty=pretty,
+        ),
+        reordered=reordered,
+        with_translation_data=with_translation_data,
+    )
 
-    @classmethod
-    def as_markup(cls: Any, self: Any, *, ctx: Any):  # type: ignore
-        me = markup.elements
+    try:
+        generator.visit(node)
 
-        body = [
-            me.doc.Section(
-                title='SQL Tree',
-                body=[markup.serialize(self.node, ctx=ctx)],  # type: ignore
-            )
-        ]
+    except GeneratorError as error:
+        ctx = GeneratorContext(node, generator.result)
+        exceptions.add_context(error, ctx)
+        raise
+    except Exception as error:
+        ctx = GeneratorContext(node, generator.result)
+        err = GeneratorError('error while generating SQL source')
+        exceptions.add_context(err, ctx)
+        raise err from error
 
-        if self.chunks_generated:
-            code = markup.serializer.serialize_code(
-                ''.join(self.chunks_generated), lexer='sql'
-            )
-            body.append(
-                me.doc.Section(
-                    title='SQL generated so far', body=[code]  # type: ignore
-                )
-            )
+    if with_translation_data:
+        assert generator.translation_data
 
-        return me.lang.ExceptionContext(
-            title=self.title, body=body  # type: ignore
-        )
-
-
-class SQLSourceGeneratorError(errors.InternalServerError):
-    def __init__(
-        self,
-        msg: str,
-        *,
-        node: Optional[pgast.Base] = None,
-        details: Optional[str] = None,
-        hint: Optional[str] = None,
-    ) -> None:
-        super().__init__(msg, details=details, hint=hint)
-        if node is not None:
-            ctx = SQLSourceGeneratorContext(node)
-            exceptions.add_context(self, ctx)
+    return SQLSource(
+        text=generator.finish(),
+        translation_data=generator.translation_data,
+        param_index=generator.param_index,
+    )
 
 
-class SQLSourceGeneratorTranslationData:
+def generate_source(
+    node: pgast.Base,
+    *,
+    indent_with: str = ' ' * 4,
+    add_line_information: bool = False,
+    pretty: bool = True,
+    reordered: bool = False,
+) -> str:
+    # Simplified entrypoint
+
+    source = generate(
+        node,
+        indent_with=indent_with,
+        add_line_information=add_line_information,
+        pretty=pretty,
+        reordered=reordered,
+    )
+    return source.text
+
+
+def generate_ctes_source(
+    ctes: List[pgast.CommonTableExpr],
+) -> str:
+    # Alternative simplified entrypoint generating 'WITH a AS (...)' only.
+
+    generator = SQLSourceGenerator(opts=codegen.Options())
+    generator.gen_ctes(ctes)
+
+    return generator.finish()
+
+
+class TranslationData:
     source_start: int
     output_start: int
     output_end: int
-    children: List[SQLSourceGeneratorTranslationData]
+    children: List[TranslationData]
 
     def __init__(
         self,
@@ -111,74 +136,35 @@ class SQLSourceGeneratorTranslationData:
         return self.source_start
 
 
+@dataclasses.dataclass(frozen=True)
+class SQLSource:
+    text: str
+    param_index: dict[int, list[int]]
+    translation_data: Optional[TranslationData] = None
+
+
 class SQLSourceGenerator(codegen.SourceGenerator):
-    def __init__(  # type: ignore
+    def __init__(
         self,
-        *args,
-        reordered=False,
-        with_translation_data=False,
-        **kwargs
+        opts: codegen.Options,
+        *,
+        with_translation_data: bool = False,
+        reordered: bool = False,
     ):
-        super().__init__(*args, **kwargs)
-        self.param_index: dict[object, int] = {}
+        super().__init__(
+            indent_with=opts.indent_with,
+            add_line_information=opts.add_line_information,
+            pretty=opts.pretty,
+        )
+        # params
         self.with_translation_data: bool = with_translation_data
-        self.write_index: int = 0
-        self.translation_data: Optional[
-            SQLSourceGeneratorTranslationData] = None
         self.reordered = reordered
 
-    @classmethod
-    def to_source(  # type: ignore
-        cls,
-        node: pgast.Base,
-        indent_with: str = ' ' * 4,
-        add_line_information: bool = False,
-        pretty: bool = True,
-        reordered: bool = False,
-    ) -> str:
-        try:
-            return super().to_source(
-                node,
-                indent_with=indent_with,
-                reordered=reordered,
-                add_line_information=add_line_information,
-                pretty=pretty,
-            )
-        except SQLSourceGeneratorError as e:
-            ctx = SQLSourceGeneratorContext(node)
-            exceptions.add_context(e, ctx)
-            raise
-
-    @classmethod
-    def ctes_to_source(cls, ctes: List[pgast.CommonTableExpr]) -> str:
-        generator = cls()
-        generator.gen_ctes(ctes)
-        return ''.join(generator.result)
-
-    @classmethod
-    def to_source_with_translation(
-        cls,
-        node: pgast.Base,
-        indent_with: str = ' ' * 4,
-        add_line_information: bool = False,
-        pretty: bool = True,
-        reordered: bool = False,
-    ) -> Tuple[str, SQLSourceGeneratorTranslationData]:
-        try:
-            generator = cls(
-                indent_with=indent_with,
-                add_line_information=add_line_information,
-                pretty=pretty,
-                reordered=reordered,
-                with_translation_data=True,
-            )
-            generator.visit(node)
-            assert generator.translation_data
-            return ''.join(generator.result), generator.translation_data
-        except SQLSourceGeneratorError as e:
-            ctx = SQLSourceGeneratorContext(node)
-            exceptions.add_context(e, ctx)
-            raise
+        # state
+        self.param_index: collections.defaultdict[int, list[int]] = (
+            collections.defaultdict(list))
+        self.write_index: int = 0
+        self.translation_data: Optional[TranslationData] = None
 
     def write(
         self,
@@ -192,7 +178,7 @@ class SQLSourceGenerator(codegen.SourceGenerator):
 
     def visit(self, node):  # type: ignore
         if self.with_translation_data:
-            translation_data = SQLSourceGeneratorTranslationData(
+            translation_data = TranslationData(
                 source_start=node.context.start if node.context else 0,
                 output_start=self.write_index,
             )
@@ -207,7 +193,7 @@ class SQLSourceGenerator(codegen.SourceGenerator):
                 self.translation_data = old_top
 
     def generic_visit(self, node):  # type: ignore
-        raise SQLSourceGeneratorError(
+        raise GeneratorError(
             'No method to generate code for %s' % node.__class__.__name__
         )
 
@@ -626,7 +612,7 @@ class SQLSourceGenerator(codegen.SourceGenerator):
         elif isinstance(rel, pgast.CommonTableExpr):
             self.write(common.quote_ident(rel.name))
         else:
-            raise SQLSourceGeneratorError(
+            raise GeneratorError(
                 'unexpected relation in RelRangeVar: {!r}'.format(rel)
             )
 
@@ -775,7 +761,8 @@ class SQLSourceGenerator(codegen.SourceGenerator):
         self.write(common.quote_bytea_literal(node.val))
 
     def visit_ParamRef(self, node: pgast.ParamRef) -> None:
-        self.write('$', str(node.number))
+        self.write(f'${node.number}')
+        self.param_index[node.number].append(len(self.result) - 1)
 
     def visit_RowExpr(self, node: pgast.RowExpr) -> None:
         self.write('ROW(')
@@ -872,7 +859,7 @@ class SQLSourceGenerator(codegen.SourceGenerator):
             elif node.nulls == pgast.NullsLast:
                 self.write(' NULLS LAST')
             else:
-                raise SQLSourceGeneratorError(
+                raise GeneratorError(
                     'unexpected NULLS order: {}'.format(node.nulls)
                 )
 
@@ -1095,7 +1082,7 @@ class SQLSourceGenerator(codegen.SourceGenerator):
                     self.write(" DEFERRABLE")
 
     def visit_PrepareStmt(self, node: pgast.PrepareStmt) -> None:
-        self.write(f"PREPARE {node.name}")
+        self.write(f"PREPARE {common.quote_ident(node.name)}")
         if node.argtypes:
             self.write(f"(")
             self.visit_list(node.argtypes, newlines=False)
@@ -1104,11 +1091,14 @@ class SQLSourceGenerator(codegen.SourceGenerator):
         self.visit(node.query)
 
     def visit_ExecuteStmt(self, node: pgast.ExecuteStmt) -> None:
-        self.write(f"EXECUTE {node.name}")
+        self.write(f"EXECUTE {common.quote_ident(node.name)}")
         if node.params:
             self.write(f"(")
             self.visit_list(node.params, newlines=False)
             self.write(f")")
+
+    def visit_DeallocateStmt(self, node: pgast.DeallocateStmt) -> None:
+        self.write(f"DEALLOCATE {common.quote_ident(node.name)}")
 
     def visit_SQLValueFunction(self, node: pgast.SQLValueFunction) -> None:
         from edb.pgsql.ast import SQLValueFunctionOP as op
@@ -1260,6 +1250,53 @@ class SQLSourceGenerator(codegen.SourceGenerator):
             self.write(' (' + ', '.join(opts), ')')
 
 
-generate_source = SQLSourceGenerator.to_source
-generate_source_with_translation_data = (SQLSourceGenerator.
-                                         to_source_with_translation)
+class GeneratorContext(markup.MarkupExceptionContext):
+    title = 'SQL Source Generator Context'
+
+    def __init__(
+        self,
+        node: pgast.Base,
+        chunks_generated: Optional[Sequence[str]] = None,
+    ):
+        self.node = node
+        self.chunks_generated = chunks_generated
+
+    @classmethod
+    def as_markup(cls: Any, self: Any, *, ctx: Any):  # type: ignore
+        me = markup.elements
+
+        body = [
+            me.doc.Section(
+                title='SQL Tree',
+                body=[markup.serialize(self.node, ctx=ctx)],  # type: ignore
+            )
+        ]
+
+        if self.chunks_generated:
+            code = markup.serializer.serialize_code(
+                ''.join(self.chunks_generated), lexer='sql'
+            )
+            body.append(
+                me.doc.Section(
+                    title='SQL generated so far', body=[code]  # type: ignore
+                )
+            )
+
+        return me.lang.ExceptionContext(
+            title=self.title, body=body  # type: ignore
+        )
+
+
+class GeneratorError(errors.InternalServerError):
+    def __init__(
+        self,
+        msg: str,
+        *,
+        node: Optional[pgast.Base] = None,
+        details: Optional[str] = None,
+        hint: Optional[str] = None,
+    ) -> None:
+        super().__init__(msg, details=details, hint=hint)
+        if node is not None:
+            ctx = GeneratorContext(node)
+            exceptions.add_context(self, ctx)

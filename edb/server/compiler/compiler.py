@@ -36,7 +36,6 @@ from edb import errors
 
 from edb.server import defines
 from edb.server import config
-from edb.pgsql import compiler as pg_compiler
 
 from edb import edgeql
 from edb.common import debug
@@ -65,6 +64,9 @@ from edb.schema import schema as s_schema
 from edb.schema import types as s_types
 
 from edb.pgsql import ast as pgast
+from edb.pgsql import compiler as pg_compiler
+from edb.pgsql import codegen as pg_codegen
+from edb.pgsql import debug as pg_debug
 from edb.pgsql import common as pg_common
 from edb.pgsql import dbops as pg_dbops
 from edb.pgsql import params as pg_params
@@ -100,7 +102,7 @@ class CompileContext:
     state: dbstate.CompilerConnectionState
     output_format: enums.OutputFormat
     expected_cardinality_one: bool
-    protocol_version: Tuple[int, int]
+    protocol_version: defines.ProtocolVersion
     skip_first: bool = False
     expect_rollback: bool = False
     json_parameters: bool = False
@@ -258,7 +260,7 @@ def new_compiler_context(
     output_format: enums.OutputFormat = enums.OutputFormat.BINARY,
     bootstrap_mode: bool = False,
     internal_schema_mode: bool = False,
-    protocol_version: Tuple[int, int] = defines.CURRENT_PROTOCOL,
+    protocol_version: defines.ProtocolVersion = defines.CURRENT_PROTOCOL,
     backend_runtime_params: pg_params.BackendRuntimeParams = (
         pg_params.get_default_runtime_params()),
 ) -> CompileContext:
@@ -390,7 +392,8 @@ class Compiler:
 
     @staticmethod
     def try_compile_rollback(
-        eql: Union[edgeql.Source, bytes], protocol_version: tuple[int, int]
+        eql: Union[edgeql.Source, bytes],
+        protocol_version: defines.ProtocolVersion,
     ):
         if isinstance(eql, edgeql.Source):
             source = eql
@@ -439,7 +442,7 @@ class Compiler:
         database_config: Mapping[str, config.SettingValue],
         system_config: Mapping[str, config.SettingValue],
         queries: List[str],
-        protocol_version: Tuple[int, int],
+        protocol_version: defines.ProtocolVersion,
         implicit_limit: int = 0,
     ) -> List[dbstate.QueryUnit]:
 
@@ -504,6 +507,7 @@ class Compiler:
         system_config: Mapping[str, config.SettingValue],
         query_str: str,
         tx_state: dbstate.SQLTransactionState,
+        prepared_stmt_map: Mapping[str, str],
         current_database: str,
         current_user: str,
     ) -> List[dbstate.SQLQueryUnit]:
@@ -533,6 +537,40 @@ class Compiler:
                 if isinstance(arg, pgast.StringConstant)
             ]
 
+        def translate_query(stmt: pgast.Base) -> pg_codegen.SQLSource:
+            args = {}
+            try:
+                search_path = tx_state.get("search_path")
+            except KeyError:
+                pass
+            else:
+                args['search_path'] = parse_search_path(search_path)
+            options = pg_resolver.Options(
+                current_user=current_user,
+                current_database=current_database,
+                current_query=query_str,
+                **args
+            )
+            resolved = pg_resolver.resolve(stmt, schema, options)
+            return pg_codegen.generate(
+                resolved, with_translation_data=True
+            )
+
+        def compute_stmt_name(text: str) -> str:
+            stmt_hash = hashlib.sha1(text.encode("utf-8"))
+            for setting_name in sorted(fe_settings_mutable):
+                try:
+                    setting_value = tx_state.get(setting_name)
+                except KeyError:
+                    pass
+                else:
+                    stmt_hash.update(
+                        f"{setting_name}:{setting_value}".encode("utf-8"))
+            return f"edb{stmt_hash.hexdigest()}"
+
+        pg_gen_source = functools.partial(
+            pg_codegen.generate_source, pretty=False)
+
         # frontend-only settings (key) and their mutability (value)
         fe_settings_mutable = {
             'search_path': True,
@@ -542,13 +580,21 @@ class Compiler:
         stmts = pg_parser.parse(query_str)
         sql_units = []
         for stmt in stmts:
+            orig_text = pg_gen_source(stmt)
+            unit_ctor = functools.partial(
+                dbstate.SQLQueryUnit,
+                orig_query=orig_text,
+                fe_settings=tx_state.current_fe_settings(),
+            )
+
             if isinstance(stmt, pgast.VariableSetStmt):
                 # GOTCHA: setting is frontend-only regardless of its mutability
                 fe_only = stmt.name in fe_settings_mutable
 
                 args = {
-                    "query": pg_codegen.generate_source(stmt),
+                    "query": orig_text,
                     "frontend_only": fe_only,
+                    "command_tag": b"SET",
                     "is_local": stmt.scope == pgast.OptionsScope.TRANSACTION,
                 }
                 if fe_only:
@@ -557,7 +603,7 @@ class Compiler:
                             f'parameter "{stmt.name}" cannot be changed',
                             pgext_code='55P02',  # cant_change_runtime_param
                         )
-                    value = pg_codegen.generate_source(stmt.args, pretty=False)
+                    value = pg_codegen.generate_source(stmt.args)
                     args["set_vars"] = {stmt.name: value}
                 elif stmt.scope == pgast.OptionsScope.SESSION:
                     if len(stmt.args.args) == 1 and isinstance(
@@ -566,9 +612,9 @@ class Compiler:
                         # this value is unquoted for restoring state in pgcon
                         value = stmt.args.args[0].val
                     else:
-                        value = pg_codegen.generate_source(stmt.args)
+                        value = pg_gen_source(stmt.args)
                     args["set_vars"] = {stmt.name: value}
-                unit = dbstate.SQLQueryUnit(**args)
+                unit = unit_ctor(**args)
             elif isinstance(stmt, pgast.VariableResetStmt):
                 fe_only = stmt.name in fe_settings_mutable
                 if fe_only and not fe_settings_mutable[stmt.name]:
@@ -577,68 +623,63 @@ class Compiler:
                         pgext_code='55P02',  # cant_change_runtime_param
                     )
                 args = {
-                    "query": pg_codegen.generate_source(stmt),
+                    "query": orig_text,
                     "frontend_only": fe_only,
+                    "command_tag": b"RESET",
                     "is_local": stmt.scope == pgast.OptionsScope.TRANSACTION,
                 }
                 if fe_only or stmt.scope == pgast.OptionsScope.SESSION:
                     args["set_vars"] = {stmt.name: None}
-                unit = dbstate.SQLQueryUnit(**args)
+                unit = unit_ctor(**args)
             elif isinstance(stmt, pgast.VariableShowStmt):
-                source = pg_codegen.generate_source(stmt)
-                unit = dbstate.SQLQueryUnit(
-                    query=source,
+                unit = unit_ctor(
+                    query=orig_text,
                     get_var=stmt.name,
                     frontend_only=stmt.name in fe_settings_mutable,
+                    command_tag=b"SHOW",
                 )
             elif isinstance(stmt, pgast.SetTransactionStmt):
-                args = {"query": pg_codegen.generate_source(stmt)}
+                args = {"query": orig_text}
                 if stmt.scope == pgast.OptionsScope.SESSION:
                     args["set_vars"] = {
                         f"default_{name}": value.val
                         if isinstance(value, pgast.StringConstant)
-                        else pg_codegen.generate_source(value)
+                        else pg_gen_source(value)
                         for name, value in stmt.options.options.items()
                     }
-                unit = dbstate.SQLQueryUnit(**args)
+                unit = unit_ctor(**args)
             elif isinstance(stmt, (pgast.BeginStmt, pgast.StartStmt)):
-                source = pg_codegen.generate_source(stmt)
-                unit = dbstate.SQLQueryUnit(
-                    query=source,
+                unit = unit_ctor(
+                    query=orig_text,
                     tx_action=dbstate.TxAction.START,
                 )
             elif isinstance(stmt, pgast.CommitStmt):
-                source = pg_codegen.generate_source(stmt)
-                unit = dbstate.SQLQueryUnit(
-                    query=source,
+                unit = unit_ctor(
+                    query=orig_text,
                     tx_action=dbstate.TxAction.COMMIT,
                     tx_chain=stmt.chain or False,
                 )
             elif isinstance(stmt, pgast.RollbackStmt):
-                source = pg_codegen.generate_source(stmt)
-                unit = dbstate.SQLQueryUnit(
-                    query=source,
+                unit = unit_ctor(
+                    query=orig_text,
                     tx_action=dbstate.TxAction.ROLLBACK,
                     tx_chain=stmt.chain or False,
                 )
             elif isinstance(stmt, pgast.SavepointStmt):
-                source = pg_codegen.generate_source(stmt)
-                unit = dbstate.SQLQueryUnit(
-                    query=source,
+                unit = unit_ctor(
+                    query=orig_text,
                     tx_action=dbstate.TxAction.DECLARE_SAVEPOINT,
                     sp_name=stmt.savepoint_name,
                 )
             elif isinstance(stmt, pgast.ReleaseStmt):
-                source = pg_codegen.generate_source(stmt)
-                unit = dbstate.SQLQueryUnit(
-                    query=source,
+                unit = unit_ctor(
+                    query=orig_text,
                     tx_action=dbstate.TxAction.RELEASE_SAVEPOINT,
                     sp_name=stmt.savepoint_name,
                 )
             elif isinstance(stmt, pgast.RollbackToStmt):
-                source = pg_codegen.generate_source(stmt)
-                unit = dbstate.SQLQueryUnit(
-                    query=source,
+                unit = unit_ctor(
+                    query=orig_text,
                     tx_action=dbstate.TxAction.ROLLBACK_TO_SAVEPOINT,
                     sp_name=stmt.savepoint_name,
                 )
@@ -647,47 +688,96 @@ class Compiler:
                     "two-phase transactions are not supported"
                 )
             elif isinstance(stmt, pgast.PrepareStmt):
-                raise NotImplementedError
+                # Translate the underlying query.
+                stmt_source = translate_query(stmt.query)
+                if stmt.argtypes:
+                    param_types = []
+                    for pt in stmt.argtypes:
+                        param_types.append(pg_gen_source(pt))
+                    param_text = f"({', '.join(param_types)})"
+                else:
+                    param_text = ""
+
+                sql_trailer = f"{param_text} AS ({stmt_source.text})"
+
+                mangled_stmt_name = compute_stmt_name(
+                    f"PREPARE {pg_common.quote_ident(stmt.name)}{sql_trailer}"
+                )
+
+                sql_text = (
+                    f"PREPARE {pg_common.quote_ident(mangled_stmt_name)}"
+                    f"{sql_trailer}"
+                )
+
+                unit = unit_ctor(
+                    query=sql_text,
+                    prepare=dbstate.PrepareData(
+                        stmt_name=stmt.name,
+                        be_stmt_name=mangled_stmt_name.encode("utf-8"),
+                        query=stmt_source.text,
+                        translation_data=stmt_source.translation_data,
+                    ),
+                    command_tag=b"PREPARE",
+                )
             elif isinstance(stmt, pgast.ExecuteStmt):
-                raise NotImplementedError
+                orig_name = stmt.name
+                mangled_name = prepared_stmt_map.get(orig_name)
+                if not mangled_name:
+                    raise errors.QueryError(
+                        f"prepared statement \"{orig_name}\" does "
+                        f"not exist",
+                        pgext_code='26000',  # invalid_sql_statement_name
+                    )
+                stmt.name = mangled_name
+
+                unit = unit_ctor(
+                    query=pg_gen_source(stmt),
+                    execute=dbstate.ExecuteData(
+                        stmt_name=orig_name,
+                        be_stmt_name=mangled_name.encode("utf-8"),
+                    ),
+                )
+            elif isinstance(stmt, pgast.DeallocateStmt):
+                orig_name = stmt.name
+                mangled_name = prepared_stmt_map.get(orig_name)
+                if not mangled_name:
+                    raise errors.QueryError(
+                        f"prepared statement \"{orig_name}\" does "
+                        f"not exist",
+                        pgext_code='26000',  # invalid_sql_statement_name
+                    )
+                stmt.name = mangled_name
+                unit = unit_ctor(
+                    query=pg_gen_source(stmt),
+                    deallocate=dbstate.DeallocateData(
+                        stmt_name=orig_name,
+                        be_stmt_name=mangled_name.encode("utf-8"),
+                    ),
+                    command_tag=b"DEALLOCATE",
+                )
             elif isinstance(stmt, pgast.LockStmt):
                 if stmt.mode not in ('ACCESS SHARE', 'ROW SHARE', 'SHARE'):
                     raise NotImplementedError(
                         "exclusive lock is not supported"
                     )
                 # just ignore
-                unit = dbstate.SQLQueryUnit(query="DO $$ BEGIN END $$;")
+                unit = unit_ctor(query="DO $$ BEGIN END $$;")
             else:
-                args = {}
-                try:
-                    search_path = tx_state.get("search_path")
-                except KeyError:
-                    pass
-                else:
-                    args['search_path'] = parse_search_path(search_path)
-                options = pg_resolver.Options(
-                    current_user=current_user,
-                    current_database=current_database,
-                    current_query=query_str,
-                    **args
+                source = translate_query(stmt)
+                unit = unit_ctor(
+                    query=source.text,
+                    translation_data=source.translation_data,
                 )
-                resolved = pg_resolver.resolve(stmt, schema, options)
-                source, tl_data = (
-                    pg_codegen.generate_source_with_translation_data(
-                        resolved
-                    ))
 
-                unit = dbstate.SQLQueryUnit(
-                    query=source,
-                    translation_data=tl_data)
+            unit.stmt_name = compute_stmt_name(unit.query).encode("utf-8")
 
             tx_state.apply(unit)
-            unit.stmt_name = b"s" + hashlib.sha1(
-                unit.query.encode("utf-8")).hexdigest().encode("latin1")
             sql_units.append(unit)
+
         if not sql_units:
             # Cluvio will try to execute an empty query
             sql_units.append(dbstate.SQLQueryUnit(query=""))
+
         return sql_units
 
     def compile(
@@ -706,7 +796,7 @@ class Compiler:
         inline_typeids: bool,
         inline_typenames: bool,
         skip_first: bool,
-        protocol_version: Tuple[int, int],
+        protocol_version: defines.ProtocolVersion,
         inline_objectids: bool = True,
         json_parameters: bool = False,
     ) -> Tuple[dbstate.QueryUnitGroup,
@@ -775,7 +865,7 @@ class Compiler:
         inline_typeids: bool,
         inline_typenames: bool,
         skip_first: bool,
-        protocol_version: Tuple[int, int],
+        protocol_version: defines.ProtocolVersion,
         inline_objectids: bool = True,
         json_parameters: bool = False,
         expect_rollback: bool = False,
@@ -816,7 +906,7 @@ class Compiler:
         user_schema: s_schema.Schema,
         global_schema: s_schema.Schema,
         database_config: immutables.Map[str, config.SettingValue],
-        protocol_version: Tuple[int, int],
+        protocol_version: defines.ProtocolVersion,
     ) -> DumpDescriptor:
         schema = s_schema.ChainedSchema(
             self.state.std_schema,
@@ -888,7 +978,7 @@ class Compiler:
         schema_ddl: bytes,
         schema_ids: List[Tuple[str, str, bytes]],
         blocks: List[Tuple[bytes, bytes]],  # type_id, typespec
-        protocol_version: Tuple[int, int],
+        protocol_version: defines.ProtocolVersion,
     ) -> RestoreDescriptor:
         schema_object_ids = {
             (
@@ -1357,11 +1447,11 @@ def _compile_ql_explain(
 ) -> dbstate.BaseQuery:
     args = {k: v for k, (_, v) in EXPLAIN_PARAMS.items()}
 
+    current_tx = ctx.state.current_tx()
+    schema = current_tx.get_schema(ctx.compiler_state.std_schema)
+
     # Evaluate and typecheck arguments
     if ql.args:
-        current_tx = ctx.state.current_tx()
-        schema = current_tx.get_schema(ctx.compiler_state.std_schema)
-
         for el in ql.args.elements:
             name = el.name.name
             if name not in EXPLAIN_PARAMS:
@@ -1408,7 +1498,11 @@ def _compile_ql_explain(
         explain_data=explain_data, cacheable=False)
     assert len(query.sql) == 1
 
-    out_type_data, out_type_id = sertypes.describe_str()
+    out_type_data, out_type_id = sertypes.describe(
+        schema,
+        schema.get("std::str"),
+        protocol_version=ctx.protocol_version,
+    )
 
     sql_bytes = exp_command.encode('utf-8') + query.sql[0]
     sql_hash = _hash_sql(
@@ -1484,18 +1578,17 @@ def _compile_ql_query(
 
     result_cardinality = enums.cardinality_from_ir_value(ir.cardinality)
 
-    qtree, sql_text, argmap = pg_compiler.compile_ir_to_tree_and_sql(
+    sql_res = pg_compiler.compile_ir_to_sql_tree(
         ir,
-        pretty=(
-            debug.flags.edgeql_compile
-            or debug.flags.edgeql_compile_sql_text
-            or debug.flags.delta_execute
-        ),
         expected_cardinality_one=ctx.expected_cardinality_one,
         output_format=_convert_format(ctx.output_format),
         backend_runtime_params=ctx.backend_runtime_params,
         expand_inhviews=options.expand_inhviews,
     )
+
+    sql_text = pg_codegen.generate_source(sql_res.ast)
+
+    pg_debug.dump_ast_and_query(sql_res.ast, ir)
 
     if (
         (mstate := current_tx.get_migration_state())
@@ -1528,10 +1621,14 @@ def _compile_ql_query(
             inline_typenames=ctx.inline_typenames,
             protocol_version=ctx.protocol_version)
     else:
-        out_type_data, out_type_id = sertypes.describe_str()
+        out_type_data, out_type_id = sertypes.describe(
+            ir.schema,
+            ir.schema.get("std::str"),
+            protocol_version=ctx.protocol_version,
+        )
 
     in_type_args, in_type_data, in_type_id = describe_params(
-        ctx, ir, argmap, script_info
+        ctx, ir, sql_res.argmap, script_info
     )
 
     sql_hash = _hash_sql(
@@ -1548,7 +1645,7 @@ def _compile_ql_query(
                 global_schema=ir.schema._global_schema,
                 base_schema=s_schema.FlatSchema(),
             )
-        query_asts = pickle.dumps((ql, ir, qtree, explain_data))
+        query_asts = pickle.dumps((ql, ir, sql_res.ast, explain_data))
     else:
         query_asts = None
 
@@ -1801,17 +1898,21 @@ def _compile_ql_config_op(ctx: CompileContext, ql: qlast.Base):
     requires_restart = bool(getattr(ir, 'requires_restart', False))
     is_system_config = bool(getattr(ir, 'is_system_config', False))
 
-    sql_text, argmap = pg_compiler.compile_ir_to_sql(
+    sql_res = pg_compiler.compile_ir_to_sql_tree(
         ir,
-        pretty=(debug.flags.edgeql_compile
-                or debug.flags.edgeql_compile_sql_text),
         backend_runtime_params=ctx.backend_runtime_params,
+    )
+    sql_text = pg_codegen.generate_source(
+        sql_res.ast,
+        pretty=(
+            debug.flags.edgeql_compile or debug.flags.edgeql_compile_sql_text
+        ),
     )
 
     sql = (sql_text.encode(),)
 
     in_type_args, in_type_data, in_type_id = describe_params(
-        ctx, ir, argmap, None
+        ctx, ir, sql_res.argmap, None
     )
 
     single_unit = False
@@ -2393,7 +2494,7 @@ def _extract_params(
 def _describe_object(
     schema: s_schema.Schema,
     source: s_obj.Object,
-    protocol_version: Tuple[int, int],
+    protocol_version: defines.ProtocolVersion,
 ) -> List[DumpBlockDescriptor]:
 
     cols = []

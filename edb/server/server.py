@@ -41,6 +41,7 @@ import uuid
 import immutables
 from jwcrypto import jwk
 
+from edb import buildmeta
 from edb import errors
 
 from edb.common import devmode
@@ -101,8 +102,8 @@ class Server(ha_base.ClusterProtocol):
     _sys_queries: Mapping[str, str]
     _local_intro_query: bytes
     _global_intro_query: bytes
-    _report_config_typedesc: bytes
-    _report_config_data: bytes
+    _report_config_typedesc: dict[defines.ProtocolVersion, bytes]
+    _report_config_data: dict[defines.ProtocolVersion, bytes]
     _file_watch_handles: list[asyncio.Handle]
 
     _std_schema: s_schema.Schema
@@ -288,6 +289,8 @@ class Server(ha_base.ClusterProtocol):
         self._tls_certs_reload_retry_handle = None
 
         self._disable_dynamic_system_config = disable_dynamic_system_config
+        self._report_config_typedesc = {}
+        self._report_config_data = {}
 
     async def _request_stats_logger(self):
         last_seen = -1
@@ -301,6 +304,9 @@ class Server(ha_base.ClusterProtocol):
                 last_seen = current
 
             await asyncio.sleep(30)
+
+    def get_server_id(self):
+        return self._server_id
 
     def get_listen_hosts(self):
         return self._listen_hosts
@@ -549,12 +555,25 @@ class Server(ha_base.ClusterProtocol):
             raise
 
     async def _create_compiler_pool(self):
+        # Force Postgres version in BackendRuntimeParams to be the
+        # minimal supported, because the compiler does not rely on
+        # the version, and not pinning it would make the remote compiler
+        # pool refuse connections from clients that have differing versions
+        # of Postgres backing them.
+        runtime_params = self.get_backend_runtime_params()
+        min_ver = '.'.join(str(v) for v in defines.MIN_POSTGRES_VERSION)
+        runtime_params = runtime_params._replace(
+            instance_params=runtime_params.instance_params._replace(
+                version=buildmeta.parse_pg_version(min_ver),
+            ),
+        )
+
         args = dict(
             pool_size=self._compiler_pool_size,
             pool_class=self._compiler_pool_mode.pool_class,
             dbindex=self._dbindex,
             runstate_dir=self._internal_runstate_dir,
-            backend_runtime_params=self.get_backend_runtime_params(),
+            backend_runtime_params=runtime_params,
             std_schema=self._std_schema,
             refl_schema=self._refl_schema,
             schema_class_layout=self._schema_class_layout,
@@ -656,22 +675,30 @@ class Server(ha_base.ClusterProtocol):
             self.create_task(
                 self.load_reported_config(), interruptable=True)
 
-    def get_report_config_data(self) -> bytes:
-        return self._report_config_data
+    def get_report_config_data(
+        self,
+        protocol_version: defines.ProtocolVersion,
+    ) -> bytes:
+        if protocol_version >= (2, 0):
+            return self._report_config_data[(2, 0)]
+        else:
+            return self._report_config_data[(1, 0)]
 
-    async def load_reported_config(self):
+    async def load_reported_config(self) -> None:
         syscon = await self._acquire_sys_pgcon()
         try:
             data = await syscon.sql_fetch_val(
                 self.get_sys_query('report_configs'),
                 use_prep_stmt=True,
             )
-            self._report_config_data = (
-                struct.pack('!L', len(self._report_config_typedesc)) +
-                self._report_config_typedesc +
-                struct.pack('!L', len(data)) +
-                data
-            )
+
+            for protocol_ver, typedesc in self._report_config_typedesc.items():
+                self._report_config_data[protocol_ver] = (
+                    struct.pack('!L', len(typedesc)) +
+                    typedesc +
+                    struct.pack('!L', len(data)) +
+                    data
+                )
         except Exception:
             metrics.background_errors.inc(1.0, 'load_reported_config')
             raise
@@ -1158,10 +1185,19 @@ class Server(ha_base.ClusterProtocol):
                 raise RuntimeError(
                     'could not load schema class layout pickle') from e
 
-            self._report_config_typedesc = await syscon.sql_fetch_val(f'''\
-                SELECT bin FROM edgedbinstdata.instdata
-                WHERE key = 'report_configs_typedesc{version_key}';
-            '''.encode('utf-8'))
+            self._report_config_typedesc[(1, 0)] = await syscon.sql_fetch_val(
+                f'''
+                    SELECT bin FROM edgedbinstdata.instdata
+                    WHERE key = 'report_configs_typedesc_1_0{version_key}';
+                '''.encode('utf-8'),
+            )
+
+            self._report_config_typedesc[(2, 0)] = await syscon.sql_fetch_val(
+                f'''
+                    SELECT bin FROM edgedbinstdata.instdata
+                    WHERE key = 'report_configs_typedesc_2_0{version_key}';
+                '''.encode('utf-8'),
+            )
 
     def get_roles(self):
         return self._roles
