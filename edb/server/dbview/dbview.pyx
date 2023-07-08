@@ -1085,10 +1085,7 @@ cdef class DatabaseConnectionView:
         assert self.in_tx_error()
         try:
             compiler_pool = self._db._index._server.get_compiler_pool()
-            return await compiler_pool.try_compile_rollback(
-                eql,
-                self._protocol_version
-            )
+            return await compiler_pool.try_compile_rollback(eql)
         except Exception:
             self.raise_in_tx_error()
 
@@ -1099,6 +1096,13 @@ cdef class DatabaseConnectionView:
         error_constructor,
         reason,
     ):
+        if not self.server.is_online():
+            readiness_reason = self.server.get_readiness_reason()
+            msg = "the server is going offline"
+            if readiness_reason:
+                msg = f"{msg}: {readiness_reason}"
+            raise errors.ServerOfflineError(msg)
+
         if query_capabilities & ~self._capability_mask:
             # _capability_mask is currently only used for system database
             raise query_capabilities.make_error(
@@ -1106,18 +1110,24 @@ cdef class DatabaseConnectionView:
                 errors.UnsupportedCapabilityError,
                 "system database is read-only",
             )
+
         if query_capabilities & ~allowed_capabilities:
             raise query_capabilities.make_error(
                 allowed_capabilities,
                 error_constructor,
                 reason,
             )
+
         if self.server.is_readonly():
             if query_capabilities & enums.Capability.WRITE:
+                readiness_reason = self.server.get_readiness_reason()
+                msg = "the server is currently in read-only mode"
+                if readiness_reason:
+                    msg = f"{msg}: {readiness_reason}"
                 raise query_capabilities.make_error(
                     ~enums.Capability.WRITE,
                     errors.DisabledCapabilityError,
-                    "the server is currently in read-only mode",
+                    msg,
                 )
 
 
