@@ -48,7 +48,12 @@ from edb.server.protocol.args_ser cimport (
     recode_global,
 )
 
-__all__ = ('DatabaseIndex', 'DatabaseConnectionView', 'SideEffects')
+__all__ = (
+    'DatabaseIndex',
+    'DatabaseConnectionView',
+    'SideEffects',
+    'Database'
+)
 
 cdef DEFAULT_MODALIASES = immutables.Map({None: defines.DEFAULT_MODULE_ALIAS})
 cdef DEFAULT_CONFIG = immutables.Map()
@@ -187,11 +192,15 @@ cdef class Database:
     def server(self):
         return self._index._server
 
+    @property
+    def tenant(self):
+        return self._index._tenant
+
     cdef schedule_config_update(self):
-        self._index._server._on_local_database_config_change(self.name)
+        self._index._tenant.on_local_database_config_change(self.name)
 
     cdef schedule_extensions_update(self):
-        self._index._server._on_database_extensions_changes(self.name)
+        self._index._tenant.on_database_extensions_changes(self.name)
 
     cdef _set_and_signal_new_user_schema(
         self,
@@ -226,6 +235,8 @@ cdef class Database:
     cdef _invalidate_caches(self):
         self._eql_to_compiled.clear()
         self._sql_to_compiled.clear()
+
+    cdef _clear_state_serializers(self):
         self._state_serializers.clear()
 
     cdef _cache_compiled_query(self, key, compiled: dbstate.QueryUnitGroup):
@@ -271,6 +282,18 @@ cdef class Database:
             )
         return self._state_serializers[protocol_version]
 
+    cdef set_state_serializer(self, protocol_version, serializer):
+        old_serializer = self._state_serializers.get(protocol_version)
+        if (
+            old_serializer is None or
+            old_serializer.type_id != serializer.type_id
+        ):
+            # also invalidate other protocol versions
+            self._state_serializers = {protocol_version: serializer}
+            return serializer
+        else:
+            return old_serializer
+
     def iter_views(self):
         yield from self._views
 
@@ -281,7 +304,7 @@ cdef class Database:
         if self.user_schema is None:
             async with self._introspection_lock:
                 if self.user_schema is None:
-                    await self._index._server.introspect_db(self.name)
+                    await self.tenant.introspect_db(self.name)
 
 
 cdef class DatabaseConnectionView:
@@ -426,9 +449,19 @@ cdef class DatabaseConnectionView:
 
     cdef set_state_serializer(self, new_serializer):
         if self._in_tx:
-            self._in_tx_state_serializer = new_serializer
+            if (
+                self._in_tx_state_serializer is None or
+                self._in_tx_state_serializer.type_id != new_serializer.type_id
+            ):
+                self._in_tx_state_serializer = new_serializer
         else:
-            self._state_serializer = new_serializer
+            # Use the same object as the database to avoid duplicate cache
+            self._state_serializer = self._db.set_state_serializer(
+                self._protocol_version, new_serializer
+            )
+
+    cpdef get_config_spec(self):
+        return self._db._index._sys_config_spec
 
     cdef set_session_config(self, new_conf):
         if self._in_tx:
@@ -557,7 +590,7 @@ cdef class DatabaseConnectionView:
 
         state = []
         if self._config:
-            settings = config.get_settings()
+            settings = self.get_config_spec()
             for sval in self._config.values():
                 setting = settings[sval.name]
                 kind = 'B' if setting.backend_setting else 'C'
@@ -569,16 +602,12 @@ cdef class DatabaseConnectionView:
         return spec
 
     cdef bint is_state_desc_changed(self):
+        # We may have executed a query, or COMMIT/ROLLBACK - just use the
+        # serializer we preserved before. NOTE: the schema might have been
+        # concurrently changed from other sessions, we should not reload
+        # serializer from self._db here so that our state can be serialized
+        # properly, and the Execute stays atomic.
         serializer = self.get_state_serializer()
-        if not self._in_tx:
-            # We may have executed a query, or COMMIT/ROLLBACK - just use
-            # the serializer we preserved before. NOTE: the schema might
-            # have been concurrently changed from other sessions, we should
-            # not reload serializer from self._db here so that our state
-            # can be serialized properly, and the Execute stays atomic.
-
-            # We don't need self._state_serializer from this point
-            self._state_serializer = None
 
         if self._command_state_serializer is not None:
             # If the resulting descriptor is the same as the input, return None
@@ -713,6 +742,10 @@ cdef class DatabaseConnectionView:
     def server(self):
         return self._db._index._server
 
+    @property
+    def tenant(self):
+        return self._db._index._tenant
+
     cpdef in_tx(self):
         return self._in_tx
 
@@ -789,7 +822,6 @@ cdef class DatabaseConnectionView:
         if query_unit.user_schema is not None:
             self._in_tx_user_schema_pickled = query_unit.user_schema
             self._in_tx_user_schema = None
-            self._in_tx_state_serializer = None
         if query_unit.global_schema is not None:
             self._in_tx_global_schema_pickled = query_unit.global_schema
             self._in_tx_global_schema = None
@@ -819,7 +851,6 @@ cdef class DatabaseConnectionView:
                 self._db._update_backend_ids(new_types)
             if query_unit.user_schema is not None:
                 self._in_tx_dbver = next_dbver()
-                self._state_serializer = None
                 self._db._set_and_signal_new_user_schema(
                     pickle.loads(query_unit.user_schema),
                     pickle.loads(query_unit.cached_reflection)
@@ -842,7 +873,7 @@ cdef class DatabaseConnectionView:
                     pickle.loads(query_unit.global_schema))
             if query_unit.has_role_ddl:
                 side_effects |= SideEffects.RoleChanges
-                self._db._index._server._fetch_roles()
+                self._db.tenant.fetch_roles()
             if query_unit.create_ext or query_unit.drop_ext:
                 side_effects |= SideEffects.ExtensionChanges
                 self._db.schedule_extensions_update()
@@ -866,7 +897,6 @@ cdef class DatabaseConnectionView:
             if self._in_tx_new_types:
                 self._db._update_backend_ids(self._in_tx_new_types)
             if query_unit.user_schema is not None:
-                self._state_serializer = None
                 self._db._set_and_signal_new_user_schema(
                     pickle.loads(query_unit.user_schema),
                     pickle.loads(query_unit.cached_reflection)
@@ -883,7 +913,7 @@ cdef class DatabaseConnectionView:
                 side_effects |= SideEffects.GlobalSchemaChanges
                 self._db._index.update_global_schema(
                     pickle.loads(query_unit.global_schema))
-                self._db._index._server._fetch_roles()
+                self._db.tenant.fetch_roles()
             if self._in_tx_with_role_ddl:
                 side_effects |= SideEffects.RoleChanges
 
@@ -911,7 +941,6 @@ cdef class DatabaseConnectionView:
         if self._in_tx_new_types:
             self._db._update_backend_ids(self._in_tx_new_types)
         if user_schema is not None:
-            self._state_serializer = None
             self._db._set_and_signal_new_user_schema(
                 pickle.loads(user_schema),
                 pickle.loads(cached_reflection)
@@ -928,7 +957,7 @@ cdef class DatabaseConnectionView:
             side_effects |= SideEffects.GlobalSchemaChanges
             self._db._index.update_global_schema(
                 pickle.loads(global_schema))
-            self._db._index._server._fetch_roles()
+            self._db.tenant.fetch_roles()
         if self._in_tx_with_role_ddl:
             side_effects |= SideEffects.RoleChanges
 
@@ -936,7 +965,7 @@ cdef class DatabaseConnectionView:
         return side_effects
 
     async def apply_config_ops(self, conn, ops):
-        settings = config.get_settings()
+        settings = self.get_config_spec()
 
         for op in ops:
             if op.scope is config.ConfigScope.INSTANCE:
@@ -1069,6 +1098,7 @@ cdef class DatabaseConnectionView:
                     self._protocol_version,
                     query_req.inline_objectids,
                     query_req.input_format is compiler.InputFormat.JSON,
+                    client_id=self.tenant.client_id,
                 )
         finally:
             metrics.edgeql_query_compilation_duration.observe(
@@ -1096,8 +1126,8 @@ cdef class DatabaseConnectionView:
         error_constructor,
         reason,
     ):
-        if not self.server.is_online():
-            readiness_reason = self.server.get_readiness_reason()
+        if not self.tenant.is_online():
+            readiness_reason = self.tenant.get_readiness_reason()
             msg = "the server is going offline"
             if readiness_reason:
                 msg = f"{msg}: {readiness_reason}"
@@ -1118,9 +1148,9 @@ cdef class DatabaseConnectionView:
                 reason,
             )
 
-        if self.server.is_readonly():
+        if self.tenant.is_readonly():
             if query_capabilities & enums.Capability.WRITE:
-                readiness_reason = self.server.get_readiness_reason()
+                readiness_reason = self.tenant.get_readiness_reason()
                 msg = "the server is currently in read-only mode"
                 if readiness_reason:
                     msg = f"{msg}: {readiness_reason}"
@@ -1135,20 +1165,26 @@ cdef class DatabaseIndex:
 
     def __init__(
         self,
-        server,
+        tenant,
         *,
         std_schema,
         global_schema,
         sys_config,
         default_sysconfig,  # system config without system override
+        sys_config_spec,
     ):
         self._dbs = {}
-        self._server = server
+        self._server = tenant.server
+        self._tenant = tenant
         self._std_schema = std_schema
         self._global_schema = global_schema
         self._default_sysconfig = default_sysconfig
+        self._sys_config_spec = sys_config_spec
+        # TODO: This factory will probably need to become per-db once
+        # config spec differs between databases.
+        self._factory = sertypes.StateSerializerFactory(
+            std_schema, sys_config_spec)
         self.update_sys_config(sys_config)
-        self._factory = sertypes.StateSerializerFactory(std_schema)
 
     def count_connections(self, dbname: str):
         try:
@@ -1169,7 +1205,8 @@ cdef class DatabaseIndex:
             mm.update(sys_config)
             sys_config = mm.finish()
         self._sys_config = sys_config
-        self._comp_sys_config = config.get_compilation_config(sys_config)
+        self._comp_sys_config = config.get_compilation_config(
+            sys_config, spec=self._sys_config_spec)
 
     def has_db(self, dbname):
         return dbname in self._dbs
@@ -1203,8 +1240,12 @@ cdef class DatabaseIndex:
         cdef Database db
         db = self._dbs.get(dbname)
         if db is not None:
+            # This branch is only used by db restore
             db._set_and_signal_new_user_schema(
                 user_schema, reflection_cache, backend_ids, db_config)
+            # Make sure we will re-make the state serializers,
+            # see also comments in describe_database_restore()
+            db._clear_state_serializers()
         else:
             db = Database(
                 self,
@@ -1225,17 +1266,17 @@ cdef class DatabaseIndex:
 
     async def _save_system_overrides(self, conn):
         data = config.to_json(
-            config.get_settings(),
+            self._sys_config_spec,
             self._sys_config,
             setting_filter=lambda v: v.source == 'system override',
             include_source=False,
         )
         block = dbops.PLTopBlock()
         metadata = {'sysconfig': json.loads(data)}
-        if self._server.get_backend_runtime_params().has_create_database:
+        if self._tenant.get_backend_runtime_params().has_create_database:
             dbops.UpdateMetadata(
                 dbops.Database(
-                    name=self._server.get_pg_dbname(defines.EDGEDB_SYSTEM_DB),
+                    name=self._tenant.get_pg_dbname(defines.EDGEDB_SYSTEM_DB),
                 ),
                 metadata,
             ).generate(block)
@@ -1246,7 +1287,7 @@ cdef class DatabaseIndex:
         await conn.sql_execute(block.to_string().encode())
 
     async def apply_system_config_op(self, conn, op):
-        spec = config.get_settings()
+        spec = self._sys_config_spec
         op_value = op.get_setting(spec)
         if op.opcode is not None:
             allow_missing = (
@@ -1260,7 +1301,7 @@ cdef class DatabaseIndex:
         # the callbacks below, because certain config changes
         # may cause the backend connection to drop.
         self.update_sys_config(
-            op.apply(config.get_settings(), self._sys_config)
+            op.apply(self._sys_config_spec, self._sys_config)
         )
 
         await self._save_system_overrides(conn)

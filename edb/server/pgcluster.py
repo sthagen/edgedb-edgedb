@@ -20,6 +20,8 @@ from __future__ import annotations
 from typing import *
 
 import asyncio
+import functools
+import hashlib
 import json
 import logging
 import os
@@ -28,6 +30,7 @@ import pathlib
 import re
 import shlex
 import shutil
+import struct
 import textwrap
 import urllib.parse
 
@@ -35,6 +38,7 @@ from edb import buildmeta
 from edb.common import supervisor
 from edb.common import uuidgen
 
+from edb.server import args as srvargs
 from edb.server import defines
 from edb.server.ha import base as ha_base
 from edb.pgsql import common as pgcommon
@@ -300,6 +304,9 @@ class BaseCluster:
 
     async def lookup_postgres(self) -> None:
         self._pg_bin_dir = await get_pg_bin_dir()
+
+    def get_client_id(self) -> int:
+        return 0
 
 
 class Cluster(BaseCluster):
@@ -789,6 +796,22 @@ class RemoteCluster(BaseCluster):
         if self._ha_backend is not None:
             self._ha_backend.stop_watching()
 
+    @functools.cache
+    def get_client_id(self) -> int:
+        tenant_id = self._instance_params.tenant_id
+        if self._ha_backend is not None:
+            backend_dsn = self._ha_backend.dsn
+        else:
+            assert self._connection_addr is not None
+            assert self._connection_params is not None
+            host, port = self._connection_addr
+            database = self._connection_params.database
+            backend_dsn = f"postgres://{host}:{port}/{database}"
+        data = f"{backend_dsn}|{tenant_id}".encode("utf-8")
+        digest = hashlib.blake2b(data, digest_size=8).digest()
+        rv: int = struct.unpack("q", digest)[0]
+        return rv
+
 
 async def get_pg_bin_dir() -> pathlib.Path:
     pg_config_data = await get_pg_config()
@@ -846,6 +869,7 @@ async def get_remote_pg_cluster(
     dsn: str,
     *,
     tenant_id: Optional[str] = None,
+    specified_capabilities: Optional[srvargs.BackendCapabilitySets] = None,
 ) -> RemoteCluster:
     parsed = urllib.parse.urlparse(dsn)
     ha_backend = None
@@ -1056,6 +1080,23 @@ async def get_remote_pg_cluster(
         if max_connections == -1:
             max_connections = await _get_pg_settings(conn, 'max_connections')
         capabilities = await _detect_capabilities(conn)
+
+        if (
+            specified_capabilities is not None
+            and specified_capabilities.must_be_absent
+        ):
+            disabled = []
+            for cap in specified_capabilities.must_be_absent:
+                if capabilities & cap:
+                    capabilities &= ~cap
+                    disabled.append(cap)
+            if disabled:
+                logger.info(
+                    f"the following backend capabilities are explicitly "
+                    f"disabled by server command line: "
+                    f"{', '.join(str(cap.name) for cap in disabled)}"
+                )
+
         if t_id != buildmeta.get_default_tenant_id():
             # GOTCHA: This tenant_id check cannot protect us from running
             # multiple EdgeDB servers using the default tenant_id with
@@ -1078,14 +1119,38 @@ async def get_remote_pg_cluster(
                 "remote server did not report its version "
                 "in ParameterStatus")
 
-        ext_schema = await conn.sql_fetch_val(
-            b'''
-            SELECT COALESCE(
-                (SELECT schema_name FROM information_schema.schemata
-                WHERE schema_name = 'heroku_ext'),
-                'edgedbext')
-            ''',
-        )
+        if capabilities & pgparams.BackendCapabilities.CREATE_DATABASE:
+            # If we can create databases, assume we're free to create
+            # extensions in them as well.
+            ext_schema = "edgedbext"
+            existing_exts = {}
+        else:
+            ext_schema = (await conn.sql_fetch_val(
+                b'''
+                SELECT COALESCE(
+                    (SELECT schema_name FROM information_schema.schemata
+                    WHERE schema_name = 'heroku_ext'),
+                    'edgedbext')
+                ''',
+            )).decode("utf-8")
+
+            existing_exts_data = await conn.sql_fetch(
+                b"""
+                SELECT
+                    extname,
+                    nspname
+                FROM
+                    pg_extension
+                    INNER JOIN pg_namespace
+                        ON (pg_extension.extnamespace = pg_namespace.oid)
+                """
+            )
+
+            existing_exts = {
+                r[0].decode("utf-8"): r[1].decode("utf-8")
+                for r in existing_exts_data
+            }
+
         instance_params = pgparams.BackendInstanceParams(
             capabilities=capabilities,
             version=buildmeta.parse_pg_version(pg_ver_string),
@@ -1093,7 +1158,8 @@ async def get_remote_pg_cluster(
             max_connections=int(max_connections),
             reserved_connections=await _get_reserved_connections(conn),
             tenant_id=t_id,
-            ext_schema=ext_schema.decode("utf-8"),
+            ext_schema=ext_schema,
+            existing_exts=existing_exts,
         )
     finally:
         conn.terminate()

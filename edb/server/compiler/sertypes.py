@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 from typing import *
+from typing import overload
 
 import collections.abc
 import dataclasses
@@ -447,9 +448,9 @@ def _describe_range(t: s_types.Range, *, ctx: Context) -> uuid.UUID:
     return _finish_typedesc(type_id, buf, ctx=ctx)
 
 
-# Multirange -> MultirangeTypeDescriptor
+# MultiRange -> MultiRangeTypeDescriptor
 @_describe_type.register
-def _describe_multirange(t: s_types.Multirange, *, ctx: Context) -> uuid.UUID:
+def _describe_multirange(t: s_types.MultiRange, *, ctx: Context) -> uuid.UUID:
     subtypes = [
         _describe_type(st, ctx=ctx)
         for st in t.get_subtypes(ctx.schema)
@@ -843,7 +844,7 @@ def describe_input_shape(
 
 
 @overload
-def describe_input_shape(  # noqa: F811
+def describe_input_shape(
     t: s_types.Type,
     input_shapes: InputShapeMap,
     *,
@@ -853,7 +854,7 @@ def describe_input_shape(  # noqa: F811
 
 
 @overload
-def describe_input_shape(  # noqa: F811
+def describe_input_shape(
     t: s_types.Type,
     input_shapes: InputShapeMap,
     *,
@@ -863,7 +864,7 @@ def describe_input_shape(  # noqa: F811
     ...
 
 
-def describe_input_shape(  # noqa: F811
+def describe_input_shape(
     t: s_types.Type,
     input_shapes: InputShapeMap,
     *,
@@ -1555,7 +1556,7 @@ def _parse_multirange_descriptor(
     _tag: DescriptorTag,
     desc: binwrapper.BinWrapper,
     ctx: ParseContext,
-) -> MultirangeDesc:
+) -> MultiRangeDesc:
     # .id
     tid = _parse_type_id(desc)
 
@@ -1574,7 +1575,7 @@ def _parse_multirange_descriptor(
     # .type
     subtype = _parse_type_ref(desc, ctx=ctx)
 
-    return MultirangeDesc(
+    return MultiRangeDesc(
         tid=tid,
         name=name,
         schema_defined=schema_defined,
@@ -1600,7 +1601,7 @@ def _make_global_rep(typ: s_types.Type, ctx: Context) -> object:
 
 
 class StateSerializerFactory:
-    def __init__(self, std_schema: s_schema.Schema):
+    def __init__(self, std_schema: s_schema.Schema, config_spec: config.Spec):
         """
         {
             module := 'default',
@@ -1635,7 +1636,8 @@ class StateSerializerFactory:
             schema, free_obj, 'state_config'
         )
         config_shape: list[tuple[str, s_types.Type, enums.Cardinality]] = []
-        for setting in config.get_settings().values():
+
+        for setting in config_spec.values():
             if not setting.system:
                 setting_type_name = setting.schema_type_name
                 setting_type = schema.get(setting_type_name, type=s_types.Type)
@@ -1714,11 +1716,9 @@ class StateSerializerFactory:
         )
 
         type_data = b''.join(ctx.buffer)
-        codec = parse(type_data, protocol_version)
-        assert isinstance(codec, InputShapeDesc)
-        codec.fields['globals'][1].__dict__['data_raw'] = True
-
-        return StateSerializer(type_id, type_data, codec, global_reps)
+        return StateSerializer(
+            type_id, type_data, global_reps, protocol_version
+        )
 
 
 class StateSerializer:
@@ -1726,13 +1726,20 @@ class StateSerializer:
         self,
         type_id: uuid.UUID,
         type_data: bytes,
-        codec: TypeDesc,
         global_reps: dict[str, object],
+        protocol_version: edbdef.ProtocolVersion,
     ) -> None:
         self._type_id = type_id
         self._type_data = type_data
-        self._codec = codec
         self._global_reps = global_reps
+        self._protocol_version = protocol_version
+
+    @functools.cached_property
+    def _codec(self) -> TypeDesc:
+        codec = parse(self._type_data, self._protocol_version)
+        assert isinstance(codec, InputShapeDesc)
+        codec.fields['globals'][1].__dict__['data_raw'] = True
+        return codec
 
     @property
     def type_id(self) -> uuid.UUID:
@@ -1958,7 +1965,7 @@ class RangeDesc(SchemaTypeDesc):
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class MultirangeDesc(SchemaTypeDesc):
+class MultiRangeDesc(SchemaTypeDesc):
     ancestors: Optional[list[TypeDesc]]
     inner: TypeDesc
 

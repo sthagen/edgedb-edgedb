@@ -204,7 +204,7 @@ def new_compiler(
     backend_runtime_params: Optional[pg_params.BackendRuntimeParams] = None,
     local_intro_query: Optional[str] = None,
     global_intro_query: Optional[str] = None,
-    load_config: bool = False
+    config_spec: Optional[config.Spec] = None,
 ) -> Compiler:
     """Create and return a compiler instance."""
 
@@ -215,10 +215,8 @@ def new_compiler(
     if not backend_runtime_params:
         backend_runtime_params = pg_params.get_default_runtime_params()
 
-    config_spec = None
-    if load_config:
+    if not config_spec:
         config_spec = config.load_spec_from_schema(std_schema)
-        config.set_settings(config_spec)
 
     return Compiler(CompilerState(
         std_schema=std_schema,
@@ -248,7 +246,7 @@ async def new_compiler_from_pg(con: metaschema.PGConnection) -> Compiler:
         global_intro_query=await load_schema_intro_query(
             con, num_patches, 'global_intro_query'
         ),
-        load_config=True
+        config_spec=None,
     )
 
 
@@ -256,7 +254,7 @@ def new_compiler_context(
     *,
     compiler_state: CompilerState,
     user_schema: s_schema.Schema,
-    global_schema: s_schema.Schema=s_schema.FlatSchema(),
+    global_schema: s_schema.Schema=s_schema.EMPTY_SCHEMA,
     modaliases: Optional[Mapping[Optional[str], str]] = None,
     expected_cardinality_one: bool = False,
     json_parameters: bool = False,
@@ -381,10 +379,16 @@ class CompilerState:
     schema_class_layout: s_refl.SchemaClassLayout
 
     backend_runtime_params: pg_params.BackendRuntimeParams
-    config_spec: Optional[config.Spec]
+    config_spec: config.Spec
 
     local_intro_query: Optional[str]
     global_intro_query: Optional[str]
+
+    @functools.cached_property
+    def state_serializer_factory(self) -> sertypes.StateSerializerFactory:
+        return sertypes.StateSerializerFactory(
+            self.std_schema, self.config_spec
+        )
 
 
 class Compiler:
@@ -933,7 +937,7 @@ class Compiler:
             global_schema
         )
 
-        config_ddl = config.to_edgeql(config.get_settings(), database_config)
+        config_ddl = config.to_edgeql(self.state.config_spec, database_config)
 
         schema_ddl = s_ddl.ddl_text_from_schema(
             schema, include_migrations=True)
@@ -1063,7 +1067,11 @@ class Compiler:
             )
 
         ddl_source = edgeql.Source.from_string(schema_ddl_text)
+
+        # The state serializer generated below is somehow inappropriate,
+        # so it's simply ignored here and the I/O process will do it on its own
         units = compile(ctx=ctx, source=ddl_source).units
+
         schema = ctx.state.current_tx().get_schema(
             ctx.compiler_state.std_schema)
 
@@ -1319,7 +1327,7 @@ def _compile_schema_storage_stmt(
             s_schema.ChainedSchema(
                 ctx.compiler_state.std_schema,
                 ctx.compiler_state.refl_schema,
-                s_schema.FlatSchema()
+                s_schema.EMPTY_SCHEMA
             )
         )
 
@@ -1648,7 +1656,7 @@ def _compile_ql_query(
             ir.schema = s_schema.ChainedSchema(
                 top_schema=ir.schema._top_schema,
                 global_schema=ir.schema._global_schema,
-                base_schema=s_schema.FlatSchema(),
+                base_schema=s_schema.EMPTY_SCHEMA,
             )
         query_asts = pickle.dumps((ql, ir, sql_res.ast, explain_data))
     else:
@@ -1893,12 +1901,14 @@ def _compile_ql_config_op(
         ir,
         backend_runtime_params=ctx.backend_runtime_params,
     )
+    pretty = bool(
+        debug.flags.edgeql_compile or debug.flags.edgeql_compile_sql_text)
     sql_text = pg_codegen.generate_source(
         sql_res.ast,
-        pretty=bool(
-            debug.flags.edgeql_compile or debug.flags.edgeql_compile_sql_text
-        ),
+        pretty=pretty,
     )
+    if pretty:
+        debug.dump_code(sql_text, lexer='sql')
 
     sql = (sql_text.encode(),)
 
@@ -1911,7 +1921,7 @@ def _compile_ql_config_op(
         config_op = ireval.evaluate_to_config_op(ir, schema=schema)
 
         session_config = config_op.apply(
-            config.get_settings(),
+            ctx.compiler_state.config_spec,
             session_config,
         )
         current_tx.update_session_config(session_config)
@@ -1920,7 +1930,7 @@ def _compile_ql_config_op(
         config_op = ireval.evaluate_to_config_op(ir, schema=schema)
 
         database_config = config_op.apply(
-            config.get_settings(),
+            ctx.compiler_state.config_spec,
             database_config,
         )
         current_tx.update_database_config(database_config)
@@ -2118,6 +2128,8 @@ def _try_compile(
         non_trailing_ctx = dataclasses.replace(
             ctx, output_format=enums.OutputFormat.NONE)
 
+    final_user_schema: Optional[s_schema.Schema] = None
+
     for i, stmt in enumerate(statements):
         is_trailing_stmt = i == statements_len - 1
         stmt_ctx = ctx if is_trailing_stmt else non_trailing_ctx
@@ -2201,6 +2213,7 @@ def _try_compile(
             unit.has_role_ddl = comp.has_role_ddl
             unit.ddl_stmt_id = comp.ddl_stmt_id
             if comp.user_schema is not None:
+                final_user_schema = comp.user_schema
                 unit.user_schema = pickle.dumps(comp.user_schema, -1)
             if comp.cached_reflection is not None:
                 unit.cached_reflection = \
@@ -2219,6 +2232,7 @@ def _try_compile(
             unit.sql = comp.sql
             unit.cacheable = comp.cacheable
             if comp.user_schema is not None:
+                final_user_schema = comp.user_schema
                 unit.user_schema = pickle.dumps(comp.user_schema, -1)
             if comp.cached_reflection is not None:
                 unit.cached_reflection = \
@@ -2248,6 +2262,7 @@ def _try_compile(
             unit.sql = comp.sql
             unit.cacheable = comp.cacheable
             if comp.user_schema is not None:
+                final_user_schema = comp.user_schema
                 unit.user_schema = pickle.dumps(comp.user_schema, -1)
             if comp.cached_reflection is not None:
                 unit.cached_reflection = \
@@ -2350,6 +2365,13 @@ def _try_compile(
         rv.in_type_id = in_type_id.bytes
         rv.in_type_args = in_type_args
         rv.in_type_data = in_type_data
+
+    if final_user_schema is not None:
+        rv.state_serializer = ctx.compiler_state.state_serializer_factory.make(
+            final_user_schema,
+            ctx.state.current_tx().get_global_schema(),
+            ctx.protocol_version,
+        )
 
     # Sanity checks
     for unit in rv:  # pragma: no cover
@@ -2716,6 +2738,7 @@ def _get_config_val(
         current_tx.get_session_config(),
         current_tx.get_database_config(),
         current_tx.get_system_config(),
+        spec=ctx.compiler_state.config_spec,
         allow_unrecognized=True,
     )
 

@@ -31,6 +31,7 @@ from edb.common import context as parser_context
 from edb.common import debug
 from edb.common import exceptions
 from edb.common import uuidgen
+from edb.common.typeutils import not_none
 
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
@@ -158,16 +159,6 @@ class DMLDummyTable(dbops.Table):
     SETUP_QUERY = '''
         INSERT INTO edgedb._dml_dummy VALUES (0, false)
     '''
-
-
-class ExpressionType(dbops.CompositeType):
-    def __init__(self) -> None:
-        super().__init__(name=('edgedb', 'expression_t'))
-
-        self.add_columns([
-            dbops.Column(name='text', type='text'),
-            dbops.Column(name='refs', type='uuid[]'),
-        ])
 
 
 class BigintDomain(dbops.Domain):
@@ -389,7 +380,7 @@ class RangeToJsonFunction(dbops.Function):
         )
 
 
-class MultirangeToJsonFunction(dbops.Function):
+class MultiRangeToJsonFunction(dbops.Function):
     """Convert anymultirange to a jsonb object."""
     text = r'''
         SELECT
@@ -1603,377 +1594,6 @@ class NullIfArrayNullsFunction(dbops.Function):
                 SELECT CASE WHEN array_position(a, NULL) IS NULL
                 THEN a ELSE NULL END
             ''')
-
-
-class IndexDescType(dbops.CompositeType):
-    """Introspected index description."""
-    def __init__(self) -> None:
-        super().__init__(name=('edgedb', 'intro_index_desc_t'))
-
-        self.add_columns([
-            dbops.Column(name='table_name', type='text[]'),
-            dbops.Column(name='name', type='text'),
-            dbops.Column(name='is_unique', type='bool'),
-            dbops.Column(name='predicate', type='text'),
-            dbops.Column(name='expression', type='text'),
-            dbops.Column(name='columns', type='text[]'),
-            dbops.Column(name='metadata', type='jsonb'),
-        ])
-
-
-class IntrospectIndexesFunction(dbops.Function):
-    """Return set of indexes for each table."""
-
-    text = '''
-        SELECT
-            i.table_name,
-            i.index_name,
-            i.index_is_unique,
-            i.index_predicate,
-            i.index_expression,
-            i.index_columns,
-            i.index_metadata
-        FROM
-            (SELECT
-                *
-             FROM
-                (SELECT
-                    ARRAY[ns.nspname::text, c.relname::text]
-                                                    AS table_name,
-                    ic.relname::text                AS index_name,
-                    i.indisunique                   AS index_is_unique,
-                    pg_get_expr(i.indpred, i.indrelid)::text
-                                                    AS index_predicate,
-                    pg_get_expr(i.indexprs, i.indrelid)::text
-                                                    AS index_expression,
-
-                    (SELECT
-                        array_agg(ia.attname::text ORDER BY ia.attnum)
-                     FROM
-                        pg_attribute AS ia
-                     WHERE
-                        ia.attrelid = i.indexrelid
-                        AND (ia.attnum IS NULL OR ia.attnum >= 1)
-                    )                               AS index_columns,
-
-                    edgedb.obj_metadata(i.indexrelid, 'pg_class')
-                                                    AS index_metadata
-
-                 FROM
-                    pg_class AS c
-                    INNER JOIN pg_namespace AS ns ON ns.oid = c.relnamespace
-                    INNER JOIN pg_index AS i ON i.indrelid = c.oid
-                    INNER JOIN pg_class AS ic ON i.indexrelid = ic.oid
-
-                 WHERE
-                    ($1::text IS NULL OR ns.nspname LIKE $1::text) AND
-                    ($2::text IS NULL OR c.relname LIKE $2::text) AND
-                    ($3::text[] IS NULL OR
-                        ns.nspname || '.' || ic.relname = any($3::text[])) AND
-                    ($4::text IS NULL OR ic.relname LIKE $4::text)
-                ) AS q
-
-             WHERE
-                (NOT $5::bool OR
-                    (index_metadata IS NOT NULL AND
-                        (index_metadata->>'ddl:inherit')::bool))
-                AND (
-                    $6 OR
-                    (
-                        index_metadata IS NULL OR
-                        NOT coalesce(
-                            (index_metadata->>'ddl:inherited')::bool, false)
-                    )
-                )
-
-            ) AS i
-    '''
-
-    def __init__(self) -> None:
-        super().__init__(
-            name=('edgedb', 'introspect_indexes'),
-            args=[
-                ('schema_pattern', 'text', 'NULL'),
-                ('table_pattern', 'text', 'NULL'),
-                ('table_list', 'text[]', 'NULL'),
-                ('index_pattern', 'text', 'NULL'),
-                ('inheritable_only', 'bool', 'FALSE'),
-                ('include_inherited', 'bool', 'FALSE'),
-            ],
-            returns=('edgedb', 'intro_index_desc_t'),
-            set_returning=True,
-            volatility='stable',
-            language='sql',
-            text=self.__class__.text)
-
-
-class TriggerDescType(dbops.CompositeType):
-    """Introspected trigger description."""
-    def __init__(self) -> None:
-        super().__init__(name=('edgedb', 'intro_trigger_desc_t'))
-
-        self.add_columns([
-            dbops.Column(name='table_name', type='text[]'),
-            dbops.Column(name='name', type='text'),
-            dbops.Column(name='proc', type='text[]'),
-            dbops.Column(name='is_constraint', type='bool'),
-            dbops.Column(name='granularity', type='text'),
-            dbops.Column(name='deferred', type='bool'),
-            dbops.Column(name='timing', type='text'),
-            dbops.Column(name='events', type='text[]'),
-            dbops.Column(name='definition', type='text'),
-            dbops.Column(name='condition', type='text'),
-            dbops.Column(name='metadata', type='jsonb'),
-        ])
-
-
-class IntrospectTriggersFunction(dbops.Function):
-    """Return a set of triggers for each table."""
-
-    text = '''
-
-        SELECT
-            table_name,
-            trg_name,
-            trg_proc,
-            trg_constraint,
-            trg_granularity,
-            trg_deferred,
-            trg_timing,
-            trg_events,
-            trg_definition,
-            NULL::text,
-            trg_metadata
-        FROM
-            (SELECT
-                *
-             FROM
-                (SELECT
-                    ARRAY[ns.nspname::text, tc.relname::text]
-                                                            AS table_name,
-
-                    t.oid::int                              AS trg_id,
-                    t.tgname::text                          AS trg_name,
-
-                    (SELECT
-                        ARRAY[nsp.nspname::text, p.proname::text]
-                     FROM
-                        pg_proc AS p
-                        INNER JOIN pg_namespace AS nsp
-                                ON nsp.oid = p.pronamespace
-                     WHERE
-                        t.tgfoid = p.oid
-                    )                                       AS trg_proc,
-
-                    t.tgconstraint != 0                     AS trg_constraint,
-
-                    (CASE
-                        WHEN (t.tgtype & (1 << 0)) != 0 THEN 'row'
-                        ELSE 'statement'
-                    END)                                    AS trg_granularity,
-
-                    t.tginitdeferred                        AS trg_deferred,
-
-                    (CASE
-                        WHEN (t.tgtype & (1 << 1)) != 0 THEN 'before'
-                        WHEN (t.tgtype & (1 << 6)) != 0 THEN 'instead'
-                        ELSE 'after'
-                    END)                                    AS trg_timing,
-
-                    array_remove(ARRAY[
-                        (CASE WHEN (t.tgtype & (1 << 2)) != 0 THEN 'insert'
-                         ELSE NULL END),
-                        (CASE WHEN (t.tgtype & (1 << 3)) != 0 THEN 'delete'
-                         ELSE NULL END),
-                        (CASE WHEN (t.tgtype & (1 << 4)) != 0 THEN 'update'
-                         ELSE NULL END),
-                        (CASE WHEN (t.tgtype & (1 << 5)) != 0 THEN 'truncate'
-                         ELSE NULL END)
-                    ]::text[], NULL)                        AS trg_events,
-
-                    pg_get_triggerdef(t.oid)::text          AS trg_definition,
-
-                    edgedb.obj_metadata(t.oid, 'pg_trigger') AS trg_metadata
-
-                 FROM
-                    pg_trigger AS t
-                    INNER JOIN pg_class AS tc ON t.tgrelid = tc.oid
-                    INNER JOIN pg_namespace AS ns ON ns.oid = tc.relnamespace
-
-                 WHERE
-                    ($1::text IS NULL OR ns.nspname LIKE $1::text) AND
-                    ($2::text IS NULL OR tc.relname LIKE $2::text) AND
-                    ($3::text[] IS NULL OR
-                        ns.nspname || '.' || tc.relname = any($3::text[])) AND
-                    ($4::text IS NULL OR t.tgname LIKE $4::text)
-                ) AS q
-
-             WHERE
-                (NOT $5::bool OR
-                    (trg_metadata IS NOT NULL AND
-                        (trg_metadata->>'ddl:inherit')::bool))
-
-                AND (
-                    $6 OR
-                    (
-                        trg_metadata IS NULL OR
-                        NOT coalesce(
-                            (trg_metadata->>'ddl:inherited')::bool, false)
-                    )
-                )
-            ) AS t
-    '''
-
-    def __init__(self) -> None:
-        super().__init__(
-            name=('edgedb', 'introspect_triggers'),
-            args=[
-                ('schema_pattern', 'text', 'NULL'),
-                ('table_pattern', 'text', 'NULL'),
-                ('table_list', 'text[]', 'NULL'),
-                ('trigger_pattern', 'text', 'NULL'),
-                ('inheritable_only', 'bool', 'FALSE'),
-                ('include_inherited', 'bool', 'FALSE'),
-            ],
-            returns=('edgedb', 'intro_trigger_desc_t'),
-            set_returning=True,
-            volatility='stable',
-            language='sql',
-            text=self.__class__.text)
-
-
-class TableInheritanceDescType(dbops.CompositeType):
-    """Introspected table inheritance descriptor."""
-    def __init__(self) -> None:
-        super().__init__(name=('edgedb', 'intro_tab_inh_t'))
-
-        self.add_columns([
-            dbops.Column(name='name', type='text[]'),
-            dbops.Column(name='depth', type='int'),
-            dbops.Column(name='pos', type='int'),
-        ])
-
-
-class GetTableDescendantsFunction(dbops.Function):
-    """Return a set of table descendants."""
-
-    text = '''
-        SELECT
-            *
-        FROM
-            (WITH RECURSIVE
-                inheritance(oid, name, ns, depth, path) AS (
-                    SELECT
-                        c.oid,
-                        c.relname,
-                        ns.nspname,
-                        0,
-                        ARRAY[c.relname]
-                    FROM
-                        pg_class c
-                        INNER JOIN pg_namespace ns
-                            ON c.relnamespace = ns.oid
-                    WHERE
-                        ($1::text IS NULL OR
-                            ns.nspname LIKE $1::text) AND
-                        ($2::text IS NULL OR
-                            c.relname LIKE $2::text)
-
-                    UNION ALL
-
-                    SELECT
-                        c.oid,
-                        c.relname,
-                        ns.nspname,
-                        i.depth + 1,
-                        i.path || c.relname
-                    FROM
-                        pg_class c,
-                        inheritance i,
-                        pg_inherits pgi,
-                        pg_namespace ns
-                    WHERE
-                        i.oid = pgi.inhparent
-                        AND c.oid = pgi.inhrelid
-                        AND ns.oid = c.relnamespace
-                        AND ($3::int IS NULL OR i.depth < $3::int)
-            )
-            SELECT DISTINCT ON (ns, name)
-                ARRAY[ns::text, name::text], depth, 0 FROM inheritance) q
-        WHERE
-            depth > 0
-        ORDER BY
-            depth
-    '''
-
-    def __init__(self) -> None:
-        super().__init__(
-            name=('edgedb', 'get_table_descendants'),
-            args=[
-                ('schema_name', 'text'),
-                ('table_name', 'text'),
-                ('max_depth', 'int', 'NULL'),
-            ],
-            returns=('edgedb', 'intro_tab_inh_t'),
-            set_returning=True,
-            volatility='stable',
-            language='sql',
-            text=self.__class__.text)
-
-
-class ParseTriggerConditionFunction(dbops.Function):
-    """Return a set of table descendants."""
-
-    text = '''
-        DECLARE
-            when_off integer;
-            pos integer;
-            brackets integer;
-            chr text;
-            def_len integer;
-        BEGIN
-            def_len := char_length(definition);
-            when_off := strpos(definition, 'WHEN (');
-            IF when_off IS NULL OR when_off = 0 THEN
-                RETURN NULL;
-            ELSE
-                pos := when_off + 6;
-                brackets := 1;
-                WHILE brackets > 0 AND pos < def_len LOOP
-                    chr := substr(definition, pos, 1);
-                    IF chr = ')' THEN
-                        brackets := brackets - 1;
-                    ELSIF chr = '(' THEN
-                        brackets := brackets + 1;
-                    END IF;
-                    pos := pos + 1;
-                END LOOP;
-
-                IF brackets != 0 THEN
-                    RAISE EXCEPTION
-                        'cannot parse trigger condition: %',
-                        definition;
-                END IF;
-
-                RETURN substr(
-                    definition,
-                    when_off + 6,
-                    pos - (when_off + 6) - 1
-                );
-            END IF;
-        END;
-    '''
-
-    def __init__(self) -> None:
-        super().__init__(
-            name=('edgedb', '_parse_trigger_condition'),
-            args=[
-                ('definition', 'text'),
-            ],
-            returns='text',
-            volatility='stable',
-            language='plpgsql',
-            text=self.__class__.text)
 
 
 class NormalizeArrayIndexFunction(dbops.Function):
@@ -4129,7 +3749,7 @@ class GetTypeToRangeNameMap(dbops.Function):
         )
 
 
-class GetTypeToMultirangeNameMap(dbops.Function):
+class GetTypeToMultiRangeNameMap(dbops.Function):
     "Return a map of type names to the name of the associated multirange type"
 
     text = f'''
@@ -4236,7 +3856,7 @@ class GetPgTypeForEdgeDBTypeFunction(dbops.Function):
                     FROM
                         pg_catalog.pg_range rng
                     WHERE
-                        "kind" = 'schema::Multirange'
+                        "kind" = 'schema::MultiRange'
                         -- For multiranges, we need to do the lookup based on
                         -- our internal map of elem names to range names,
                         -- because we use the builtin daterange as the range
@@ -4593,7 +4213,6 @@ async def bootstrap(
         dbops.CreateSchema(name='edgedbpub'),
         dbops.CreateSchema(name='edgedbstd'),
         dbops.CreateSchema(name='edgedbsql'),
-        dbops.CreateCompositeType(ExpressionType()),
         dbops.CreateView(NormalizedPgSettingsView()),
         dbops.CreateTable(DBConfigTable()),
         dbops.CreateTable(DMLDummyTable()),
@@ -4629,11 +4248,6 @@ async def bootstrap(
         dbops.CreateFunction(NormalizeNameFunction()),
         dbops.CreateFunction(GetNameModuleFunction()),
         dbops.CreateFunction(NullIfArrayNullsFunction()),
-        dbops.CreateCompositeType(IndexDescType()),
-        dbops.CreateFunction(IntrospectIndexesFunction()),
-        dbops.CreateCompositeType(TriggerDescType()),
-        dbops.CreateFunction(IntrospectTriggersFunction()),
-        dbops.CreateCompositeType(TableInheritanceDescType()),
         dbops.CreateDomain(BigintDomain()),
         dbops.CreateDomain(ConfigMemoryDomain()),
         dbops.CreateDomain(TimestampTzDomain()),
@@ -4651,8 +4265,6 @@ async def bootstrap(
         dbops.CreateFunction(StrToInt16NoInline()),
         dbops.CreateFunction(StrToFloat64NoInline()),
         dbops.CreateFunction(StrToFloat32NoInline()),
-        dbops.CreateFunction(GetTableDescendantsFunction()),
-        dbops.CreateFunction(ParseTriggerConditionFunction()),
         dbops.CreateFunction(NormalizeArrayIndexFunction()),
         dbops.CreateFunction(NormalizeArraySliceIndexFunction()),
         dbops.CreateFunction(IntOrNullFunction()),
@@ -4693,7 +4305,7 @@ async def bootstrap(
         dbops.CreateFunction(GetCachedReflection()),
         dbops.CreateFunction(GetBaseScalarTypeMap()),
         dbops.CreateFunction(GetTypeToRangeNameMap()),
-        dbops.CreateFunction(GetTypeToMultirangeNameMap()),
+        dbops.CreateFunction(GetTypeToMultiRangeNameMap()),
         dbops.CreateFunction(GetPgTypeForEdgeDBTypeFunction()),
         dbops.CreateFunction(DescribeInstanceConfigAsDDLFunctionForwardDecl()),
         dbops.CreateFunction(DescribeDatabaseConfigAsDDLFunctionForwardDecl()),
@@ -4703,7 +4315,7 @@ async def bootstrap(
         dbops.CreateRange(DatetimeRange()),
         dbops.CreateRange(LocalDatetimeRange()),
         dbops.CreateFunction(RangeToJsonFunction()),
-        dbops.CreateFunction(MultirangeToJsonFunction()),
+        dbops.CreateFunction(MultiRangeToJsonFunction()),
         dbops.CreateFunction(RangeValidateFunction()),
         dbops.CreateFunction(RangeUnpackLowerValidateFunction()),
         dbops.CreateFunction(RangeUnpackUpperValidateFunction()),
@@ -4723,14 +4335,24 @@ async def create_pg_extensions(
     conn: PGConnection,
     backend_params: params.BackendRuntimeParams,
 ) -> None:
-    ext_schema = backend_params.instance_params.ext_schema
+    inst_params = backend_params.instance_params
+    ext_schema = inst_params.ext_schema
+    # Both the extension schema, and the desired extension
+    # might already exist in a single database backend,
+    # attempt to create things conditionally.
     commands = dbops.CommandGroup()
-    commands.add_commands([
+    commands.add_command(
         dbops.CreateSchema(name=ext_schema, conditional=True),
-        dbops.CreateExtension(
-            dbops.Extension(name='uuid-ossp', schema=ext_schema),
-        ),
-    ])
+    )
+    if (
+        inst_params.existing_exts is None
+        or inst_params.existing_exts.get("uuid-ossp") is None
+    ):
+        commands.add_commands([
+            dbops.CreateExtension(
+                dbops.Extension(name='uuid-ossp', schema=ext_schema),
+            ),
+        ])
     block = dbops.PLTopBlock()
     commands.generate(block)
     await _execute_block(conn, block)
@@ -4740,20 +4362,34 @@ async def patch_pg_extensions(
     conn: PGConnection,
     backend_params: params.BackendRuntimeParams,
 ) -> None:
-    ext_schema = backend_params.instance_params.ext_schema
+    # A single database backend might restrict creation of extensions
+    # to a specific schema, or restrict creation of extensions altogether
+    # and provide a way to register them using a different method
+    # (e.g. a hosting panel UI).
+    inst_params = backend_params.instance_params
+    if inst_params.existing_exts is not None:
+        uuid_ext_schema = inst_params.existing_exts.get("uuid-ossp")
+        if uuid_ext_schema is None:
+            uuid_ext_schema = inst_params.ext_schema
+    else:
+        uuid_ext_schema = inst_params.ext_schema
+
     commands = dbops.CommandGroup()
-    commands.add_commands([
-        dbops.CreateSchema(name=ext_schema, conditional=True),
-        dbops.CreateFunction(
-            UuidGenerateV1mcFunction(ext_schema), or_replace=True),
-        dbops.CreateFunction(
-            UuidGenerateV4Function(ext_schema), or_replace=True),
-        dbops.CreateFunction(
-            UuidGenerateV5Function(ext_schema), or_replace=True),
-    ])
-    block = dbops.PLTopBlock()
-    commands.generate(block)
-    await _execute_block(conn, block)
+
+    if uuid_ext_schema != "edgedbext":
+        commands.add_commands([
+            dbops.CreateFunction(
+                UuidGenerateV1mcFunction(uuid_ext_schema), or_replace=True),
+            dbops.CreateFunction(
+                UuidGenerateV4Function(uuid_ext_schema), or_replace=True),
+            dbops.CreateFunction(
+                UuidGenerateV5Function(uuid_ext_schema), or_replace=True),
+        ])
+
+    if len(commands) > 0:
+        block = dbops.PLTopBlock()
+        commands.generate(block)
+        await _execute_block(conn, block)
 
 
 classref_attr_aliases = {
@@ -4764,29 +4400,23 @@ classref_attr_aliases = {
 
 def tabname(
     schema: s_schema.Schema, obj: s_obj.QualifiedObject
-) -> Tuple[str, str]:
-    return (
-        'edgedbstd',
-        common.get_backend_name(
-            schema,
-            obj,
-            aspect='table',
-            catenate=False,
-        )[1],
+) -> tuple[str, str]:
+    return common.get_backend_name(
+        schema,
+        obj,
+        aspect='table',
+        catenate=False,
     )
 
 
 def inhviewname(
     schema: s_schema.Schema, obj: s_obj.QualifiedObject
 ) -> Tuple[str, str]:
-    return (
-        'edgedbstd',
-        common.get_backend_name(
-            schema,
-            obj,
-            aspect='inhview',
-            catenate=False,
-        )[1],
+    return common.get_backend_name(
+        schema,
+        obj,
+        aspect='inhview',
+        catenate=False,
     )
 
 
@@ -4940,7 +4570,7 @@ def _generate_extension_views(schema: s_schema.Schema) -> List[dbops.View]:
         schema, s_name.UnqualName('version'), type=s_props.Property)
     ver_t = common.get_backend_name(
         schema,
-        ver.get_target(schema),
+        not_none(ver.get_target(schema)),
         catenate=False,
     )
 

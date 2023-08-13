@@ -62,12 +62,14 @@ cdef class DatabaseIndex:
     cdef:
         dict _dbs
         object _server
+        object _tenant
         object _sys_config
         object _comp_sys_config
         object _std_schema
         object _global_schema
         object _factory
         object _default_sysconfig
+        object _sys_config_spec
 
 
 cdef class Database:
@@ -92,6 +94,7 @@ cdef class Database:
     cdef schedule_extensions_update(self)
 
     cdef _invalidate_caches(self)
+    cdef _clear_state_serializers(self)
     cdef _cache_compiled_query(self, key, query_unit)
     cdef _new_view(self, query_cache, protocol_version)
     cdef _remove_view(self, view)
@@ -104,6 +107,7 @@ cdef class Database:
         db_config=?,
     )
     cdef get_state_serializer(self, protocol_version)
+    cdef set_state_serializer(self, protocol_version, serializer)
 
 
 cdef class DatabaseConnectionView:
@@ -186,6 +190,8 @@ cdef class DatabaseConnectionView:
     cdef commit_implicit_tx(
         self, user_schema, global_schema, cached_reflection
     )
+
+    cpdef get_config_spec(self)
 
     cpdef get_session_config(self)
     cdef set_session_config(self, new_conf)

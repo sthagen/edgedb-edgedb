@@ -1008,23 +1008,23 @@ class DeleteRangeExprAlias(
     pass
 
 
-class MultirangeCommand(MetaCommand):
+class MultiRangeCommand(MetaCommand):
     pass
 
 
-class CreateMultirange(MultirangeCommand, adapts=s_types.CreateMultirange):
+class CreateMultiRange(MultiRangeCommand, adapts=s_types.CreateMultiRange):
     pass
 
 
-class AlterMultirange(MultirangeCommand, adapts=s_types.AlterMultirange):
+class AlterMultiRange(MultiRangeCommand, adapts=s_types.AlterMultiRange):
     pass
 
 
-class RenameMultirange(MultirangeCommand, adapts=s_types.RenameMultirange):
+class RenameMultiRange(MultiRangeCommand, adapts=s_types.RenameMultiRange):
     pass
 
 
-class DeleteMultirange(MultirangeCommand, adapts=s_types.DeleteMultirange):
+class DeleteMultiRange(MultiRangeCommand, adapts=s_types.DeleteMultiRange):
     pass
 
 
@@ -3566,7 +3566,9 @@ class CreateIndex(IndexCommand, adapts=s_indexes.CreateIndex):
             raise AssertionError(f'index {root_name} is missing the code')
 
         pg_index = dbops.Index(
-            name=index_name[1], table_name=table_name, exprs=sql_exprs,
+            name=index_name[1],
+            table_name=table_name,  # type: ignore
+            exprs=sql_exprs,
             unique=False, inherit=True,
             predicate=predicate_src,
             metadata={
@@ -3973,6 +3975,7 @@ class PointerMetaCommand(
         tab = q(*ptr_stor_info.table_name)
         target_col = ptr_stor_info.column_name
         source = ptr.get_source(orig_schema)
+        assert source
         src_tab = q(*common.get_backend_name(
             orig_schema,
             source,
@@ -4069,6 +4072,7 @@ class PointerMetaCommand(
             # Moving from source table to pointer table.
             self.create_table(ptr, schema, context)
             source = ptr.get_source(orig_schema)
+            assert source
             src_tab = q(*common.get_backend_name(
                 orig_schema,
                 source,
@@ -4173,6 +4177,7 @@ class PointerMetaCommand(
             tab = q(*ptr_stor_info.table_name)
             target_col = ptr_stor_info.column_name
             source = ptr.get_source(orig_schema)
+            assert source
             src_tab = q(*common.get_backend_name(
                 orig_schema,
                 source,

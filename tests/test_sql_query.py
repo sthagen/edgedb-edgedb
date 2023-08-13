@@ -154,7 +154,7 @@ class TestSQL(tb.SQLQueryTestCase):
         res = await self.scon.fetch(
             '''
             SELECT * FROM "Movie"
-            JOIN "Genre" g ON "Movie".genre_id = "Genre".id
+            JOIN "Genre" g ON "Movie".genre_id = g.id
             '''
         )
         self.assert_shape(res, 2, 7)
@@ -565,6 +565,26 @@ class TestSQL(tb.SQLQueryTestCase):
             """
         )
         self.assertEqual(res, [['24']])
+
+    async def test_sql_query_38(self):
+        res = await self.squery_values(
+            '''
+            WITH users AS (
+              SELECT 1 as id, NULL as managed_by
+              UNION ALL
+              SELECT 2 as id, 1 as managed_by
+            )
+            SELECT id, (
+              SELECT id FROM users e WHERE id = users.managed_by
+            ) as managed_by
+            FROM users
+            ORDER BY id
+            '''
+        )
+        self.assertEqual(res, [
+            [1, None],
+            [2, 1],
+        ])
 
     async def test_sql_query_introspection_00(self):
         dbname = self.con.dbname
@@ -1048,3 +1068,12 @@ class TestSQL(tb.SQLQueryTestCase):
 
     async def test_sql_query_empty(self):
         await self.scon.executemany('', args=[])
+
+    async def test_sql_query_pgadmin_hack(self):
+        await self.scon.execute("SET DateStyle=ISO;")
+        await self.scon.execute("SET client_min_messages=notice;")
+        await self.scon.execute(
+            "SELECT set_config('bytea_output','hex',false) FROM pg_settings"
+            " WHERE name = 'bytea_output'; "
+        )
+        await self.scon.execute("SET client_encoding='WIN874';")
