@@ -78,6 +78,7 @@ from edb.pgsql import dbops
 from edb.pgsql import params
 
 from edb.server import defines as edbdef
+from edb.server import config
 from edb.server.config import ops as config_ops
 
 from . import ast as pg_ast
@@ -133,7 +134,22 @@ def is_cfg_view(
 ) -> bool:
     return (
         isinstance(obj, (s_objtypes.ObjectType, s_pointers.Pointer))
-        and obj.get_name(schema).module in VIEW_MODULES
+        and (
+            obj.get_name(schema).module in VIEW_MODULES
+            or bool(
+                (cfg_object := schema.get(
+                    'cfg::ConfigObject',
+                    type=s_objtypes.ObjectType, default=None
+                ))
+                and (
+                    nobj := (
+                        obj if isinstance(obj, s_objtypes.ObjectType)
+                        else obj.get_source(schema)
+                    )
+                )
+                and nobj.issubclass(schema, cfg_object)
+            )
+        )
     )
 
 
@@ -1225,7 +1241,8 @@ class FunctionCommand(MetaCommand):
             explicit_top_cast=irtyputils.type_to_typeref(  # note: no cache
                 schema, func.get_return_type(schema)),
             output_format=compiler.OutputFormat.NATIVE,
-            use_named_params=True)
+            named_param_prefix=self.get_pgname(func, schema)[-1:],
+        )
 
         return codegen.generate_source(sql_res.ast)
 
@@ -1350,7 +1367,7 @@ class FunctionCommand(MetaCommand):
                 explicit_top_cast=irtyputils.type_to_typeref(  # note: no cache
                     schema, func.get_return_type(schema)),
                 output_format=compiler.OutputFormat.NATIVE,
-                use_named_params=True,
+                named_param_prefix=self.get_pgname(func, schema)[-1:],
                 backend_runtime_params=context.backend_runtime_params,
             )
             body = codegen.generate_source(sql_res.ast)
@@ -2377,6 +2394,9 @@ class CreateScalarType(ScalarTypeMetaCommand,
         else:
             ops = dbops.CommandGroup()
 
+            if scalar.get_transient(schema):
+                return ops
+
             base = types.get_scalar_base(schema, scalar)
 
             new_domain_name = types.pg_type_from_scalar(schema, scalar)
@@ -3016,10 +3036,11 @@ class CompositeMetaCommand(MetaCommand):
 
         tabname = table_name if table_name else self.table_name
 
+        # XXX: should this be arranged to always have been done?
         if not tabname:
             ctx = context.get(self.__class__)
             assert ctx
-            tabname = common.get_backend_name(schema, ctx.scls, catenate=False)
+            tabname = self._get_table_name(ctx.scls, schema)
             if table_name is None:
                 self.table_name = tabname
 
@@ -3080,7 +3101,9 @@ class CompositeMetaCommand(MetaCommand):
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ) -> None:
-        self.pgops.add(self._refresh_fake_cfg_view_cmd(obj, schema, context))
+        if not context.in_deletion():
+            self.pgops.add(
+                self._refresh_fake_cfg_view_cmd(obj, schema, context))
 
     @classmethod
     def get_source_and_pointer_ctx(cls, schema, context):
@@ -3325,7 +3348,12 @@ class CompositeMetaCommand(MetaCommand):
     ) -> None:
         for base in obj.get_ancestors(schema).objects(schema):
             src = base.get_source(schema)
-            if src and has_table(src, schema) and not context.is_deleting(src):
+            if (
+                src
+                and has_table(src, schema)
+                and not context.is_deleting(base)
+                and not context.is_deleting(src)
+            ):
                 assert isinstance(src, s_sources.Source)
                 self.alter_inhview(
                     schema,
@@ -3467,6 +3495,8 @@ class CreateIndex(IndexCommand, adapts=s_indexes.CreateIndex):
         schema: s_schema.Schema,
         context: sd.CommandContext,
     ):
+        from .compiler import astutils
+
         subject = index.get_subject(schema)
         assert isinstance(subject, (s_types.Type, s_pointers.Pointer))
 
@@ -3482,21 +3512,13 @@ class CreateIndex(IndexCommand, adapts=s_indexes.CreateIndex):
             apply_query_rewrites=False,
         )
 
-        index_sexpr = index.get_expr(schema)
+        index_sexpr: Optional[s_expr.Expression] = index.get_expr(schema)
         assert index_sexpr
         index_expr = index_sexpr.ensure_compiled(
             schema=schema,
             options=options,
         )
         ir = index_expr.irast
-
-        sql_res = compiler.compile_ir_to_sql_tree(ir.expr, singleton_mode=True)
-        if isinstance(sql_res.ast, pg_ast.ImplicitRowExpr):
-            sql_exprs = [
-                codegen.generate_source(el) for el in sql_res.ast.args
-            ]
-        else:
-            sql_exprs = [codegen.generate_source(sql_res.ast)]
 
         except_expr = index.get_except_expr(schema)
         if except_expr:
@@ -3514,7 +3536,8 @@ class CreateIndex(IndexCommand, adapts=s_indexes.CreateIndex):
 
         sql_kwarg_exprs = dict()
         # Get the name of the root index that this index implements
-        orig_name = sn.shortname_from_fullname(index.get_name(schema))
+        orig_name: sn.Name = sn.shortname_from_fullname(index.get_name(schema))
+        root_name: sn.Name
         root_code: str | None
         if orig_name == s_indexes.DEFAULT_INDEX:
             root_name = orig_name
@@ -3556,20 +3579,26 @@ class CreateIndex(IndexCommand, adapts=s_indexes.CreateIndex):
                 sql = codegen.generate_source(kw_sql_tree)
                 sql_kwarg_exprs[name] = sql
 
+        if root_code is None:
+            raise AssertionError(f'index {root_name} is missing the code')
+
+        sql_res = compiler.compile_ir_to_sql_tree(ir.expr, singleton_mode=True)
+        exprs = astutils.maybe_unpack_row(sql_res.ast)
+
         table_name = common.get_backend_name(schema, subject, catenate=False)
 
         module_name = index.get_name(schema).module
         index_name = common.get_index_backend_name(
             index.id, module_name, catenate=False)
 
-        if root_code is None:
-            raise AssertionError(f'index {root_name} is missing the code')
+        sql_exprs = [codegen.generate_source(e) for e in exprs]
 
         pg_index = dbops.Index(
             name=index_name[1],
             table_name=table_name,  # type: ignore
             exprs=sql_exprs,
-            unique=False, inherit=True,
+            unique=False,
+            inherit=True,
             predicate=predicate_src,
             metadata={
                 'schemaname': str(index.get_name(schema)),
@@ -3612,18 +3641,25 @@ class AlterIndex(IndexCommand, adapts=s_indexes.AlterIndex):
 
 class DeleteIndex(IndexCommand, adapts=s_indexes.DeleteIndex):
     @classmethod
-    def delete_index(cls, index, schema, context):
+    def delete_index(
+        cls,
+        index: s_indexes.Index,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ):
         subject = index.get_subject(schema)
+        assert subject
         table_name = common.get_backend_name(
             schema, subject, catenate=False)
         module_name = index.get_name(schema).module
         orig_idx_name = common.get_index_backend_name(
             index.id, module_name, catenate=False)
-        index = dbops.Index(
+        pg_index = dbops.Index(
             name=orig_idx_name[1], table_name=table_name, inherit=True)
         index_exists = dbops.IndexExists(
-            (table_name[0], index.name_in_catalog))
-        return dbops.DropIndex(index, conditions=(index_exists,))
+            (table_name[0], pg_index.name_in_catalog)
+        )
+        return dbops.DropIndex(pg_index, conditions=(index_exists,))
 
     def apply(
         self,
@@ -3676,6 +3712,55 @@ class ObjectTypeMetaCommand(AliasCapableMetaCommand,
         changed_targets = endpoint_delete_actions.changed_targets
         changed_targets.add((self, obj))
 
+    def _fixup_configs(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> None:
+        orig_schema = context.current().original_schema
+        eff_schema = (
+            orig_schema if isinstance(self, sd.DeleteObject) else schema)
+        scls: s_objtypes.ObjectType = self.scls  # type: ignore
+
+        # If we are updating a config object that is *not* in cfg::
+        # (that is, an extension config), we need to update the config
+        # views and specs. We *don't* do that for standard library
+        # configs, since those need to be created after the standard
+        # schema is in place.
+        if not (
+            is_cfg_view(scls, eff_schema)
+            and not scls.get_name(eff_schema).module in VIEW_MODULES
+        ):
+            return
+
+        from edb.pgsql import metaschema
+
+        new_local_spec = config.load_spec_from_schema(schema, only_exts=True)
+        spec_json = config.spec_to_json(new_local_spec)
+        self.pgops.add(dbops.Query(textwrap.dedent(f'''\
+            UPDATE
+                edgedbinstdata.instdata
+            SET
+                json = {ql(spec_json)}
+            WHERE
+                key = 'configspec_ext';
+        ''')))
+
+        for sub in self.get_subcommands(type=s_pointers.DeletePointer):
+            if has_table(sub.scls, orig_schema):
+                self.pgops.add(dbops.DropView(common.get_backend_name(
+                    eff_schema, sub.scls, catenate=False)))
+
+        if isinstance(self, sd.DeleteObject):
+            self.pgops.add(dbops.DropView(common.get_backend_name(
+                eff_schema, scls, catenate=False)))
+        elif isinstance(self, sd.CreateObject):
+            views = metaschema.get_config_type_views(
+                eff_schema, scls, scope=None)
+            self.pgops.update(views)
+        # FIXME: ALTER doesn't work in meaningful ways. We'll maybe
+        # need to fix that when we have patching configs.
+
 
 class CreateObjectType(ObjectTypeMetaCommand,
                        adapts=s_objtypes.CreateObjectType):
@@ -3697,6 +3782,8 @@ class CreateObjectType(ObjectTypeMetaCommand,
             self.pgops.add(self.update_search_indexes)
 
         self.schedule_endpoint_delete_action_update(self.scls, schema, context)
+
+        self._fixup_configs(schema, context)
 
         return schema
 
@@ -3790,6 +3877,8 @@ class AlterObjectType(ObjectTypeMetaCommand,
                 schema = self.update_search_indexes.apply(schema, context)
                 self.pgops.add(self.update_search_indexes)
 
+        self._fixup_configs(schema, context)
+
         return schema
 
     def _maybe_do_abstract_test(
@@ -3836,8 +3925,7 @@ class DeleteObjectType(ObjectTypeMetaCommand,
         self.scls = objtype = schema.get(
             self.classname, type=s_objtypes.ObjectType)
 
-        old_table_name = common.get_backend_name(
-            schema, objtype, catenate=False)
+        old_table_name = self._get_table_name(self.scls, schema)
 
         orig_schema = schema
         schema = super().apply(schema, context)
@@ -3848,6 +3936,8 @@ class DeleteObjectType(ObjectTypeMetaCommand,
             self.attach_alter_table(context)
             self.drop_inhview(orig_schema, context, objtype)
             self.pgops.add(dbops.DropTable(name=old_table_name))
+
+        self._fixup_configs(schema, context)
 
         return schema
 

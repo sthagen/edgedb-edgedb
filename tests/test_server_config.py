@@ -18,7 +18,6 @@
 
 
 import asyncio
-import dataclasses
 import datetime
 import json
 import os
@@ -26,7 +25,6 @@ import platform
 import random
 import tempfile
 import textwrap
-import typing
 import unittest
 
 import immutables
@@ -41,6 +39,9 @@ from edb.protocol import messages
 
 from edb.testbase import server as tb
 from edb.schema import objects as s_obj
+
+from edb.ir import statypes
+
 
 from edb.server import args
 from edb.server import cluster
@@ -62,18 +63,27 @@ def make_port_value(*, protocol='graphql+http',
         concurrency=concurrency, port=port, **kwargs)
 
 
-@dataclasses.dataclass(frozen=True, eq=True)
-class Port(types.CompositeConfigType):
-
-    protocol: str
-    database: str
-    port: int
-    concurrency: int
-    user: str
-    address: typing.FrozenSet[str] = frozenset({'localhost'})
+Field = statypes.CompositeTypeSpecField
 
 
-testspec1 = spec.Spec(
+def _mk_fields(*fields):
+    return immutables.Map({f.name: f for f in fields})
+
+
+Port = types.ConfigTypeSpec(
+    name='Port',
+    fields=_mk_fields(
+        Field('protocol', str),
+        Field('database', str),
+        Field('port', int),
+        Field('concurrency', int),
+        Field('user', str),
+        Field('address', frozenset[str], default=frozenset({'localhost'})),
+    ),
+)
+
+
+testspec1 = spec.FlatSpec(
     spec.Setting(
         'int',
         type=int,
@@ -451,16 +461,8 @@ class TestServerConfig(tb.QueryTestCase):
             ''')
 
         with self.assertRaisesRegex(
-                edgedb.UnsupportedFeatureError,
-                'CONFIGURE DATABASE INSERT is not supported'):
-            await self.con.query('''
-                CONFIGURE CURRENT DATABASE
-                INSERT TestSessionConfig { name := 'foo' };
-            ''')
-
-        with self.assertRaisesRegex(
-                edgedb.QueryError,
-                'module must be either \'cfg\' or empty'):
+                edgedb.ConfigurationError,
+                'unrecognized configuration object'):
             await self.con.query('''
                 CONFIGURE INSTANCE INSERT cf::TestInstanceConfig {
                     name := 'foo'
@@ -521,32 +523,41 @@ class TestServerConfig(tb.QueryTestCase):
                 CONFIGURE SESSION RESET multiprop
             ''')
 
-    async def test_server_proto_configure_03(self):
+    async def _server_proto_configure_03(self, scope, base_result=None):
+        # scope is either INSTANCE or CURRENT DATABASE
+
+        # when scope is CURRENT DATABASE, base_result can be an INSTANCE
+        # config that should be shadowed whenever there is a database config
+        if base_result is None:
+            base_result = []
+
         await self.assert_query_result(
             '''
             SELECT cfg::Config.sysobj { name } FILTER .name LIKE 'test_03%';
             ''',
-            [],
+            base_result,
         )
 
-        await self.con.query('''
-            CONFIGURE INSTANCE INSERT TestInstanceConfig { name := 'test_03' };
+        await self.con.query(f'''
+            CONFIGURE {scope} INSERT TestInstanceConfig {{
+                name := 'test_03'
+            }};
         ''')
 
-        await self.con.query('''
-            CONFIGURE INSTANCE INSERT cfg::TestInstanceConfig {
+        await self.con.query(f'''
+            CONFIGURE {scope} INSERT cfg::TestInstanceConfig {{
                 name := 'test_03_01'
-            };
+            }};
         ''')
 
         with self.assertRaisesRegex(
             edgedb.InterfaceError,
             r'it does not return any data',
         ):
-            await self.con.query_required_single('''
-                CONFIGURE INSTANCE INSERT cfg::TestInstanceConfig {
+            await self.con.query_required_single(f'''
+                CONFIGURE {scope} INSERT cfg::TestInstanceConfig {{
                     name := 'test_03_0122222222'
-                };
+                }};
             ''')
 
         await self.assert_query_result(
@@ -565,8 +576,8 @@ class TestServerConfig(tb.QueryTestCase):
             ]
         )
 
-        await self.con.query('''
-            CONFIGURE INSTANCE
+        await self.con.query(f'''
+            CONFIGURE {scope}
             RESET TestInstanceConfig FILTER .name = 'test_03';
         ''')
 
@@ -582,8 +593,8 @@ class TestServerConfig(tb.QueryTestCase):
             ],
         )
 
-        await self.con.query('''
-            CONFIGURE INSTANCE
+        await self.con.query(f'''
+            CONFIGURE {scope}
             RESET TestInstanceConfig FILTER .name = 'test_03_01';
         ''')
 
@@ -592,20 +603,20 @@ class TestServerConfig(tb.QueryTestCase):
             SELECT cfg::Config.sysobj { name }
             FILTER .name LIKE 'test_03%';
             ''',
-            []
+            base_result,
         )
 
         # Repeat reset that doesn't match anything this time.
-        await self.con.query('''
-            CONFIGURE INSTANCE
+        await self.con.query(f'''
+            CONFIGURE {scope}
             RESET TestInstanceConfig FILTER .name = 'test_03_01';
         ''')
 
-        await self.con.query('''
-            CONFIGURE INSTANCE INSERT TestInstanceConfig {
+        await self.con.query(f'''
+            CONFIGURE {scope} INSERT TestInstanceConfig {{
                 name := 'test_03',
-                obj := (INSERT Subclass1 { name := 'foo', sub1 := 'sub1' })
-            }
+                obj := (INSERT Subclass1 {{ name := 'foo', sub1 := 'sub1' }})
+            }}
         ''')
 
         await self.assert_query_result(
@@ -630,11 +641,11 @@ class TestServerConfig(tb.QueryTestCase):
             ],
         )
 
-        await self.con.query('''
-            CONFIGURE INSTANCE INSERT TestInstanceConfig {
+        await self.con.query(f'''
+            CONFIGURE {scope} INSERT TestInstanceConfig {{
                 name := 'test_03_01',
-                obj := (INSERT Subclass2 { name := 'bar', sub2 := 'sub2' })
-            }
+                obj := (INSERT Subclass2 {{ name := 'bar', sub2 := 'sub2' }})
+            }}
         ''')
 
         await self.assert_query_result(
@@ -667,9 +678,9 @@ class TestServerConfig(tb.QueryTestCase):
             ],
         )
 
-        await self.con.query('''
-            CONFIGURE INSTANCE RESET TestInstanceConfig
-            FILTER .obj.name IN {'foo', 'bar'} AND .name ILIKE 'test_03%';
+        await self.con.query(f'''
+            CONFIGURE {scope} RESET TestInstanceConfig
+            FILTER .obj.name IN {{'foo', 'bar'}} AND .name ILIKE 'test_03%';
         ''')
 
         await self.assert_query_result(
@@ -677,13 +688,13 @@ class TestServerConfig(tb.QueryTestCase):
             SELECT cfg::Config.sysobj { name }
             FILTER .name LIKE 'test_03%';
             ''',
-            []
+            base_result,
         )
 
-        await self.con.query('''
-            CONFIGURE INSTANCE INSERT TestInstanceConfig {
+        await self.con.query(f'''
+            CONFIGURE {scope} INSERT TestInstanceConfig {{
                 name := 'test_03_' ++ <str>count(DETACHED TestInstanceConfig),
-            }
+            }}
         ''')
 
         await self.assert_query_result(
@@ -701,8 +712,8 @@ class TestServerConfig(tb.QueryTestCase):
             ],
         )
 
-        await self.con.query('''
-            CONFIGURE INSTANCE RESET TestInstanceConfig
+        await self.con.query(f'''
+            CONFIGURE {scope} RESET TestInstanceConfig
             FILTER .name ILIKE 'test_03%';
         ''')
 
@@ -711,8 +722,29 @@ class TestServerConfig(tb.QueryTestCase):
             SELECT cfg::Config.sysobj { name }
             FILTER .name LIKE 'test_03%';
             ''',
-            []
+            base_result,
         )
+
+    async def test_server_proto_configure_03a(self):
+        await self._server_proto_configure_03('CURRENT DATABASE')
+
+    async def test_server_proto_configure_03b(self):
+        await self._server_proto_configure_03('INSTANCE')
+
+    async def test_server_proto_configure_03c(self):
+        await self.con.query('''
+            CONFIGURE INSTANCE INSERT TestInstanceConfig {
+                name := 'test_03_base'
+            };
+        ''')
+
+        await self._server_proto_configure_03(
+            'CURRENT DATABASE', [{'name': 'test_03_base'}]
+        )
+
+        await self.con.query('''
+            CONFIGURE INSTANCE RESET TestInstanceConfig;
+        ''')
 
     async def test_server_proto_configure_04(self):
         with self.assertRaisesRegex(
@@ -1268,8 +1300,7 @@ class TestServerConfig(tb.QueryTestCase):
                         await tx.query('select schema::Object')
 
             # It might take a bit before con2 sees the error config
-            async for tr in self.try_until_succeeds(
-                    ignore=AssertionError):
+            async for tr in self.try_until_succeeds(ignore=AssertionError):
                 async with tr:
                     with self.assertRaisesRegex(edgedb.SchemaError, 'danger',
                                                 _position=42):
@@ -1283,10 +1314,24 @@ class TestServerConfig(tb.QueryTestCase):
             await con2.query('select schema::Object')
 
         finally:
-            await con1.execute(f'''
-                configure current database reset force_database_error;
-            ''')
-            await con2.aclose()
+            try:
+                await con1.execute(f'''
+                    configure current database reset force_database_error;
+                ''')
+
+                # Wait for the config change to be visible to other
+                # connections.  (Not doing this might cause later tests
+                # that use other connections to flake)
+                await con2.execute(f'''
+                    configure session reset force_database_error;
+                ''')
+                async for tr in self.try_until_succeeds(
+                    ignore=edgedb.SchemaError
+                ):
+                    async with tr:
+                        await con2.execute('select 1')
+            finally:
+                await con2.aclose()
 
     async def test_server_proto_non_transactional_pg_14_7(self):
         con1 = self.con

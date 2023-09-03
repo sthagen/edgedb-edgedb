@@ -147,10 +147,7 @@ class DDLQuery(BaseQuery):
     single_unit: bool = False
     create_db: Optional[str] = None
     drop_db: Optional[str] = None
-    create_ext: Optional[str] = None
-    drop_ext: Optional[str] = None
     create_db_template: Optional[str] = None
-    has_role_ddl: bool = False
     ddl_stmt_id: Optional[str] = None
     config_ops: List[config.Operation] = (
         dataclasses.field(default_factory=list))
@@ -236,9 +233,6 @@ class QueryUnit:
     # True if this unit contains SET commands.
     has_set: bool = False
 
-    # True if this unit contains ALTER/DROP/CREATE ROLE commands.
-    has_role_ddl: bool = False
-
     # If tx_id is set, it means that the unit
     # starts a new transaction.
     tx_id: Optional[int] = None
@@ -279,10 +273,6 @@ class QueryUnit:
     # close all inactive unused pooled connections to the template db.
     create_db_template: Optional[str] = None
 
-    # If non-None, contains name of created/deleted extension.
-    create_ext: Optional[str] = None
-    drop_ext: Optional[str] = None
-
     # If non-None, the DDL statement will emit data packets marked
     # with the indicated ID.
     ddl_stmt_id: Optional[str] = None
@@ -304,8 +294,10 @@ class QueryUnit:
     system_config: bool = False
     # Set only when this unit contains a CONFIGURE DATABASE command.
     database_config: bool = False
-    # Set only when this unit contains a SET_GLOBAL command.
-    set_global: bool = False
+    # Set only when this unit contains an operation that needs to have
+    # its results read back in the middle of the script.
+    # (SET GLOBAL, CONFIGURE DATABASE)
+    needs_readback: bool = False
     # Whether any configuration change requires a server restart
     config_requires_restart: bool = False
     # Set only when this unit contains a CONFIGURE command which
@@ -322,10 +314,13 @@ class QueryUnit:
     # the command is run. The schema is pickled.
     user_schema: Optional[bytes] = None
     cached_reflection: Optional[bytes] = None
+    extensions: Optional[set[str]] = None
+    ext_config_settings: Optional[list[config.Setting]] = None
 
     # If present, represents the future global schema state
     # after the command is run. The schema is pickled.
     global_schema: Optional[bytes] = None
+    roles: immutables.Map[str, immutables.Map[str, Any]] | None = None
 
     is_explain: bool = False
     query_asts: Any = None
@@ -473,6 +468,16 @@ class SQLQueryUnit:
 
     command_tag: bytes = b""
     """If frontend_only is True, only issue CommandComplete with this tag."""
+
+
+@dataclasses.dataclass
+class ParsedDatabase:
+    user_schema_pickle: bytes
+    database_config: immutables.Map[str, config.SettingValue]
+    ext_config_settings: list[config.Setting]
+
+    protocol_version: defines.ProtocolVersion
+    state_serializer: sertypes.StateSerializer
 
 
 SQLSettings = immutables.Map[Optional[str], Optional[str | list[str]]]

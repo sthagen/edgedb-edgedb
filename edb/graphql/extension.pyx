@@ -176,28 +176,13 @@ async def handle_request(
         if debug.flags.server:
             markup.dump(ex)
 
-        ex_type = type(ex)
-        if issubclass(ex_type, gql_errors.GraphQLError):
+        if isinstance(ex, gql_errors.GraphQLError):
             # XXX Fix this when LSP "location" objects are implemented
             ex_type = errors.QueryError
-        elif issubclass(ex_type, pgerrors.BackendError):
-            static_exc = errormech.static_interpret_backend_error(
-                ex.fields, from_graphql=True)
-
-            # only use the backend if schema is required
-            if static_exc is errormech.SchemaRequired:
-                ex = errormech.interpret_backend_error(
-                    s_schema.ChainedSchema(
-                        tenant.server.get_std_schema(),
-                        db.user_schema,
-                        tenant.get_global_schema(),
-                    ),
-                    ex.fields,
-                    from_graphql=True,
-                )
-            else:
-                ex = static_exc
-
+        else:
+            ex = await execute.interpret_error(
+                ex, db, from_graphql=True
+            )
             ex_type = type(ex)
 
         err_dct = {
@@ -227,8 +212,8 @@ async def compile(
     compiler_pool = server.get_compiler_pool()
     return await compiler_pool.compile_graphql(
         db.name,
-        db.user_schema,
-        tenant.get_global_schema(),
+        db.user_schema_pickle,
+        tenant.get_global_schema_pickle(),
         db.reflection_cache,
         db.db_config,
         db._index.get_compilation_system_config(),

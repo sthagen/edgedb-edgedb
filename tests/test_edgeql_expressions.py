@@ -3557,6 +3557,17 @@ class TestExpressions(tb.QueryTestCase):
             [[1]],
         )
 
+    async def test_edgeql_expr_array_27(self):
+        # Big array with nontrivial elements
+        N = 350
+        body = '0+1, ' * N
+
+        await self.assert_query_result(
+            f'select [{body}]',
+            [[1] * N],
+            json_only=True,
+        )
+
     async def test_edgeql_expr_coalesce_01(self):
         await self.assert_query_result(
             r'''SELECT <int64>{} ?? 4 ?? 5;''',
@@ -9626,3 +9637,14 @@ aa \
             """,
             [R'aaaa\q\n'],
         )
+
+    async def test_edgeql_overflow_error(self):
+        body = 'x+' * 1600 + '0'
+
+        async with self.assertRaisesRegexTx(
+            edgedb.UnsupportedFeatureError,
+            "caused the compiler stack to overflow",
+        ):
+            await self.con.query(f'''
+                with x := 1337, select {body}
+            ''')

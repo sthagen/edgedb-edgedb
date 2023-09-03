@@ -53,6 +53,7 @@ from edb.server import args as srvargs
 from edb.server import cache
 from edb.server import config
 from edb.server import compiler_pool
+from edb.server import daemon
 from edb.server import defines
 from edb.server import protocol
 from edb.server import tenant as edbtenant
@@ -122,11 +123,12 @@ class BaseServer:
         compiler_pool_size,
         compiler_pool_mode: srvargs.CompilerPoolMode,
         compiler_pool_addr,
-        compiler_pool_tenant_cache_size,
         nethosts,
         netport,
         listen_sockets: tuple[socket.socket, ...] = (),
         testmode: bool = False,
+        daemonized: bool = False,
+        pidfile_dir: Optional[pathlib.Path] = None,
         binary_endpoint_security: srvargs.ServerEndpointSecurityMode = (
             srvargs.ServerEndpointSecurityMode.Tls),
         http_endpoint_security: srvargs.ServerEndpointSecurityMode = (
@@ -156,13 +158,14 @@ class BaseServer:
         # Used to tag PG notifications to later disambiguate them.
         self._server_id = str(uuid.uuid4())
 
+        self._daemonized = daemonized
+        self._pidfile_dir = pidfile_dir
         self._runstate_dir = runstate_dir
         self._internal_runstate_dir = internal_runstate_dir
         self._compiler_pool = None
         self._compiler_pool_size = compiler_pool_size
         self._compiler_pool_mode = compiler_pool_mode
         self._compiler_pool_addr = compiler_pool_addr
-        self._compiler_pool_tenant_cache_size = compiler_pool_tenant_cache_size
 
         self._listen_sockets = listen_sockets
         if listen_sockets:
@@ -411,7 +414,7 @@ class BaseServer:
     def _get_backend_runtime_params(self) -> pgparams.BackendRuntimeParams:
         raise NotImplementedError
 
-    def _create_compiler_pool(self) -> compiler_pool.AbstractPool:
+    def _get_compiler_args(self) -> dict[str, Any]:
         # Force Postgres version in BackendRuntimeParams to be the
         # minimal supported, because the compiler does not rely on
         # the version, and not pinning it would make the remote compiler
@@ -436,10 +439,7 @@ class BaseServer:
         )
         if self._compiler_pool_mode == srvargs.CompilerPoolMode.Remote:
             args['address'] = self._compiler_pool_addr
-        elif self._compiler_pool_mode == srvargs.CompilerPoolMode.MultiTenant:
-            args["cache_size"] = self._compiler_pool_tenant_cache_size
-        self._compiler_pool = compiler_pool.create_compiler_pool(**args)
-        return self._compiler_pool
+        return args
 
     async def _destroy_compiler_pool(self):
         if self._compiler_pool is not None:
@@ -449,11 +449,15 @@ class BaseServer:
     def get_compiler_pool(self):
         return self._compiler_pool
 
+    async def introspect_global_schema_json(
+        self, conn: pgcon.PGConnection
+    ) -> bytes:
+        return await conn.sql_fetch_val(self._global_intro_query)
+
     async def introspect_global_schema(
         self, conn: pgcon.PGConnection
     ) -> s_schema.Schema:
-        intro_query = self._global_intro_query
-        json_data = await conn.sql_fetch_val(intro_query)
+        json_data = await self.introspect_global_schema_json(conn)
         return s_refl.parse_into(
             base_schema=self._std_schema,
             schema=s_schema.EMPTY_SCHEMA,
@@ -461,12 +465,18 @@ class BaseServer:
             schema_class_layout=self._schema_class_layout,
         )
 
-    async def introspect_user_schema(
+    async def introspect_user_schema_json(
+        self,
+        conn: pgcon.PGConnection,
+    ) -> bytes:
+        return await conn.sql_fetch_val(self._local_intro_query)
+
+    async def _introspect_user_schema(
         self,
         conn: pgcon.PGConnection,
         global_schema: s_schema.Schema,
     ) -> s_schema.Schema:
-        json_data = await conn.sql_fetch_val(self._local_intro_query)
+        json_data = await self.introspect_user_schema_json(conn)
 
         base_schema = s_schema.ChainedSchema(
             self._std_schema,
@@ -480,6 +490,22 @@ class BaseServer:
             data=json_data,
             schema_class_layout=self._schema_class_layout,
         )
+
+    async def introspect_db_config(self, conn: pgcon.PGConnection) -> bytes:
+        return await conn.sql_fetch_val(self.get_sys_query("dbconfig"))
+
+    def _parse_db_config(
+        self, db_config_json: bytes, user_schema: s_schema.Schema
+    ) -> Mapping[str, config.SettingValue]:
+        spec = config.ChainedSpec(
+            self._config_settings,
+            config.load_ext_spec_from_schema(
+                user_schema,
+                self.get_std_schema(),
+            ),
+        )
+
+        return config.from_json(spec, db_config_json)
 
     async def get_dbnames(self, syscon):
         dbs_query = self.get_sys_query('listdbs')
@@ -828,7 +854,9 @@ class BaseServer:
             self._request_stats_logger()
         )
 
-        await self._create_compiler_pool().start()
+        self._compiler_pool = await compiler_pool.create_compiler_pool(
+            **self._get_compiler_args()
+        )
 
         await self._before_start_servers()
         self._servers, actual_port, listen_addrs = await self._start_servers(
@@ -838,6 +866,15 @@ class BaseServer:
         )
         self._listen_hosts = [addr[0] for addr in listen_addrs]
         self._listen_port = actual_port
+
+        if self._daemonized:
+            pidfile_dir = self._pidfile_dir
+            if pidfile_dir is None:
+                pidfile_dir = self._runstate_dir
+            pidfile_path = pidfile_dir / f".s.EDGEDB.{actual_port}.lock"
+            pidfile = daemon.PidFile(pidfile_path)
+            pidfile.acquire()
+
         await self._after_start_servers()
 
         if self._echo_runtime_info:
@@ -1131,12 +1168,11 @@ class Server(BaseServer):
                 if last_repair:
                     from . import bootstrap
 
-                    global_schema = (
-                        await self._tenant.introspect_global_schema(conn)
-                    )
-                    user_schema = await self._tenant.introspect_user_schema(
+                    global_schema = await self.introspect_global_schema(conn)
+                    user_schema = await self._introspect_user_schema(
                         conn, global_schema)
-                    config = await self._tenant.introspect_db_config(conn)
+                    config_json = await self.introspect_db_config(conn)
+                    db_config = self._parse_db_config(config_json, user_schema)
                     try:
                         logger.info("repairing database '%s'", dbname)
                         sql += bootstrap.prepare_repair_patch(
@@ -1146,7 +1182,7 @@ class Server(BaseServer):
                             global_schema,
                             self._schema_class_layout,
                             self._tenant.get_backend_runtime_params(),
-                            config,
+                            db_config,
                         )
                     except errors.EdgeDBError as e:
                         if isinstance(e, errors.InternalServerError):
@@ -1425,7 +1461,9 @@ class Server(BaseServer):
         """Run the script specified in *startup_script* and exit immediately"""
         if self._startup_script is None:
             raise AssertionError('startup script is not defined')
-        await self._create_compiler_pool().start()
+        self._compiler_pool = await compiler_pool.create_compiler_pool(
+            **self._get_compiler_args()
+        )
         try:
             await binary.run_script(
                 server=self,
@@ -1486,10 +1524,10 @@ class Server(BaseServer):
     def _get_backend_runtime_params(self) -> pgparams.BackendRuntimeParams:
         return self._tenant.get_backend_runtime_params()
 
-    def _create_compiler_pool(self) -> compiler_pool.AbstractPool:
-        pool = super()._create_compiler_pool()
-        self._tenant.attach_to_compiler(pool)
-        return pool
+    def _get_compiler_args(self) -> dict[str, Any]:
+        rv = super()._get_compiler_args()
+        rv.update(self._tenant.get_compiler_args())
+        return rv
 
 
 def _cleanup_wildcard_addrs(

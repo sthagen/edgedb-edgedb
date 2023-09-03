@@ -2439,6 +2439,17 @@ class TestEdgeQLCasts(tb.QueryTestCase):
             [[]],
         )
 
+    async def test_edgeql_casts_json_15(self):
+        # At one point, a cast from an object inside a binary
+        # operation triggered an infinite loop in staeval if the
+        # object had a self link.
+        await self.con.execute('''
+            create type Z { create link z -> Z; };
+        ''')
+        await self.con.query('''
+            select <json>Z union <json>Z;
+        ''')
+
     async def test_edgeql_casts_assignment_01(self):
         async with self._run_and_rollback():
             await self.con.execute(r"""
@@ -2881,6 +2892,43 @@ class TestEdgeQLCasts(tb.QueryTestCase):
             ''',
             [{'x': None, 'y': 11111}],
             variables=(None, 11111),
+        )
+
+    async def test_edgeql_casts_tuple_params_09(self):
+        await self.con.query('''
+            WITH
+              p := <tuple<test: str>>$0
+            insert Test { p_tup := p };
+        ''', ('foo',))
+
+        await self.assert_query_result(
+            '''
+            select Test { p_tup } filter exists .p_tup
+            ''',
+            [{'p_tup': {'test': 'foo'}}],
+        )
+        await self.assert_query_result(
+            '''
+            WITH
+              p := <tuple<test: str>>$0
+            select p
+            ''',
+            [{'test': 'foo'}],
+            variables=(('foo',),),
+        )
+        await self.assert_query_result(
+            '''
+            select <tuple<test: str>>$0
+            ''',
+            [{'test': 'foo'}],
+            variables=(('foo',),),
+        )
+        await self.assert_query_result(
+            '''
+            select <array<tuple<test: str>>>$0
+            ''',
+            [[{'test': 'foo'}, {'test': 'bar'}]],
+            variables=([('foo',), ('bar',)],),
         )
 
     async def test_edgeql_cast_empty_set_to_array_01(self):

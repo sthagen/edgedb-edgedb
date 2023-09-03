@@ -195,15 +195,8 @@ class ParameterDesc(ParameterLike):
 
         paramd = None
         if astnode.default is not None:
-            defexpr = s_expr.Expression.from_ast(
+            paramd = s_expr.Expression.from_ast(
                 astnode.default, schema, modaliases, as_fragment=True)
-            paramd = defexpr.compiled(
-                schema,
-                as_fragment=True,
-                options=qlcompiler.CompilerOptions(
-                    modaliases=modaliases,
-                )
-            )
 
         paramt_ast = astnode.type
 
@@ -515,6 +508,29 @@ class ParameterCommand(
         schema = super().canonicalize_attributes(schema, context)
         return s_types.materialize_type_in_attribute(
             schema, context, self, 'type')
+
+    def compile_expr_field(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+        field: so.Field[Any],
+        value: s_expr.Expression,
+        track_schema_ref_exprs: bool=False,
+    ) -> s_expr.CompiledExpression:
+        if field.name == 'default':
+            return value.compiled(
+                schema=schema,
+                as_fragment=True,
+                options=qlcompiler.CompilerOptions(
+                    modaliases=context.modaliases,
+                    schema_object_context=self.get_schema_metaclass(),
+                    apply_query_rewrites=not context.stdmode,
+                    track_schema_ref_exprs=track_schema_ref_exprs,
+                ),
+            )
+        else:
+            return super().compile_expr_field(
+                schema, context, field, value, track_schema_ref_exprs)
 
 
 class CreateParameter(ParameterCommand, sd.CreateObject[Parameter]):
@@ -1415,6 +1431,39 @@ class Function(
                         details=(
                             f"Other function is defined as `{other_sig}`"
                         )
+                    )
+
+                if not all(
+                    new_p.get_typemod(schema)
+                    == ext_p.get_typemod(schema)
+                    for new_p, ext_p in zip(new_params, ext_params)
+                ):
+                    # And also _all_ parameter names must match due to
+                    # current implementation constraints.
+                    my_sig = self.get_signature_as_str(schema)
+                    other_sig = f.get_signature_as_str(schema)
+                    raise errors.UnsupportedFeatureError(
+                        f'cannot create the `{my_sig}` '
+                        f'function: overloading an object type-receiving '
+                        f'function with differences in the type modifiers of '
+                        f'parameters is not supported',
+                        context=srcctx,
+                        details=(
+                            f"Other function is defined as `{other_sig}`"
+                        )
+                    )
+
+                if (
+                    new_params[this_diff_param].get_typemod(schema) !=
+                    ft.TypeModifier.SingletonType
+                ):
+                    my_sig = self.get_signature_as_str(schema)
+                    raise errors.UnsupportedFeatureError(
+                        f'cannot create the `{my_sig}` function: '
+                        f'object type-receiving '
+                        f'functions may not be overloaded on an OPTIONAL '
+                        f'parameter',
+                        context=srcctx,
                     )
 
                 diff_param = this_diff_param

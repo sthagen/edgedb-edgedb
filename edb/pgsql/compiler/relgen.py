@@ -413,12 +413,51 @@ def _get_set_rvar(
     return process_set_as_root(ir_set, ctx=ctx)
 
 
+def _get_source_rvar(
+    ir_set: irast.Set,
+    scope_stmt: pgast.SelectStmt,
+    *,
+    ctx: context.CompilerContextLevel,
+) -> pgast.PathRangeVar:
+    is_optional = (
+        ctx.scope_tree.is_optional(ir_set.path_id) or
+        ir_set.path_id in ctx.force_optional
+    )
+
+    if not is_optional:
+        rvar = relctx.new_root_rvar(ir_set, lateral=True, ctx=ctx)
+        relctx.include_rvar(
+            scope_stmt, rvar, path_id=ir_set.path_id, ctx=ctx
+        )
+    else:
+        # If the path is optional in the context we are in, then we
+        # need to put optional wrapping around the join with the base table.
+        with ctx.subrel() as subctx:
+            stmt, optrel = prepare_optional_rel(
+                ir_set=ir_set, stmt=subctx.rel, ctx=subctx)
+            subctx.pending_query = subctx.rel = stmt
+
+            rvar = relctx.new_root_rvar(ir_set, lateral=True, ctx=subctx)
+            rvars = new_source_set_rvar(ir_set, rvar)
+            rvars = finalize_optional_rel(
+                ir_set, optrel=optrel, rvars=rvars, ctx=subctx)
+
+            rvar = _include_rvars(rvars, scope_stmt=scope_stmt, ctx=ctx)
+
+    return rvar
+
+
 def ensure_source_rvar(
     ir_set: irast.Set,
     stmt: pgast.Query,
     *,
     ctx: context.CompilerContextLevel,
 ) -> pgast.PathRangeVar:
+    """Make sure that a source aspect is available for ir_set.
+
+    If no aspect is available, compile it. If value/identity is available
+    but source is not, select from the base relation and join it in.
+    """
 
     rvar = relctx.maybe_get_path_rvar(
         stmt, ir_set.path_id, aspect='source', ctx=ctx)
@@ -442,10 +481,7 @@ def ensure_source_rvar(
                 rvar = relctx.get_path_rvar(
                     scope_stmt, ir_set.path_id, aspect='value', ctx=ctx)
             else:
-                rvar = relctx.new_root_rvar(ir_set, lateral=True, ctx=ctx)
-                relctx.include_rvar(
-                    scope_stmt, rvar, path_id=ir_set.path_id, ctx=ctx
-                )
+                rvar = _get_source_rvar(ir_set, scope_stmt, ctx=ctx)
             pathctx.put_path_rvar(stmt, ir_set.path_id, rvar, aspect='source')
 
     return rvar
@@ -2074,24 +2110,24 @@ def process_set_as_type_cast(
     inner_set = expr.expr
     is_json_cast = expr.to_type.id == s_obj.get_known_type_id('std::json')
 
-    with ctx.new() as subctx:
+    # Are we casting by compiling the innards in json mode?
+    implicit_cast = (
+        is_json_cast
+        and not irtyputils.is_range(inner_set.typeref)
+        and (irtyputils.is_collection(inner_set.typeref)
+             or irtyputils.is_object(inner_set.typeref))
+    )
+    fmt_ctx = (
+        context.output_format(ctx, context.OutputFormat.JSONB) if implicit_cast
+        else contextlib.nullcontext()
+    )
+
+    with fmt_ctx, ctx.new() as subctx:
         pathctx.put_path_id_map(ctx.rel, ir_set.path_id, inner_set.path_id)
 
-        if (is_json_cast
-                and not irtyputils.is_range(inner_set.typeref)
-                and (irtyputils.is_collection(inner_set.typeref)
-                     or irtyputils.is_object(inner_set.typeref))):
-            subctx.expr_exposed = True
-            # XXX: this is necessary until pathctx is converted
-            #      to use context levels instead of using env
-            #      directly.
-            orig_output_format = subctx.env.output_format
-            subctx.env.output_format = context.OutputFormat.JSONB
-            implicit_cast = True
-        else:
-            implicit_cast = False
-
         if implicit_cast:
+            subctx.expr_exposed = True
+
             set_expr = dispatch.compile(inner_set, ctx=subctx)
 
             serialized: Optional[pgast.BaseExpr] = (
@@ -2112,9 +2148,8 @@ def process_set_as_type_cast(
                 pathctx.put_path_serialized_var(
                     stmt, inner_set.path_id, serialized, force=True
                 )
-
-            subctx.env.output_format = orig_output_format
         else:
+            # Rely on the simple implementation of TypeCast
             set_expr = dispatch.compile(expr, ctx=subctx)
 
             # A proper path var mapping way would be to wrap

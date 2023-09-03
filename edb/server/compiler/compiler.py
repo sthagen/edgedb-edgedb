@@ -50,6 +50,7 @@ from edb.ir import ast as irast
 
 from edb.schema import ddl as s_ddl
 from edb.schema import delta as s_delta
+from edb.schema import extensions as s_ext
 from edb.schema import functions as s_func
 from edb.schema import links as s_links
 from edb.schema import properties as s_props
@@ -59,6 +60,7 @@ from edb.schema import objects as s_obj
 from edb.schema import objtypes as s_objtypes
 from edb.schema import pointers as s_pointers
 from edb.schema import reflection as s_refl
+from edb.schema import roles as s_role
 from edb.schema import schema as s_schema
 from edb.schema import types as s_types
 
@@ -102,7 +104,6 @@ class CompileContext:
     output_format: enums.OutputFormat
     expected_cardinality_one: bool
     protocol_version: defines.ProtocolVersion
-    skip_first: bool = False
     expect_rollback: bool = False
     json_parameters: bool = False
     schema_reflection_mode: bool = False
@@ -386,6 +387,8 @@ class CompilerState:
 
     @functools.cached_property
     def state_serializer_factory(self) -> sertypes.StateSerializerFactory:
+        # TODO: This factory will probably need to become per-db once
+        # config spec differs between databases. See also #5836.
         return sertypes.StateSerializerFactory(
             self.std_schema, self.config_spec
         )
@@ -399,7 +402,7 @@ class Compiler:
         self.state = state
 
     @staticmethod
-    def try_compile_rollback(eql: Union[edgeql.Source, bytes]) -> tuple[
+    def _try_compile_rollback(eql: Union[edgeql.Source, bytes]) -> tuple[
         dbstate.QueryUnitGroup, int
     ]:
         source: Union[str, edgeql.Source]
@@ -821,7 +824,6 @@ class Compiler:
         implicit_limit: int,
         inline_typeids: bool,
         inline_typenames: bool,
-        skip_first: bool,
         protocol_version: defines.ProtocolVersion,
         inline_objectids: bool = True,
         json_parameters: bool = False,
@@ -859,7 +861,6 @@ class Compiler:
             inline_typeids=inline_typeids,
             inline_typenames=inline_typenames,
             inline_objectids=inline_objectids,
-            skip_first=skip_first,
             json_parameters=json_parameters,
             source=source,
             protocol_version=protocol_version,
@@ -887,7 +888,6 @@ class Compiler:
         implicit_limit: int,
         inline_typeids: bool,
         inline_typenames: bool,
-        skip_first: bool,
         protocol_version: defines.ProtocolVersion,
         inline_objectids: bool = True,
         json_parameters: bool = False,
@@ -900,9 +900,7 @@ class Compiler:
         ):
             # This is a special case when COMMIT MIGRATION fails, the compiler
             # doesn't have the right transaction state, so we just roll back.
-            return (
-                self.try_compile_rollback(source)[0], state
-            )
+            return self._try_compile_rollback(source)[0], state
         else:
             state.sync_tx(txid)
 
@@ -915,7 +913,6 @@ class Compiler:
             inline_typeids=inline_typeids,
             inline_typenames=inline_typenames,
             inline_objectids=inline_objectids,
-            skip_first=skip_first,
             source=source,
             protocol_version=protocol_version,
             json_parameters=json_parameters,
@@ -924,20 +921,131 @@ class Compiler:
 
         return compile(ctx=ctx, source=source), ctx.state
 
+    def interpret_backend_error(
+        self,
+        user_schema: bytes,
+        global_schema: bytes,
+        error_fields: dict[str, str],
+        from_graphql: bool,
+    ) -> errors.EdgeDBError:
+        from . import errormech
+
+        schema = s_schema.ChainedSchema(
+            self.state.std_schema,
+            pickle.loads(user_schema),
+            pickle.loads(global_schema),
+        )
+        rv: errors.EdgeDBError = errormech.interpret_backend_error(
+            schema, error_fields, from_graphql=from_graphql
+        )
+        return rv
+
+    def parse_json_schema(
+        self,
+        schema_json: bytes,
+        base_schema: s_schema.Schema | None,
+    ) -> s_schema.Schema:
+        if base_schema is None:
+            base_schema = self.state.std_schema
+        else:
+            base_schema = s_schema.ChainedSchema(
+                self.state.std_schema,
+                s_schema.EMPTY_SCHEMA,
+                base_schema,
+            )
+
+        return s_refl.parse_into(
+            base_schema=base_schema,
+            schema=s_schema.EMPTY_SCHEMA,
+            data=schema_json,
+            schema_class_layout=self.state.schema_class_layout,
+        )
+
+    def parse_db_config(
+        self, db_config_json: bytes, user_schema: s_schema.Schema
+    ) -> immutables.Map[str, config.SettingValue]:
+        spec = config.ChainedSpec(
+            self.state.config_spec,
+            config.load_ext_spec_from_schema(
+                user_schema,
+                self.state.std_schema,
+            ),
+        )
+        return config.from_json(spec, db_config_json)
+
+    def parse_global_schema(self, global_schema_json: bytes) -> bytes:
+        global_schema = self.parse_json_schema(global_schema_json, None)
+        return pickle.dumps(global_schema, -1)
+
+    def parse_user_schema_db_config(
+        self,
+        user_schema_json: bytes,
+        db_config_json: bytes,
+        global_schema_pickle: bytes,
+    ) -> dbstate.ParsedDatabase:
+        global_schema = pickle.loads(global_schema_pickle)
+        user_schema = self.parse_json_schema(user_schema_json, global_schema)
+        db_config = self.parse_db_config(db_config_json, user_schema)
+        ext_config_settings = config.load_ext_settings_from_schema(
+            s_schema.ChainedSchema(
+                self.state.std_schema,
+                user_schema,
+                s_schema.EMPTY_SCHEMA,
+            )
+        )
+        state_serializer = self.state.state_serializer_factory.make(
+            user_schema,
+            global_schema,
+            defines.CURRENT_PROTOCOL,
+        )
+        return dbstate.ParsedDatabase(
+            user_schema_pickle=pickle.dumps(user_schema, -1),
+            database_config=db_config,
+            ext_config_settings=ext_config_settings,
+            protocol_version=defines.CURRENT_PROTOCOL,
+            state_serializer=state_serializer,
+        )
+
+    def make_state_serializer(
+        self,
+        protocol_version: defines.ProtocolVersion,
+        user_schema_pickle: bytes,
+        global_schema_pickle: bytes,
+    ) -> sertypes.StateSerializer:
+        user_schema = pickle.loads(user_schema_pickle)
+        global_schema = pickle.loads(global_schema_pickle)
+        return self.state.state_serializer_factory.make(
+            user_schema,
+            global_schema,
+            protocol_version,
+        )
+
     def describe_database_dump(
         self,
-        user_schema: s_schema.Schema,
-        global_schema: s_schema.Schema,
-        database_config: immutables.Map[str, config.SettingValue],
+        user_schema_json: bytes,
+        global_schema_json: bytes,
+        db_config_json: bytes,
         protocol_version: defines.ProtocolVersion,
     ) -> DumpDescriptor:
+        global_schema = self.parse_json_schema(global_schema_json, None)
+        user_schema = self.parse_json_schema(user_schema_json, global_schema)
+        database_config = self.parse_db_config(db_config_json, user_schema)
         schema = s_schema.ChainedSchema(
             self.state.std_schema,
             user_schema,
             global_schema
         )
 
-        config_ddl = config.to_edgeql(self.state.config_spec, database_config)
+        sys_config_ddl = config.to_edgeql(
+            self.state.config_spec, database_config
+        )
+        # We need to put extension DDL configs *after* we have
+        # reloaded the schema
+        user_config_ddl = config.to_edgeql(
+            config.load_ext_spec_from_schema(
+                user_schema, self.state.std_schema),
+            database_config,
+        )
 
         schema_ddl = s_ddl.ddl_text_from_schema(
             schema, include_migrations=True)
@@ -969,8 +1077,11 @@ class Compiler:
         )
         descriptors = []
 
+        cfg_object = schema.get('cfg::ConfigObject', type=s_objtypes.ObjectType)
         for objtype in objtypes:
             if objtype.is_union_type(schema) or objtype.is_view(schema):
+                continue
+            if objtype.issubclass(schema, cfg_object):
                 continue
             descriptors.extend(_describe_object(schema, objtype,
                                                 protocol_version))
@@ -986,7 +1097,7 @@ class Compiler:
             )
 
         return DumpDescriptor(
-            schema_ddl=config_ddl + '\n' + schema_ddl,
+            schema_ddl='\n'.join([sys_config_ddl, schema_ddl, user_config_ddl]),
             schema_dynamic_ddl=tuple(dynamic_ddl),
             schema_ids=ids,
             blocks=descriptors,
@@ -994,8 +1105,8 @@ class Compiler:
 
     def describe_database_restore(
         self,
-        user_schema: s_schema.Schema,
-        global_schema: s_schema.Schema,
+        user_schema_pickle: bytes,
+        global_schema_pickle: bytes,
         dump_server_ver_str: str,
         dump_catalog_version: Optional[int],
         schema_ddl: bytes,
@@ -1018,8 +1129,8 @@ class Compiler:
         dump_catalog_version = dump_catalog_version or 0
 
         state = dbstate.CompilerConnectionState(
-            user_schema=user_schema,
-            global_schema=global_schema,
+            user_schema=pickle.loads(user_schema_pickle),
+            global_schema=pickle.loads(global_schema_pickle),
             modaliases=DEFAULT_MODULE_ALIASES_MAP,
             session_config=EMPTY_MAP,
             database_config=EMPTY_MAP,
@@ -1851,6 +1962,25 @@ def _compile_ql_sess_state(
     )
 
 
+def _get_config_spec(
+    ctx: CompileContext, config_op: config.Operation
+) -> config.Spec:
+    config_spec = ctx.compiler_state.config_spec
+    if config_op.setting_name not in config_spec:
+        # We don't typically bother tracking the user config spec in
+        # the compiler workers (to avoid needing to bother with
+        # transmitting, caching, or computing it). If we hit a config
+        # op that needs it, load the spec.
+        config_spec = config.ChainedSpec(
+            config_spec,
+            config.load_ext_spec_from_schema(
+                ctx.state.current_tx().get_user_schema(),
+                ctx.compiler_state.std_schema,
+            ),
+        )
+    return config_spec
+
+
 def _compile_ql_config_op(
     ctx: CompileContext, ql: qlast.ConfigOp
 ) -> dbstate.SessionStateQuery:
@@ -1921,19 +2051,24 @@ def _compile_ql_config_op(
         config_op = ireval.evaluate_to_config_op(ir, schema=schema)
 
         session_config = config_op.apply(
-            ctx.compiler_state.config_spec,
+            _get_config_spec(ctx, config_op),
             session_config,
         )
         current_tx.update_session_config(session_config)
 
     elif ql.scope is qltypes.ConfigScope.DATABASE:
-        config_op = ireval.evaluate_to_config_op(ir, schema=schema)
-
-        database_config = config_op.apply(
-            ctx.compiler_state.config_spec,
-            database_config,
-        )
-        current_tx.update_database_config(database_config)
+        try:
+            config_op = ireval.evaluate_to_config_op(ir, schema=schema)
+        except ireval.UnsupportedExpressionError:
+            # This is a complex config object operation, the
+            # op will be produced by the compiler as json.
+            config_op = None
+        else:
+            database_config = config_op.apply(
+                _get_config_spec(ctx, config_op),
+                database_config,
+            )
+            current_tx.update_database_config(database_config)
 
     elif ql.scope in (
             qltypes.ConfigScope.INSTANCE, qltypes.ConfigScope.GLOBAL):
@@ -2095,15 +2230,6 @@ def _try_compile(
     statements = edgeql.parse_block(source)
     statements_len = len(statements)
 
-    if ctx.skip_first:
-        statements = statements[1:]
-        if not statements:  # pragma: no cover
-            # Shouldn't ever happen as the server tracks the number
-            # of statements (via the "try_compile_rollback()" method)
-            # before using skip_first.
-            raise errors.ProtocolError(
-                f'no statements to compile in skip_first mode')
-
     if not len(statements):  # pragma: no cover
         raise errors.ProtocolError('nothing to compile')
 
@@ -2208,18 +2334,19 @@ def _try_compile(
             unit.create_db = comp.create_db
             unit.drop_db = comp.drop_db
             unit.create_db_template = comp.create_db_template
-            unit.create_ext = comp.create_ext
-            unit.drop_ext = comp.drop_ext
-            unit.has_role_ddl = comp.has_role_ddl
             unit.ddl_stmt_id = comp.ddl_stmt_id
             if comp.user_schema is not None:
                 final_user_schema = comp.user_schema
                 unit.user_schema = pickle.dumps(comp.user_schema, -1)
+                unit.extensions, unit.ext_config_settings = (
+                    _extract_extensions(ctx, comp.user_schema)
+                )
             if comp.cached_reflection is not None:
                 unit.cached_reflection = \
                     pickle.dumps(comp.cached_reflection, -1)
             if comp.global_schema is not None:
                 unit.global_schema = pickle.dumps(comp.global_schema, -1)
+                unit.roles = _extract_roles(comp.global_schema)
 
             unit.config_ops.extend(comp.config_ops)
 
@@ -2234,9 +2361,15 @@ def _try_compile(
             if comp.user_schema is not None:
                 final_user_schema = comp.user_schema
                 unit.user_schema = pickle.dumps(comp.user_schema, -1)
+                unit.extensions, unit.ext_config_settings = (
+                    _extract_extensions(ctx, comp.user_schema)
+                )
             if comp.cached_reflection is not None:
                 unit.cached_reflection = \
                     pickle.dumps(comp.cached_reflection, -1)
+            if comp.global_schema is not None:
+                unit.global_schema = pickle.dumps(comp.global_schema, -1)
+                unit.roles = _extract_roles(comp.global_schema)
 
             if comp.modaliases is not None:
                 unit.modaliases = comp.modaliases
@@ -2264,6 +2397,9 @@ def _try_compile(
             if comp.user_schema is not None:
                 final_user_schema = comp.user_schema
                 unit.user_schema = pickle.dumps(comp.user_schema, -1)
+                unit.extensions, unit.ext_config_settings = (
+                    _extract_extensions(ctx, comp.user_schema)
+                )
             if comp.cached_reflection is not None:
                 unit.cached_reflection = \
                     pickle.dumps(comp.cached_reflection, -1)
@@ -2297,10 +2433,11 @@ def _try_compile(
 
                 unit.system_config = True
             elif comp.config_scope is qltypes.ConfigScope.GLOBAL:
-                unit.set_global = True
+                unit.needs_readback = True
 
             elif comp.config_scope is qltypes.ConfigScope.DATABASE:
                 unit.database_config = True
+                unit.needs_readback = True
 
             if comp.is_backend_setting:
                 unit.backend_config = True
@@ -2773,6 +2910,38 @@ def _hash_sql(sql: bytes, **kwargs: bytes) -> bytes:
         h.update(param.encode('latin1'))
         h.update(val)
     return h.hexdigest().encode('latin1')
+
+
+def _extract_extensions(
+    ctx: CompileContext, user_schema: s_schema.Schema
+) -> tuple[set[str], list[config.Setting]]:
+    # XXX: Do we need to return None if extensions/config_spec didn't change?
+    names = {
+        ext.get_name(user_schema).name
+        for ext in user_schema.get_objects(type=s_ext.Extension)
+    }
+    if names:
+        schema = s_schema.ChainedSchema(
+            ctx.compiler_state.std_schema, user_schema, s_schema.EMPTY_SCHEMA
+        )
+        settings = config.load_ext_settings_from_schema(schema)
+    else:
+        settings = []
+    return names, settings
+
+
+def _extract_roles(
+    global_schema: s_schema.Schema
+) -> immutables.Map[str, immutables.Map[str, Any]]:
+    roles = {}
+    for role in global_schema.get_objects(type=s_role.Role):
+        role_name = str(role.get_name(global_schema))
+        roles[role_name] = immutables.Map(
+            name=role_name,
+            superuser=role.get_superuser(global_schema),
+            password=role.get_password(global_schema),
+        )
+    return immutables.Map(roles)
 
 
 class DumpDescriptor(NamedTuple):

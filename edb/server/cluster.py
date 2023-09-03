@@ -72,6 +72,9 @@ class BaseCluster:
     ):
         self._edgedb_cmd = [sys.executable, '-m', 'edb.server.main']
 
+        if "EDGEDB_SERVER_MULTITENANT_CONFIG_FILE" not in os.environ:
+            self._edgedb_cmd.append('--instance-name=localtest')
+
         self._edgedb_cmd.append('--tls-cert-mode=generate_self_signed')
         self._edgedb_cmd.append('--jose-key-mode=generate')
 
@@ -498,6 +501,12 @@ class TempCluster(Cluster):
 class RunningCluster(BaseCluster):
     def __init__(self, **conn_args: Any) -> None:
         self.conn_args = conn_args
+        if path := os.environ.get("EDGEDB_SERVER_JWS_KEY_FILE"):
+            try:
+                jws_key = secretkey.load_secret_key(pathlib.Path(path))
+            except secretkey.SecretKeyReadError as e:
+                raise ClusterError(e.args[0]) from e
+            self.get_jws_key = lambda: jws_key
 
     def is_managed(self) -> bool:
         return False
