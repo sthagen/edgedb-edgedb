@@ -73,13 +73,6 @@ ALTER TYPE cfg::AbstractConfig {
         SET default := 0;
     };
 
-
-    CREATE PROPERTY __internal_no_const_folding -> std::bool {
-        CREATE ANNOTATION cfg::internal := 'true';
-        CREATE ANNOTATION cfg::affects_compilation := 'true';
-        SET default := false;
-    };
-
     CREATE PROPERTY __internal_testmode -> std::bool {
         CREATE ANNOTATION cfg::internal := 'true';
         SET default := false;
@@ -137,6 +130,9 @@ create extension package _conf VERSION '1.0' {
         create required property value -> std::str {
             set readonly := true;
         };
+        create property opt_value -> std::str {
+            set readonly := true;
+        };
     };
     create type ext::_conf::SubObj extending ext::_conf::Obj {
         create required property extra -> int64 {
@@ -150,6 +146,7 @@ create extension package _conf VERSION '1.0' {
         create property config_name -> std::str {
             set default := "";
         };
+        create property opt_value -> std::str;
     };
 };
 

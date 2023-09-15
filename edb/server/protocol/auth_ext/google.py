@@ -1,7 +1,7 @@
 #
 # This source file is part of the EdgeDB open source project.
 #
-# Copyright 2016-present MagicStack Inc. and the EdgeDB authors.
+# Copyright 2023-present MagicStack Inc. and the EdgeDB authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,16 +17,11 @@
 #
 
 
-from .reader import parse_into, SchemaClassLayout
-from .structure import generate_structure
-from .structure import SchemaTypeLayout, SchemaReflectionParts
-from .writer import generate_metadata_write_edgeql
+from . import base
 
-__all__ = (
-    'generate_structure',
-    'generate_metadata_write_edgeql',
-    'parse_into',
-    'SchemaTypeLayout',
-    'SchemaClassLayout',
-    'SchemaReflectionParts'
-)
+
+class GoogleProvider(base.OpenIDProvider):
+    def __init__(self, *args, **kwargs):
+        super().__init__(
+            "google", "https://accounts.google.com", *args, **kwargs
+        )

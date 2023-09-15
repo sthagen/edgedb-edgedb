@@ -896,8 +896,20 @@ class Command(
             self.add(command)
 
     def replace(self, existing: Command, new: Command) -> None:  # type: ignore
-        i = self.ops.index(existing)
-        self.ops[i] = new
+        try:
+            i = self.ops.index(existing)
+            self.ops[i] = new
+            return
+        except ValueError:
+            pass
+        try:
+            i = self.before_ops.index(existing)
+            self.before_ops[i] = new
+            return
+        except ValueError:
+            pass
+        i = self.caused_ops.index(existing)
+        self.caused_ops[i] = new
 
     def replace_all(self, commands: Iterable[Command]) -> None:
         self.ops.clear()
@@ -2946,7 +2958,8 @@ class CreateObject(ObjectCommand[so.Object_T], Generic[so.Object_T]):
         metaclass = self.get_schema_metaclass()
 
         props = self.get_resolved_attributes(schema, context)
-        schema, self.scls = metaclass.create_in_schema(schema, **props)
+        schema, self.scls = metaclass.create_in_schema(
+            schema, stdmode=context.stdmode, **props)
 
         if not props.get('id'):
             # Record the generated ID.
@@ -3108,7 +3121,7 @@ class CreateExternalObject(
 
         obj_id = props.get('id')
         if obj_id is None:
-            obj_id = metaclass._prepare_id(schema, props)
+            obj_id = metaclass._prepare_id(schema, context.stdmode, props)
             self.set_attribute_value('id', obj_id)
 
         self.scls = metaclass._create_from_id(obj_id)

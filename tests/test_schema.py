@@ -5102,6 +5102,12 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             global TwoUsers := (User);
         """])
 
+    def test_schema_migrations_equivalence_57c(self):
+        self._assert_migration_equivalence([r"""
+            type X;
+            alias Z := (with lol := X, select count(lol));
+        """])
+
     def test_schema_migrations_equivalence_58(self):
         self._assert_migration_equivalence([r"""
             abstract type C {
@@ -8163,7 +8169,8 @@ class TestDescribe(tb.BaseSchemaLoadTest):
         tests = [iter(tests)] * 2
 
         for stmt_text, expected_output in zip(*tests):
-            qltree = qlparser.parse_command(stmt_text, {None: 'test'})
+            qltrees = qlparser.parse_block(stmt_text, {None: 'test'})
+            [qltree,] = qltrees
             stmt = qlcompiler.compile_ast_to_ir(
                 qltree,
                 schema,

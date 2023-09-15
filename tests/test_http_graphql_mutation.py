@@ -32,6 +32,9 @@ class TestGraphQLMutation(tb.GraphQLTestCase):
     SCHEMA_OTHER = os.path.join(os.path.dirname(__file__), 'schemas',
                                 'graphql_other.esdl')
 
+    SCHEMA_OTHER_DEEP = os.path.join(os.path.dirname(__file__), 'schemas',
+                                     'graphql_schema_other_deep.esdl')
+
     SETUP = os.path.join(os.path.dirname(__file__), 'schemas',
                          'graphql_setup.edgeql')
 
@@ -2063,6 +2066,112 @@ class TestGraphQLMutation(tb.GraphQLTestCase):
         # validate that the deletion worked
         self.assert_graphql_query_result(validation_query, {
             "User": []
+        })
+
+    def test_graphql_mutation_insert_readonly_01(self):
+        # Test insert object with a readonly property
+        data = {
+            '__typename': 'NotEditable_Type',
+            'once': 'New NotEditable01',
+            'computed': 'a computed value',
+        }
+
+        validation_query = r"""
+            query {
+                NotEditable(filter: {once: {eq: "New NotEditable01"}}) {
+                    __typename
+                    once
+                    computed
+                }
+            }
+        """
+
+        self.assert_graphql_query_result(r"""
+            mutation insert_NotEditable {
+                insert_NotEditable(
+                    data: [{
+                        once: "New NotEditable01",
+                    }]
+                ) {
+                    __typename
+                    once
+                    computed
+                }
+            }
+        """, {
+            "insert_NotEditable": [data]
+        })
+
+        self.assert_graphql_query_result(validation_query, {
+            "NotEditable": [data]
+        })
+
+        self.assert_graphql_query_result(r"""
+            mutation delete_NotEditable {
+                delete_NotEditable(filter: {once: {eq: "New NotEditable01"}}) {
+                    __typename
+                    once
+                    computed
+                }
+            }
+        """, {
+            "delete_NotEditable": [data]
+        })
+
+        # validate that the deletion worked
+        self.assert_graphql_query_result(validation_query, {
+            "NotEditable": []
+        })
+
+    def test_graphql_mutation_insert_readonly_02(self):
+        # Test insert object without any properties that can be set
+        data = {
+            '__typename': 'Fixed_Type',
+            'computed': 123,
+        }
+
+        validation_query = r"""
+            query {
+                Fixed {
+                    __typename
+                    computed
+                }
+            }
+        """
+
+        self.assert_graphql_query_result(validation_query, {
+            "Fixed": [data]
+        })
+
+        self.assert_graphql_query_result(r"""
+            mutation delete_Fixed {
+                delete_Fixed {
+                    __typename
+                    computed
+                }
+            }
+        """, {
+            "delete_Fixed": [data]
+        })
+
+        # validate that the deletion worked
+        self.assert_graphql_query_result(validation_query, {
+            "Fixed": []
+        })
+
+        self.assert_graphql_query_result(r"""
+            mutation insert_Fixed {
+                insert_Fixed {
+                    __typename
+                    computed
+                }
+            }
+        """, {
+            "insert_Fixed": [data]
+        })
+
+        self.assert_graphql_query_result(validation_query, {
+            "Fixed": [data]
         })
 
     def test_graphql_mutation_update_scalars_01(self):
