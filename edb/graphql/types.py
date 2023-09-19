@@ -1519,9 +1519,17 @@ class GQLCoreSchema:
 
             for tname in names:
                 if edb_base is None:
+                    module: Union[s_name.Name, str]
+
                     if '::' in tname:
                         edb_base = self.edb_schema.get(
                             tname,
+                            type=s_types.Type,
+                        )
+                    elif '__' in tname:
+                        # Looks like it's coming from a specific module
+                        edb_base = self.edb_schema.get(
+                            f"{tname.replace('__', '::')}",
                             type=s_types.Type,
                         )
                     else:
@@ -1897,7 +1905,7 @@ class GQLBaseType(metaclass=GQLTypeMeta):
                 eql = parse_fragment(f'{self.gql_typename!r}')
             else:
                 # Construct the GraphQL type name from the actual type name.
-                eql = parse_fragment(f'''
+                eql = parse_fragment(fr'''
                     WITH name := {codegen.generate_source(parent)}
                         .__type__.name
                     SELECT (
@@ -2037,20 +2045,24 @@ class GQLMutation(GQLBaseQuery):
         fkey = (name, self.dummy)
         target = None
 
-        op, name = name.split('_', 1)
-        if op in {'delete', 'insert', 'update'}:
+        if name == '__typename':
+            # It's a valid field that doesn't start with a command
             target = super().get_field_type(name)
+        else:
+            op, name = name.split('_', 1)
+            if op in {'delete', 'insert', 'update'}:
+                target = super().get_field_type(name)
 
-            if target is None:
-                module, edb_name = self.get_module_and_name(name)
-                edb_qname = s_name.QualName(module=module, name=edb_name)
-                edb_type = self.edb_schema.get(
-                    edb_qname,
-                    default=None,
-                    type=s_types.Type,
-                )
-                if edb_type is not None:
-                    target = self.convert_edb_to_gql_type(edb_type)
+                if target is None:
+                    module, edb_name = self.get_module_and_name(name)
+                    edb_qname = s_name.QualName(module=module, name=edb_name)
+                    edb_type = self.edb_schema.get(
+                        edb_qname,
+                        default=None,
+                        type=s_types.Type,
+                    )
+                    if edb_type is not None:
+                        target = self.convert_edb_to_gql_type(edb_type)
 
         if target is not None:
             self._fields[fkey] = target
