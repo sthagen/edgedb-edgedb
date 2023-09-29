@@ -947,7 +947,7 @@ cdef class DatabaseConnectionView:
 
         for op in ops:
             if op.scope is config.ConfigScope.INSTANCE:
-                await self._db._index.apply_system_config_op(conn, op, self)
+                await self._db._index.apply_system_config_op(conn, op)
             elif op.scope is config.ConfigScope.DATABASE:
                 self.set_database_config(
                     op.apply(settings, self.get_database_config()),
@@ -1090,13 +1090,6 @@ cdef class DatabaseConnectionView:
         error_constructor,
         reason,
     ):
-        if not self.tenant.is_online():
-            readiness_reason = self.tenant.get_readiness_reason()
-            msg = "the server is going offline"
-            if readiness_reason:
-                msg = f"{msg}: {readiness_reason}"
-            raise errors.ServerOfflineError(msg)
-
         if query_capabilities & ~self._capability_mask:
             # _capability_mask is currently only used for system database
             raise query_capabilities.make_error(
@@ -1268,10 +1261,8 @@ cdef class DatabaseIndex:
             ).generate(block)
         await conn.sql_execute(block.to_string().encode())
 
-    async def apply_system_config_op(self, conn, op, dbv):
-        # XXX: Is it actually legit to have INSTANCE configs of
-        # database local extension configs?
-        spec = dbv.get_config_spec()
+    async def apply_system_config_op(self, conn, op):
+        spec = self._sys_config_spec
 
         op_value = op.get_setting(spec)
         if op.opcode is not None:
