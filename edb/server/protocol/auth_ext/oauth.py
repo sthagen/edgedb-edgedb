@@ -22,55 +22,44 @@ import json
 from typing import Any
 from edb.server.protocol import execute
 
+from . import github, google, azure, apple
 from . import errors, util, data, base, http_client
 
 
 class Client:
     provider: base.BaseProvider
 
-    def __init__(self, db: Any, provider_id: str, base_url: str | None = None):
+    def __init__(
+        self,
+        db: Any,
+        provider_name: str,
+        base_url: str | None = None
+    ):
         self.db = db
-        self.db_config = db.db_config
 
         http_factory = lambda *args, **kwargs: http_client.HttpClient(
             *args, edgedb_test_url=base_url, **kwargs
         )
 
-        (provider_name, client_id, client_secret) = self._get_provider_config(
-            provider_id
-        )
-
         match provider_name:
-            case "github":
-                from . import github
-
+            case "builtin::oauth_github":
                 self.provider = github.GitHubProvider(
-                    client_id=client_id,
-                    client_secret=client_secret,
+                    *self._get_provider_config(provider_name),
                     http_factory=http_factory,
                 )
-            case "google":
-                from . import google
-
+            case "builtin::oauth_google":
                 self.provider = google.GoogleProvider(
-                    client_id=client_id,
-                    client_secret=client_secret,
+                    *self._get_provider_config(provider_name),
                     http_factory=http_factory,
                 )
-            case "azure":
-                from . import azure
-
+            case "builtin::oauth_azure":
                 self.provider = azure.AzureProvider(
-                    client_id=client_id,
-                    client_secret=client_secret,
+                    *self._get_provider_config(provider_name),
                     http_factory=http_factory,
                 )
-            case "apple":
-                from . import apple
-
+            case "builtin::oauth_apple":
                 self.provider = apple.AppleProvider(
-                    client_id=client_id,
-                    client_secret=client_secret,
+                    *self._get_provider_config(provider_name),
                     http_factory=http_factory,
                 )
             case _:
@@ -83,11 +72,17 @@ class Client:
 
     async def handle_callback(
         self, code: str, redirect_uri: str
-    ) -> data.Identity:
+    ) -> tuple[data.Identity, str | None, str | None]:
         response = await self.provider.exchange_code(code, redirect_uri)
         user_info = await self.provider.fetch_user_info(response)
+        auth_token = response.access_token
+        refresh_token = response.refresh_token
 
-        return await self._handle_identity(user_info)
+        return (
+            await self._handle_identity(user_info),
+            auth_token,
+            refresh_token,
+        )
 
     async def _handle_identity(self, user_info: data.UserInfo) -> data.Identity:
         """Update or create an identity"""
@@ -97,7 +92,7 @@ class Client:
             query="""\
 with
   iss := <str>$issuer_url,
-  sub := <str>$provider_id,
+  sub := <str>$subject,
 
 select (insert ext::auth::Identity {
   issuer := iss,
@@ -107,7 +102,7 @@ select (insert ext::auth::Identity {
 )) { * };""",
             variables={
                 "issuer_url": self.provider.issuer_url,
-                "provider_id": user_info.sub,
+                "subject": user_info.sub,
             },
         )
         result_json = json.loads(r.decode())
@@ -115,24 +110,14 @@ select (insert ext::auth::Identity {
 
         return data.Identity(**result_json[0])
 
-    def _get_provider_config(self, provider_id: str) -> tuple[str, str, str]:
+    def _get_provider_config(self, provider_name: str) -> tuple[str, str]:
         provider_client_config = util.get_config(
-            self.db_config, "ext::auth::AuthConfig::providers", frozenset
+            self.db, "ext::auth::AuthConfig::providers", frozenset
         )
-        provider_name: str | None = None
-        client_id: str | None = None
-        client_secret: str | None = None
         for cfg in provider_client_config:
-            if cfg.provider_id == provider_id:
-                provider_name = cfg.provider_name
-                client_id = cfg.client_id
-                client_secret = cfg.secret
-        r = (provider_name, client_id, client_secret)
-        match r:
-            case (str(_), str(_), str(_)):
-                return r
-            case _:
-                raise errors.InvalidData(
-                    f"Invalid provider configuration: {provider_id}\n"
-                    f"providers={provider_client_config!r}"
-                )
+            if cfg.name == provider_name:
+                return (cfg.client_id, cfg.secret)
+
+        raise errors.MissingConfiguration(
+            provider_name, "Provider is not configured"
+        )
