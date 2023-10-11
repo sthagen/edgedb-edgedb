@@ -67,6 +67,7 @@ def render_login_page(
     if redirect_to_on_signup:
         oauth_params['redirect_to_on_signup'] = redirect_to_on_signup
 
+    oauth_label = "Sign in with" if password_provider else "Continue with"
     oauth_buttons = '\n'.join([
         f'''
         <a href="../authorize?{urllib.parse.urlencode({
@@ -77,7 +78,7 @@ def render_login_page(
             '<img src="_static/icon_' + p.name[15:] + '.svg" alt="' +
             p.display_name+' Icon" />'
         ) if p.name in known_oauth_provider_names else ''}
-        <span>Sign in with {p.display_name}</span>
+        <span>{oauth_label} {p.display_name}</span>
         </a>'''
         for p in oauth_providers
     ])
@@ -161,7 +162,7 @@ def render_login_page(
 def render_signup_page(
     *,
     base_path: str,
-    provider_name: str,
+    providers: frozenset,
     error_message: Optional[str] = None,
     email: Optional[str] = None,
     challenge: str,
@@ -172,6 +173,38 @@ def render_signup_page(
     dark_logo_url: Optional[str] = None,
     brand_color: Optional[str] = None
 ):
+    password_provider = None
+    for p in providers:
+        if p.name == 'builtin::local_emailpassword':
+            password_provider = p
+            break
+
+    oauth_providers = [
+        p for p in providers
+        if p.name.startswith('builtin::oauth_')
+    ]
+
+    oauth_params = {
+        'redirect_to': redirect_to,
+        'challenge': challenge,
+        'redirect_to_on_signup': redirect_to,
+    }
+
+    oauth_label = "Sign up with" if password_provider else "Continue with"
+    oauth_buttons = '\n'.join([
+        f'''
+        <a href="../authorize?{urllib.parse.urlencode({
+            'provider': p.name,
+            **oauth_params
+        })}">
+        {(
+            '<img src="_static/icon_' + p.name[15:] + '.svg" alt="' +
+            p.display_name+' Icon" />'
+        ) if p.name in known_oauth_provider_names else ''}
+        <span>{oauth_label} {p.display_name}</span>
+        </a>'''
+        for p in oauth_providers
+    ])
     return _render_base_page(
         title=f'Sign up{f" to {app_name}" if app_name else ""}',
         logo_url=logo_url,
@@ -184,8 +217,24 @@ def render_signup_page(
            if app_name else '<span>Sign up</span>'}</h1>
 
       {_render_error_message(error_message)}
-
-      <input type="hidden" name="provider" value="{provider_name}" />
+    {
+      f"""
+      <div class="oauth-buttons">
+        {oauth_buttons}
+      </div>""" if len(oauth_providers) > 0 else ''
+    }
+    {
+      """
+      <div class="divider">
+        <span>or</span>
+      </div>"""
+      if password_provider is not None
+        and len(oauth_providers) > 0
+      else ''
+    }
+    {
+      f"""
+      <input type="hidden" name="provider" value="{password_provider.name}" />
       <input type="hidden" name="redirect_on_failure" value="{
         base_path}/ui/signup" />
       <input type="hidden" name="redirect_to" value="{redirect_to}" />
@@ -203,6 +252,8 @@ def render_signup_page(
         Already have an account?
         <a href="signin">Sign in</a>
       </div>
+      </div>""" if password_provider is not None else ''
+    }
     </form>'''
     )
 

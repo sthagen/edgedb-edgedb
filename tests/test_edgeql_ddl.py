@@ -2001,6 +2001,24 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 """
             )
 
+    async def test_edgeql_ddl_default_14(self):
+        await self.con.execute(r"""
+            create type X;
+            insert X;
+        """)
+
+        with self.assertRaisesRegex(
+            edgedb.MissingRequiredError,
+            'missing value for required property',
+        ):
+            await self.con.execute(r"""
+                alter type X {
+                    create required property foo -> str {
+                        set default := (select "!" filter false);
+                    }
+                };
+            """)
+
     async def test_edgeql_ddl_default_circular(self):
         await self.con.execute(r"""
             CREATE TYPE TestDefaultCircular {
@@ -2771,6 +2789,8 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                     set default := '';
                 };
             };
+            # And that aliases don't either
+            create alias Alias := Foo;
         """)
 
         await self.con.execute(r"""
@@ -3240,6 +3260,23 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 [
                     {'m_p': {'1', '2'}},
                     {'m_p': {'3'}},
+                ],
+            )
+
+        # Something simple but forcing it to use assert_exists
+        async with self._run_and_rollback():
+            await self.con.execute("""
+                ALTER TYPE Foo ALTER PROPERTY p {
+                    SET REQUIRED USING (
+                        assert_exists((select '3' filter true)))
+                }
+            """)
+
+            await self.assert_query_result(
+                'SELECT Foo { p } ORDER BY .p',
+                [
+                    {'p': '1'},
+                    {'p': '3'},
                 ],
             )
 
