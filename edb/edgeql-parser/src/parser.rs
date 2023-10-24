@@ -529,6 +529,7 @@ fn injection_cost(kind: &Kind) -> u16 {
         // A few keywords that should not be injected since they result in
         // confusing error messages.
         Keyword(keywords::Keyword("delete" | "update" | "link")) => 100,
+        Keyword(keywords::Keyword("insert")) => 20,
         Keyword(_) => 10,
 
         Dot => 5,
@@ -688,7 +689,8 @@ fn get_token_kind(token_name: &str) -> Kind {
         ":=" => Assign,
         "-=" => SubAssign,
 
-        "ARGUMENT" => Argument,
+        "PARAMETER" => Parameter,
+        "PARAMETERANDTYPE" => ParameterAndType,
         "SUBSTITUTION" => Substitution,
 
         _ => {
