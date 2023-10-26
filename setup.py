@@ -918,18 +918,8 @@ def _version():
     return buildmeta.get_version_from_scm(ROOT_PATH)
 
 
-_entry_points = {
-    'edgedb-server = edb.server.main:main',
-    'edgedb = edb.cli:rustcli',
-    'edb = edb.tools.edb:edbcommands',
-}
-
-
 setuptools.setup(
     version=_version(),
-    entry_points={
-        "console_scripts": _entry_points,
-    },
     cmdclass={
         'build': build,
         'build_metadata': build_metadata,
@@ -1010,6 +1000,14 @@ setuptools.setup(
         setuptools_extension.Extension(
             "edb.server.protocol.execute",
             ["edb/server/protocol/execute.pyx"],
+            extra_compile_args=EXT_CFLAGS,
+            extra_link_args=EXT_LDFLAGS,
+            include_dirs=EXT_INC_DIRS,
+        ),
+
+        setuptools_extension.Extension(
+            "edb.server.protocol.auth_helpers",
+            ["edb/server/protocol/auth_helpers.pyx"],
             extra_compile_args=EXT_CFLAGS,
             extra_link_args=EXT_LDFLAGS,
             include_dirs=EXT_INC_DIRS,
