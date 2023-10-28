@@ -326,9 +326,9 @@ Here's an example query using the TypeScript client:
 pgcrypto
 --------
 
-We've added ``pgcrypto`` to our extensions. This exposes ``digest``, ``hmac``,
-``gen_salt`` and ``crypt`` functions for your hashing, encrypting and salting
-needs.
+We've added :ref:`pgcrypto <ref_ext_pgcrypto>` to our extensions. This exposes
+``digest``, ``hmac``, ``gen_salt`` and ``crypt`` functions for your hashing,
+encrypting and salting needs.
 
 .. code-block:: edgeql-repl
 
@@ -345,13 +345,16 @@ picked up.
 pg_trgm
 -------
 
-This extension provides functionality used to determine string similarity,
-which makes it a good text search alternative for some use cases:
+The :ref:`pg_trgm <ref_ext_pgtrgm>` extension provides functionality used to
+determine string similarity, which makes it a good text search alternative for
+some use cases:
 
-db> with x := {'hello world', 'word hero', 'help the world'}
-... select res := (x, ext::pg_trgm::word_similarity(x, 'hello world'))
-... order by res.1 desc;
-{('hello world', 1), ('help the world', 0.5), ('word hero', 0.35714287)}
+.. code-block:: edgeql-repl
+
+  db> with x := {'hello world', 'word hero', 'help the world'}
+  ... select res := (x, ext::pg_trgm::word_similarity(x, 'hello world'))
+  ... order by res.1 desc;
+  {('hello world', 1), ('help the world', 0.5), ('word hero', 0.35714287)}
 
 
 

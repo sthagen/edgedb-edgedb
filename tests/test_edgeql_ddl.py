@@ -16,6 +16,7 @@
 # limitations under the License.
 #
 
+import asyncio
 import decimal
 import json
 import os
@@ -6853,25 +6854,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
                 }
             """)
 
-        await self.con.execute("""
-            create type X;
-        """)
-
-        # We can't set a default that uses a global when creating a new
-        # pointer, since it would need to run *now* and populate the data
-        async with self.assertRaisesRegexTx(
-            edgedb.UnsupportedFeatureError,
-            r"functions that reference globals may not be used when "
-            r"converting/populating data in migrations"
-        ):
-            await self.con.execute("""
-                alter type X {
-                    create property foo -> str {
-                        set default := (gfoo());
-                    }
-                };
-            """)
-
     async def test_edgeql_ddl_global_05(self):
         await self.con.execute("""
             create global foo -> str;
@@ -7129,20 +7111,24 @@ class TestEdgeQLDDL(tb.DDLTestCase):
 
         await self.con.execute('''
             alter global foo set default := "!";
+            create function get_foo() -> optional str using (global foo);
         ''')
 
         # Try it again now that there is a default
         await self.con.execute('''
             alter type Foo { create required property name2 -> str {
                 set default := (global foo);
-            } }
+            } };
+            alter type Foo { create required property name3 -> str {
+                set default := (get_foo());
+            } };
         ''')
 
         await self.assert_query_result(
             '''
-                select Foo { name, name2 }
+                select Foo { name, name2, name3 }
             ''',
-            [{'name': "test", 'name2': "!"}],
+            [{'name': "test", 'name2': "!", 'name3': "!"}],
         )
 
     async def test_edgeql_ddl_property_computable_01(self):
@@ -16916,3 +16902,73 @@ class TestDDLNonIsolated(tb.DDLTestCase):
         await self.con.execute('''
             administer reindex(Object)
         ''')
+
+    async def _deadlock_tester(self, setup, teardown, modification, query):
+        """Deadlock test helper.
+
+        Interleave a long running query, some DDL, and a short running query
+        in a way that has triggered deadlock in the past.
+        (See #6304.)
+        """
+        cons = []
+        con1 = self.con
+        await con1.execute(setup)
+
+        try:
+            for _ in range(2):
+                con = await self.connect(database=self.con.dbname)
+                await con.query('select 1')
+                cons.append(con)
+            con2, con3 = cons
+
+            long_call = asyncio.create_task(con1.query_single(f'''
+                select (count({query}), sys::_sleep(3));
+            '''))
+            await asyncio.sleep(0.5)
+            ddl = asyncio.create_task(con2.execute(modification))
+            await asyncio.sleep(0.5)
+            short_call = con3.query(f'''
+                select {query}
+            ''')
+
+            return await asyncio.gather(long_call, ddl, short_call)
+        finally:
+            await self.con.execute(teardown)
+            for con in cons:
+                await con.aclose()
+
+    async def test_edgeql_ddl_deadlock_01(self):
+        ((cnt, _), _, objs) = await self._deadlock_tester(
+            setup='''
+                create type X;
+                insert X;
+            ''',
+            teardown='''
+                drop type X;
+            ''',
+            modification='''
+                alter type X create property foo -> str;
+            ''',
+            query='X',
+        )
+        self.assertEqual(cnt, 1)
+        self.assertEqual(len(objs), 1)
+
+    async def test_edgeql_ddl_deadlock_02(self):
+        ((cnt, _), _, objs) = await self._deadlock_tester(
+            setup='''
+                create type Y;
+                create type X { create multi link t -> Y; };
+                insert X { t := (insert Y) };
+            ''',
+            teardown='''
+                drop type X;
+                drop type Y;
+            ''',
+            modification='''
+                alter type X alter link t create property foo -> str;
+            ''',
+            query='(Y, Y.<t[is X])',
+        )
+        self.assertEqual(cnt, 1)
+        self.assertEqual(len(objs), 1)
