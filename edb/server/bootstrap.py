@@ -45,6 +45,7 @@ from edb.common import uuidgen
 
 from edb.schema import ddl as s_ddl
 from edb.schema import delta as sd
+from edb.schema import extensions as s_exts
 from edb.schema import functions as s_func
 from edb.schema import modules as s_mod
 from edb.schema import name as sn
@@ -661,6 +662,39 @@ def prepare_repair_patch(
 PatchEntry = tuple[tuple[str, ...], tuple[str, ...], dict[str, Any], bool]
 
 
+async def gather_patch_info(
+    num: int,
+    kind: str,
+    patch: str,
+    conn: pgcon.PGConnection,
+) -> Optional[dict[str, list[str]]]:
+    """Fetch info for a patch that needs to use the connection.
+
+    Currently, the only thing we need is, for config updates, the
+    order that columns appear in the config views in SQL. We need this
+    because we need to preserve that order when we update the
+    view.
+    """
+
+    if '+config' in kind:
+        # Find all the config views (they are pg_classes where
+        # there is also a table with the same name but "_dummy"
+        # at the end) and collect all their columns in order.
+        return json.loads(await conn.sql_fetch_val('''\
+            select json_object_agg(v.relname, (
+                select json_agg(a.attname order by a.attnum)
+                from pg_catalog.pg_attribute as a
+                where v.oid = a.attrelid
+            ))
+            from pg_catalog.pg_class as v
+            inner join pg_catalog.pg_tables as t
+            on v.relname || '_dummy' = t.tablename
+
+        '''.encode('utf-8')))
+    else:
+        return None
+
+
 def prepare_patch(
     num: int,
     kind: str,
@@ -669,6 +703,9 @@ def prepare_patch(
     reflschema: s_schema.Schema,
     schema_class_layout: s_refl.SchemaClassLayout,
     backend_params: params.BackendRuntimeParams,
+    patch_info: Optional[dict[str, list[str]]],
+    user_schema: Optional[s_schema.Schema]=None,
+    global_schema: Optional[s_schema.Schema]=None,
 ) -> PatchEntry:
     val = f'{pg_common.quote_literal(json.dumps(num + 1))}::jsonb'
     # TODO: This is an INSERT because 2.0 shipped without num_patches.
@@ -679,6 +716,8 @@ def prepare_patch(
         ON CONFLICT (key)
         DO UPDATE SET json = {val};
     """
+
+    existing_view_columns = patch_info
 
     # Pure SQL patches are simple
     if kind == 'sql':
@@ -708,6 +747,10 @@ def prepare_patch(
     global_schema_update = kind == 'ext-pkg'
 
     if kind == 'ext-pkg':
+        # N.B: We process this without actually having the global
+        # schema present, so we don't do any check for if it already
+        # exists. The backend code will overwrite an older version's
+        # JSON in the global metadata if it was already present.
         patch = s_std.get_std_module_text(sn.UnqualName(f'ext/{patch}'))
 
     if (
@@ -715,6 +758,8 @@ def prepare_patch(
         or kind == 'ext-pkg'
         or kind.startswith('edgeql+schema')
     ):
+        assert '+user_ext' not in kind
+
         for ddl_cmd in edgeql.parse_block(patch):
             assert isinstance(ddl_cmd, qlast.DDLCommand)
             # First apply it to the regular schema, just so we can update
@@ -738,6 +783,52 @@ def prepare_patch(
                 delta_command, reflschema, backend_params)
             std_plans.append(delta_command)
             plan.generate(subblock)
+
+        metadata_user_schema = reflschema
+
+    elif kind.startswith('edgeql+user_ext'):
+        assert '+schema' not in kind
+
+        # There isn't anything to do on the system database for
+        # userext updates.
+        if user_schema is None:
+            return (update,), (), dict(is_user_ext_update=True), False
+
+        # Only run a userext update if the extension we are trying to
+        # update is installed.
+        extension_name = kind.split('|')[-1]
+        extension = user_schema.get_global(
+            s_exts.Extension, extension_name, default=None)
+
+        if not extension:
+            return (update,), (), {}, False
+
+        assert global_schema
+        cschema = s_schema.ChainedSchema(
+            schema,
+            user_schema,
+            global_schema,
+        )
+
+        for ddl_cmd in edgeql.parse_block(patch):
+            assert isinstance(ddl_cmd, qlast.DDLCommand)
+
+            delta_command = s_ddl.delta_from_ddl(
+                ddl_cmd, modaliases={}, schema=cschema,
+                stdmode=False,
+                testmode=True,
+            )
+            cschema, plan = _process_delta_params(
+                delta_command, cschema, backend_params)
+            std_plans.append(delta_command)
+            plan.generate(subblock)
+
+        if '+config' in kind:
+            views = metaschema.get_config_views(cschema, existing_view_columns)
+            views.generate(subblock)
+
+        metadata_user_schema = cschema.get_top_schema()
+
     else:
         raise AssertionError(f'unknown patch type {kind}')
 
@@ -814,7 +905,7 @@ def prepare_patch(
         # Similarly, only do config system updates if requested.
         if '+config' in kind:
             support_view_commands.add_command(
-                metaschema.get_config_views(schema))
+                metaschema.get_config_views(schema, existing_view_columns))
 
         # Though we always update the instdata for the config system,
         # because it is currently the most convenient way to make sure
@@ -846,8 +937,8 @@ def prepare_patch(
 
     compilerctx = edbcompiler.new_compiler_context(
         compiler_state=compiler.state,
-        user_schema=reflschema,
-        bootstrap_mode=True,
+        user_schema=metadata_user_schema,
+        bootstrap_mode=user_schema is None,
     )
 
     for std_plan in std_plans:
@@ -944,6 +1035,8 @@ class StdlibBits(NamedTuple):
     local_intro_query: str
     #: Global object introspection SQL query.
     global_intro_query: str
+    #: Number of patches already baked into the stdlib.
+    num_patches: int
 
 
 async def _make_stdlib(
@@ -1079,6 +1172,7 @@ async def _make_stdlib(
         classlayout=reflection.class_layout,
         local_intro_query=local_intro_sql,
         global_intro_query=global_intro_sql,
+        num_patches=len(patches.PATCHES),
     )
 
 
@@ -1398,7 +1492,7 @@ async def _init_stdlib(
     await metaschema.patch_pg_extensions(conn, backend_params)
 
     stdlib = stdlib._replace(stdschema=schema)
-    version_key = patches.get_version_key(len(patches.PATCHES))
+    version_key = patches.get_version_key(stdlib.num_patches)
 
     # stdschema and reflschema are combined in one pickle to preserve sharing
     await _store_static_bin_cache(
@@ -1780,12 +1874,6 @@ async def _populate_misc_instance_data(
         json.dumps(json_instance_data),
     )
 
-    await _store_static_json_cache(
-        ctx,
-        'num_patches',
-        json.dumps(len(patches.PATCHES)),
-    )
-
     backend_params = ctx.cluster.get_runtime_params()
     instance_params = backend_params.instance_params
     await _store_static_json_cache(
@@ -2154,7 +2242,7 @@ async def _bootstrap(ctx: BootstrapContext) -> edbcompiler.CompilerState:
             compiler,
             config_spec,
         )
-        version_key = patches.get_version_key(len(patches.PATCHES))
+        version_key = patches.get_version_key(stdlib.num_patches)
         await _store_static_json_cache(
             tpl_ctx,
             f'sysqueries{version_key}',
@@ -2171,6 +2259,12 @@ async def _bootstrap(ctx: BootstrapContext) -> edbcompiler.CompilerState:
             tpl_ctx,
             f'report_configs_typedesc_2_0{version_key}',
             report_configs_typedesc_2_0,
+        )
+
+        await _store_static_json_cache(
+            tpl_ctx,
+            'num_patches',
+            json.dumps(stdlib.num_patches),
         )
 
         schema = s_schema.EMPTY_SCHEMA
