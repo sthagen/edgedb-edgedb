@@ -1824,7 +1824,10 @@ class TestHttpExtAuth(tb.ExtAuthTestCase):
             self.assertEqual(parsed_location.path, "/some/path")
             self.assertEqual(
                 parsed_query,
-                {"code": [str(pkce_challenge.id)]},
+                {
+                    "code": [str(pkce_challenge.id)],
+                    "provider": ["builtin::local_emailpassword"]
+                },
             )
 
             password_credential = await self.con.query(
@@ -1967,7 +1970,7 @@ class TestHttpExtAuth(tb.ExtAuthTestCase):
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
 
-            self.assertEquals(status, 400)
+            self.assertEqual(status, 400)
 
     async def test_http_auth_ext_local_password_register_json_02(self):
         with self.http_con() as http_con:
@@ -2015,7 +2018,8 @@ class TestHttpExtAuth(tb.ExtAuthTestCase):
             self.assertEqual(
                 json.loads(body),
                 {
-                    "code": str(pkce_challenge.id)
+                    "code": str(pkce_challenge.id),
+                    "provider": "builtin::local_emailpassword"
                 },
             )
 
@@ -2611,7 +2615,7 @@ class TestHttpExtAuth(tb.ExtAuthTestCase):
                 body=form_data_encoded,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
-            self.assertEquals(status, 400)
+            self.assertEqual(status, 400)
 
     async def test_http_auth_ext_local_password_reset_form_01(self):
         with self.http_con() as http_con:
@@ -2634,6 +2638,15 @@ class TestHttpExtAuth(tb.ExtAuthTestCase):
                 body=form_data_encoded,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
+            email_password_factor = await self.con.query_single(
+                """
+                with module ext::auth
+                SELECT EmailPasswordFactor { verified_at }
+                FILTER .email = <str>$email
+                """,
+                email=form_data["email"],
+            )
+            self.assertIsNone(email_password_factor.verified_at)
 
             # Send reset
             verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=')
@@ -2710,6 +2723,17 @@ class TestHttpExtAuth(tb.ExtAuthTestCase):
             )
 
             self.assertEqual(len(identity), 1)
+
+            email_password_factor = await self.con.query_single(
+                """
+                with module ext::auth
+                SELECT EmailPasswordFactor { verified_at }
+                FILTER .identity.id = <uuid>$identity_id
+                """,
+                identity_id=identity[0].id,
+            )
+
+            self.assertIsNotNone(email_password_factor.verified_at)
 
             pkce_challenge = await self.con.query_single(
                 """
