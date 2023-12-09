@@ -317,13 +317,13 @@ class TupleIndirectionLink(s_pointers.PseudoPointer):
             module='__tuple__', name=str(element_name))
 
     def __hash__(self) -> int:
-        return hash((self.__class__, self._name))
+        return hash((self.__class__, self._source, self._name))
 
     def __eq__(self, other: typing.Any) -> bool:
         if not isinstance(other, self.__class__):
             return False
 
-        return self._name == other._name
+        return self._source == other._source and self._name == other._name
 
     def get_name(self, schema: s_schema.Schema) -> sn.QualName:
         return self._name
@@ -1215,12 +1215,6 @@ class Rewrites:
 
 
 class UpdateStmt(MutatingStmt, FilteredStmt):
-    # The pgsql DML compilation needs to be able to access __type__
-    # fields on link fields for doing covariant assignment checking.
-    # To enable this, we just make sure that update has access to
-    # BaseObject's __type__, from which we can derive whatever we need.
-    # This is at least a bit of a hack.
-    dunder_type_ptrref: BasePointerRef
     _material_type: TypeRef | None = None
 
     @property

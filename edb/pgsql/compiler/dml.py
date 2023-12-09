@@ -882,12 +882,14 @@ def process_insert_rewrites(
     elements: List[Tuple[irast.Set, irast.BasePointerRef]],
     ctx: context.CompilerContextLevel,
 ) -> tuple[pgast.CommonTableExpr, pgast.PathRangeVar]:
-    assert ir_stmt.rewrites
-
     typeref = ir_stmt.subject.typeref.real_material_type
 
-    subject_path_id = ir_stmt.rewrites.subject_path_id
     object_path_id = ir_stmt.subject.path_id
+    subject_path_id = (
+        ir_stmt.rewrites.subject_path_id
+        if ir_stmt.rewrites
+        else object_path_id
+    )
 
     rew_stmt = ctx.rel
 
@@ -1815,10 +1817,14 @@ def process_update_rewrites(
     pgast.PathRangeVar,
     list[tuple[pgast.ResTarget, irast.PathId]],
 ]:
-    assert ir_stmt.rewrites
+    # assert ir_stmt.rewrites
     object_path_id = ir_stmt.subject.path_id
-    subject_path_id = ir_stmt.rewrites.subject_path_id
-    old_path_id = ir_stmt.rewrites.old_path_id
+    if ir_stmt.rewrites:
+        subject_path_id = ir_stmt.rewrites.subject_path_id
+        old_path_id = ir_stmt.rewrites.old_path_id
+    else:
+        # Need values for the single external link case
+        subject_path_id = old_path_id = object_path_id
     assert old_path_id
 
     table_rel = table_relation.relation
@@ -2133,6 +2139,7 @@ def check_update_type(
     target type for this concrete subtype being handled.
     """
 
+    assert isinstance(actual_ptrref, irast.PointerRef)
     base_ptrref = shape_ptrref.real_material_ptr
 
     # We skip the check if either the base type matches exactly
@@ -2153,11 +2160,20 @@ def check_update_type(
         assert isinstance(rel_or_rvar, pgast.BaseRelation)
         rvar = relctx.rvar_for_rel(rel_or_rvar, ctx=ctx)
 
-    # Find the ptrref for the __type__ link on our actual target type
-    # and make up a new path_id to access it
-    assert isinstance(actual_ptrref, irast.PointerRef)
-    actual_type_ptrref = irtyputils.find_actual_ptrref(
-        actual_ptrref.out_target, ir_stmt.dunder_type_ptrref)
+    # Make up a ptrref for the __type__ link on our actual target type
+    # and make up a new path_id to access it. Relies on __type__ always
+    # being named __type__, but that's fine.
+    # (Arranging to actually get a legit pointer ref is pointlessly expensive.)
+    el_name = sn.QualName('__', '__type__')
+    actual_type_ptrref = irast.SpecialPointerRef(
+        name=el_name,
+        shortname=el_name,
+        out_source=actual_ptrref.out_target,
+        # HACK: This is obviously not the right target type, but we don't
+        # need it for anything and the pathid never escapes this function.
+        out_target=actual_ptrref.out_target,
+        out_cardinality=qltypes.Cardinality.AT_MOST_ONE,
+    )
     type_pathid = ir_set.path_id.extend(ptrref=actual_type_ptrref)
 
     # Grab the actual value we have inserted and pull the __type__ out
