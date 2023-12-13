@@ -1089,7 +1089,8 @@ def process_set_as_path(
             and not source_rptr.is_inbound
             and not irtyputils.is_computable_ptrref(source_rptr.ptrref)
             and not irutils.is_type_intersection_reference(ir_set)
-            and not pathctx.has_type_rewrite(ir_source.typeref, env=ctx.env)):
+            and not pathctx.link_needs_type_rewrite(
+                ir_source.typeref, env=ctx.env)):
 
         src_src_is_visible = ctx.scope_tree.is_visible(
             source_rptr.source.path_id)
@@ -2286,6 +2287,8 @@ def process_set_as_singleton_assertion(
                 ),
             ],
         )
+
+        output.add_null_test(arg_ref, newctx.rel)
 
         # Force Postgres to actually evaluate the result target
         # by putting it into an ORDER BY.

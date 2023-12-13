@@ -248,7 +248,8 @@ class BasePointerRef(ImmutableBase):
     # Inbound cardinality of the pointer.
     in_cardinality: qltypes.Cardinality = qltypes.Cardinality.MANY
     defined_here: bool = False
-    computed_backlink: typing.Optional[BasePointerRef] = None
+    computed_link_alias: typing.Optional[BasePointerRef] = None
+    computed_link_alias_is_backward: typing.Optional[bool] = None
 
     def dir_target(self, direction: s_pointers.PointerDirection) -> TypeRef:
         if direction is s_pointers.PointerDirection.Outbound:
@@ -539,12 +540,6 @@ class Set(Base):
     # Currently only used for preventing duplicate explicit .id
     # insertions to BaseObject.
     ignore_rewrites: bool = False
-
-    # An expression to use instead of this one for the purpose of
-    # cardinality/multiplicity inference. This is used for when something
-    # is desugared in a way that doesn't preserve cardinality, but we
-    # need to anyway.
-    card_inference_override: typing.Optional[Set] = None
 
     def __repr__(self) -> str:
         return f'<ir.Set \'{self.path_id}\' at 0x{id(self):x}>'
@@ -1075,6 +1070,12 @@ class SelectStmt(FilteredStmt):
     offset: typing.Optional[Set] = None
     limit: typing.Optional[Set] = None
     implicit_wrapper: bool = False
+
+    # An expression to use instead of this one for the purpose of
+    # cardinality/multiplicity inference. This is used for when something
+    # is desugared in a way that doesn't preserve cardinality, but we
+    # need to anyway.
+    card_inference_override: typing.Optional[Set] = None
 
 
 class GroupStmt(FilteredStmt):
