@@ -84,6 +84,7 @@ from . import explain
 from . import sertypes
 from . import status
 from . import ddl
+from . import rpc
 
 if TYPE_CHECKING:
     from edb.pgsql import metaschema
@@ -394,6 +395,12 @@ class CompilerState:
         # config spec differs between databases. See also #5836.
         return sertypes.StateSerializerFactory(
             self.std_schema, self.config_spec
+        )
+
+    @functools.cached_property
+    def compilation_config_serializer(self) -> sertypes.InputShapeSerializer:
+        return (
+            self.state_serializer_factory.make_compilation_config_serializer()
         )
 
 
@@ -812,6 +819,43 @@ class Compiler:
 
         return sql_units
 
+    def compile_request(
+        self,
+        user_schema: s_schema.Schema,
+        global_schema: s_schema.Schema,
+        reflection_cache: immutables.Map[str, Tuple[str, ...]],
+        database_config: Optional[immutables.Map[str, config.SettingValue]],
+        system_config: Optional[immutables.Map[str, config.SettingValue]],
+        serialized_request: bytes,
+        original_query: str,
+    ) -> Tuple[
+        dbstate.QueryUnitGroup, Optional[dbstate.CompilerConnectionState]
+    ]:
+        request = rpc.CompilationRequest(
+            self.state.compilation_config_serializer
+        )
+        request.deserialize(serialized_request, original_query)
+
+        units, cstate = self.compile(
+            user_schema,
+            global_schema,
+            reflection_cache,
+            database_config,
+            system_config,
+            request.source,
+            request.modaliases,
+            request.session_config,
+            request.output_format,
+            request.expect_one,
+            request.implicit_limit,
+            request.inline_typeids,
+            request.inline_typenames,
+            request.protocol_version,
+            request.inline_objectids,
+            request.json_parameters,
+        )
+        return units, cstate
+
     def compile(
         self,
         user_schema: s_schema.Schema,
@@ -1023,6 +1067,11 @@ class Compiler:
             global_schema,
             protocol_version,
         )
+
+    def make_compilation_config_serializer(
+        self
+    ) -> sertypes.InputShapeSerializer:
+        return self.state.compilation_config_serializer
 
     def describe_database_dump(
         self,
@@ -1689,6 +1738,8 @@ def _compile_ql_administer(
         return ddl.administer_repair_schema(ctx, ql)
     elif ql.expr.func == 'reindex':
         return ddl.administer_reindex(ctx, ql)
+    elif ql.expr.func == 'vacuum':
+        return ddl.administer_vacuum(ctx, ql)
     else:
         raise errors.QueryError(
             'Unknown ADMINISTER function',
@@ -1845,7 +1896,6 @@ def _compile_ql_transaction(
 ) -> dbstate.TxControlQuery:
 
     cacheable = True
-    single_unit = False
 
     modaliases = None
     final_user_schema: Optional[s_schema.Schema] = None
@@ -1889,7 +1939,6 @@ def _compile_ql_transaction(
         modaliases = new_state.modaliases
 
         sql = (b'COMMIT',)
-        single_unit = True
         cacheable = False
         action = dbstate.TxAction.COMMIT
 
@@ -1898,7 +1947,6 @@ def _compile_ql_transaction(
         modaliases = new_state.modaliases
 
         sql = (b'ROLLBACK',)
-        single_unit = True
         cacheable = False
         action = dbstate.TxAction.ROLLBACK
 
@@ -1927,7 +1975,6 @@ def _compile_ql_transaction(
 
         pgname = pg_common.quote_ident(ql.name)
         sql = (f'ROLLBACK TO SAVEPOINT {pgname};'.encode(),)
-        single_unit = True
         cacheable = False
         action = dbstate.TxAction.ROLLBACK_TO_SAVEPOINT
         sp_name = ql.name
@@ -1939,7 +1986,6 @@ def _compile_ql_transaction(
         sql=sql,
         action=action,
         cacheable=cacheable,
-        single_unit=single_unit,
         modaliases=modaliases,
         user_schema=final_user_schema,
         cached_reflection=final_cached_reflection,
@@ -2164,7 +2210,6 @@ def _compile_ql_config_op(
         ctx, ir, sql_res.argmap, None
     )
 
-    single_unit = False
     if ql.scope is qltypes.ConfigScope.SESSION:
         config_op = ireval.evaluate_to_config_op(ir, schema=schema)
 
@@ -2196,8 +2241,6 @@ def _compile_ql_config_op(
             # This is a complex config object operation, the
             # op will be produced by the compiler as json.
             config_op = None
-
-        single_unit = True
     else:
         raise AssertionError(f'unexpected configuration scope: {ql.scope}')
 
@@ -2207,7 +2250,6 @@ def _compile_ql_config_op(
         is_system_config=is_system_config,
         config_scope=ql.scope,
         requires_restart=requires_restart,
-        single_unit=single_unit,
         config_op=config_op,
         globals=globals,
         in_type_args=in_type_args,
@@ -2417,12 +2459,6 @@ def _try_compile(
                     f'cannot execute {status.get_status(stmt).decode()} '
                     f'in a transaction',
                     context=stmt.context,
-                )
-
-            if not getattr(comp, 'single_unit', None):
-                raise errors.InternalServerError(
-                    'non-transactional compilation units must '
-                    'be single-unit'
                 )
 
             unit.is_transactional = False

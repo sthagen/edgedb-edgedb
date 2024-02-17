@@ -165,7 +165,6 @@ def compile_and_apply_ddl_stmt(
             sql=(b'SELECT LIMIT 0',),
             user_schema=current_tx.get_user_schema(),
             is_transactional=True,
-            single_unit=False,
         )
 
     # If we are in a migration rewrite, we also don't actually
@@ -192,7 +191,6 @@ def compile_and_apply_ddl_stmt(
             sql=(b'SELECT LIMIT 0',),
             user_schema=current_tx.get_user_schema(),
             is_transactional=True,
-            single_unit=False,
         )
 
     # Do a dry-run on test_schema to canonicalize
@@ -278,12 +276,6 @@ def compile_and_apply_ddl_stmt(
     return dbstate.DDLQuery(
         sql=sql,
         is_transactional=is_transactional,
-        single_unit=bool(
-            (not is_transactional)
-            or (drop_db is not None)
-            or (create_db is not None)
-            or new_types
-        ),
         create_db=create_db,
         drop_db=drop_db,
         drop_db_reset_connections=drop_db_reset_connections,
@@ -449,7 +441,6 @@ def _start_migration(
             tx_action=tx_query.action,
             cacheable=False,
             modaliases=None,
-            single_unit=tx_query.single_unit,
         )
     else:
         savepoint_name = current_tx.start_migration()
@@ -570,7 +561,6 @@ def _populate_migration(
         action=dbstate.MigrationAction.POPULATE,
         cacheable=False,
         modaliases=None,
-        single_unit=False,
     )
 
 
@@ -801,7 +791,6 @@ def _alter_current_migration_reject_proposed(
         action=dbstate.MigrationAction.REJECT_PROPOSED,
         cacheable=False,
         modaliases=None,
-        single_unit=False,
     )
 
 
@@ -898,7 +887,6 @@ def _commit_migration(
         tx_action=tx_action,
         cacheable=False,
         modaliases=None,
-        single_unit=True,
         user_schema=ctx.state.current_tx().get_user_schema(),
         cached_reflection=(current_tx.get_cached_reflection_if_updated()),
     )
@@ -929,7 +917,6 @@ def _abort_migration(
         tx_action=tx_action,
         cacheable=False,
         modaliases=None,
-        single_unit=True,
     )
 
 
@@ -955,7 +942,6 @@ def _start_migration_rewrite(
             tx_action=tx_query.action,
             cacheable=False,
             modaliases=None,
-            single_unit=tx_query.single_unit,
         )
     else:
         savepoint_name = current_tx.start_migration()
@@ -1068,7 +1054,6 @@ def _commit_migration_rewrite(
         tx_action=tx_action,
         cacheable=False,
         modaliases=None,
-        single_unit=True,
         user_schema=ctx.state.current_tx().get_user_schema(),
         cached_reflection=(current_tx.get_cached_reflection_if_updated()),
     )
@@ -1100,7 +1085,6 @@ def _abort_migration_rewrite(
         tx_action=tx_action,
         cacheable=False,
         modaliases=None,
-        single_unit=True,
     )
 
     return query
@@ -1175,7 +1159,6 @@ def _reset_schema(
         tx_action=None,
         cacheable=False,
         modaliases=None,
-        single_unit=True,
         user_schema=current_tx.get_user_schema(),
         cached_reflection=(current_tx.get_cached_reflection_if_updated()),
     )
@@ -1276,7 +1259,6 @@ def administer_repair_schema(
 
     return dbstate.DDLQuery(
         sql=sql,
-        single_unit=False,
         user_schema=current_tx.get_user_schema_if_updated(),  # type: ignore
         global_schema=current_tx.get_global_schema_if_updated(),
         config_ops=config_ops,
@@ -1421,4 +1403,154 @@ def administer_reindex(
 
     return dbstate.MaintenanceQuery(
         sql=tuple(q.encode('utf-8') for q in commands)
+    )
+
+
+def administer_vacuum(
+    ctx: compiler.CompileContext,
+    ql: qlast.AdministerStmt,
+) -> dbstate.BaseQuery:
+    from edb.ir import ast as irast
+    from edb.ir import typeutils as irtypeutils
+    from edb.schema import objtypes as s_objtypes
+    from edb.schema import pointers as s_pointers
+
+    # check that the kwargs are valid
+    kwargs: Dict[str, str] = {}
+    for name, val in ql.expr.kwargs.items():
+        if name != 'full':
+            raise errors.QueryError(
+                f'unrecognized keyword argument {name!r} for vacuum()',
+                context=val.context,
+            )
+        elif not isinstance(val, qlast.BooleanConstant):
+            raise errors.QueryError(
+                f'argument {name!r} for vacuum() must be a boolean literal',
+                context=val.context,
+            )
+        kwargs[name] = val.value
+
+    # Next go over the args (if any) and convert paths to tables/columns
+    args: List[Tuple[irast.Pointer | None, s_objtypes.ObjectType]] = []
+    current_tx = ctx.state.current_tx()
+    schema = current_tx.get_schema(ctx.compiler_state.std_schema)
+    modaliases = current_tx.get_modaliases()
+
+    for arg in ql.expr.args:
+        match arg:
+            case qlast.Path(
+                steps=[qlast.ObjectRef()],
+                partial=False,
+            ):
+                ptr = False
+            case qlast.Path(
+                steps=[qlast.ObjectRef(), qlast.Ptr()],
+                partial=False,
+            ):
+                ptr = True
+            case _:
+                raise errors.QueryError(
+                    'argument to vacuum() must be an object type '
+                    'or a link or property reference',
+                    context=arg.context,
+                )
+
+        ir: irast.Statement = qlcompiler.compile_ast_to_ir(
+            arg,
+            schema=schema,
+            options=qlcompiler.CompilerOptions(
+                modaliases=modaliases
+            ),
+        )
+        expr = ir.expr
+        if ptr:
+            if (
+                not expr.expr
+                or not isinstance(expr.expr, irast.SelectStmt)
+                or not expr.expr.result.rptr
+            ):
+                raise errors.QueryError(
+                    'invalid pointer argument to vacuum()',
+                    context=arg.context,
+                )
+            rptr = expr.expr.result.rptr
+            source = rptr.source
+        else:
+            rptr = None
+            source = expr
+        schema, obj = irtypeutils.ir_typeref_to_type(schema, source.typeref)
+
+        if (
+            not isinstance(obj, s_objtypes.ObjectType)
+            or not obj.is_material_object_type(schema)
+        ):
+            raise errors.QueryError(
+                'argument to vacuum() must be an object type '
+                'or a link or property reference',
+                context=arg.context,
+            )
+        args.append((rptr, obj))
+
+    tables: set[s_pointers.Pointer | s_objtypes.ObjectType] = set()
+
+    for arg, (rptr, obj) in zip(ql.expr.args, args):
+        if not rptr:
+            # On a type, we just vacuum the type and its descendants
+            tables.update({obj} | {
+                desc for desc in obj.descendants(schema)
+                if desc.is_material_object_type(schema)
+            })
+        else:
+            # On a pointer, we must go over the pointer and its descendants
+            # so that we may retrieve any link talbes if necessary.
+            if not isinstance(rptr.ptrref, irast.PointerRef):
+                raise errors.QueryError(
+                    'invalid pointer argument to vacuum()',
+                    context=arg.context,
+                )
+            schema, ptrcls = irtypeutils.ptrcls_from_ptrref(
+                rptr.ptrref, schema=schema)
+
+            card = ptrcls.get_cardinality(schema)
+            if not (
+                card.is_multi() or ptrcls.has_user_defined_properties(schema)
+            ):
+                vn = ptrcls.get_verbosename(schema, with_parent=True)
+                if ptrcls.is_property(schema):
+                    raise errors.QueryError(
+                        f'{vn} is not a valid argument to vacuum() '
+                        f'because it is not a multi property',
+                        context=arg.context,
+                    )
+                else:
+                    raise errors.QueryError(
+                        f'{vn} is not a valid argument to vacuum() '
+                        f'because it is neither a multi link nor '
+                        f'does it have link properties',
+                        context=arg.context,
+                    )
+
+            ptrclses = {ptrcls} | {
+                desc for desc in ptrcls.descendants(schema)
+                if isinstance(
+                    (src := desc.get_source(schema)), s_objtypes.ObjectType)
+                and src.is_material_object_type(schema)
+            }
+            tables.update(ptrclses)
+
+    tables_and_columns = [
+        pg_common.get_backend_name(schema, table)
+        for table in tables
+    ]
+
+    if kwargs.get('full', '').lower() == 'true':
+        options = 'FULL'
+    else:
+        options = ''
+
+    command = f'VACUUM {options} ' + ', '.join(tables_and_columns)
+
+    return dbstate.MaintenanceQuery(
+        sql=(command.encode('utf-8'),),
+        is_transactional=False,
     )

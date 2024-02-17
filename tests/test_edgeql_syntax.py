@@ -3519,6 +3519,19 @@ aa';
         UNION (UPDATE Foo FILTER (Foo.id = x.0) SET {bar := x.1});
         """
 
+    def test_edgeql_syntax_shorterfor_01(self):
+        """
+        FOR x IN {1}
+        INSERT Foo { x := x };
+        """
+
+    def test_edgeql_syntax_shorterfor_02(self):
+        """
+        FOR x IN 1
+        WITH y := x
+        INSERT Foo { y := y };
+        """
+
     def test_edgeql_syntax_coalesce_01(self):
         """
         SELECT (a ?? x);
@@ -6339,3 +6352,28 @@ class TestEdgeQLNormalization(EdgeQLSyntaxTest):
         '''
         select count 1;
         '''
+
+
+class TestEdgeQLTokenSerialization(unittest.TestCase):
+    def test_edgeql_token_serialization(self):
+        query = "SELECT (12345678, <str>$0)"
+        src1 = tokenizer.Source.from_string(query)
+        src2 = tokenizer.deserialize(src1.serialize(), query)
+        self.assertSourceEqual(src1, src2)
+
+    def test_edgeql_normalized_token_serialization(self):
+        query = "SELECT (12345678, <str>$0)"
+        src1 = tokenizer.NormalizedSource.from_string(query)
+        src2 = tokenizer.deserialize(src1.serialize(), query)
+        self.assertSourceEqual(src1, src2)
+
+    def assertSourceEqual(self, src1, src2):
+        self.assertIs(type(src1), type(src2))
+        self.assertEqual(src1.text(), src2.text())
+        self.assertEqual(src1.cache_key(), src2.cache_key())
+        self.assertEqual(src1.variables(), src2.variables())
+        self.assertEqual(str(src1.tokens()), str(src2.tokens()))
+        self.assertEqual(src1.first_extra(), src2.first_extra())
+        self.assertEqual(src1.extra_counts(), src2.extra_counts())
+        self.assertEqual(src1.extra_blobs(), src2.extra_blobs())
+        self.assertIs(src1.serialize(), src2.serialize())
