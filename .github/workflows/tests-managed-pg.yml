@@ -26,32 +26,45 @@ jobs:
 
     - name: Set up Python
       uses: actions/setup-python@v5
+      id: setup-python
       with:
         python-version: '3.12.2'
-
-    # Build virtualenv
-
-    - name: Handle virtualenv
-      uses: syphar/restore-virtualenv@v1
-      id: venv-cache
-      with:
-        requirement_files: |
-          setup.py
+        cache: 'pip'
+        cache-dependency-path: |
           pyproject.toml
-        custom_cache_key_element: v2
+
+    # The below is technically a lie as we are technically not
+    # inside a virtual env, but there is really no reason to bother
+    # actually creating and activating one as below works just fine.
+    - name: Export $VIRTUAL_ENV
+      run: |
+        venv="$(python -c 'import sys; sys.stdout.write(sys.prefix)')"
+        echo "VIRTUAL_ENV=${venv}" >> $GITHUB_ENV
+
+    - name: Set up uv cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: uv-cache-${{ runner.os }}-py-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('pyproject.toml') }}
+
+    - name: Cached requirements.txt
+      uses: actions/cache@v4
+      id: requirements-cache
+      with:
+        path: requirements.txt
+        key: edb-requirements-${{ hashFiles('pyproject.toml') }}
+
+    - name: Compute requirements.txt
+      if: steps.requirements-cache.outputs.cache-hit != 'true'
+      run: |
+        python -m pip install pip-tools
+        pip-compile --no-strip-extras --all-build-deps --extra test \
+          --output-file requirements.txt pyproject.toml
 
     - name: Install Python dependencies
-      if: steps.venv-cache.outputs.cache-hit != 'true'
-      shell: bash
       run: |
-        set -e
-        python -m pip install -U pip setuptools wheel build
-        bdeps_script="import build; print('\n'.join(build.ProjectBuilder('.').build_system_requires))"
-        readarray -t build_deps < <(python -c "${bdeps_script}")
-        python -m pip download --dest=$VIRTUAL_ENV/deps "${build_deps[@]}" .[test]
-        python -m pip install -U --no-index --find-links=$VIRTUAL_ENV/deps $VIRTUAL_ENV/deps/*
-
-    # Prepare environment variables and shared artifacts
+        python -c "import sys; print(sys.prefix)"
+        python -m pip install uv && uv pip install -U -r requirements.txt
 
     - name: Compute cache keys
       run: |
@@ -61,10 +74,12 @@ jobs:
         python setup.py -q ci_helper --type ext >.tmp/ext_cache_key.txt
         python setup.py -q ci_helper --type parsers >.tmp/parsers_cache_key.txt
         python setup.py -q ci_helper --type postgres >.tmp/postgres_git_rev.txt
+        python setup.py -q ci_helper --type libpg_query >.tmp/libpg_query_git_rev.txt
         echo 'v0.17.0' >.tmp/stolon_git_rev.txt
         python setup.py -q ci_helper --type bootstrap >.tmp/bootstrap_cache_key.txt
         echo EDGEDBCLI_GIT_REV=$(cat .tmp/edgedbcli_git_rev.txt) >> $GITHUB_ENV
         echo POSTGRES_GIT_REV=$(cat .tmp/postgres_git_rev.txt) >> $GITHUB_ENV
+        echo LIBPG_QUERY_GIT_REV=$(cat .tmp/libpg_query_git_rev.txt) >> $GITHUB_ENV
         echo STOLON_GIT_REV=$(cat .tmp/stolon_git_rev.txt) >> $GITHUB_ENV
         echo BUILD_LIB=$(python setup.py -q ci_helper --type build_lib) >> $GITHUB_ENV
         echo BUILD_TEMP=$(python setup.py -q ci_helper --type build_temp) >> $GITHUB_ENV
@@ -99,7 +114,7 @@ jobs:
       id: ext-cache
       with:
         path: build/extensions
-        key: edb-ext-v4-${{ hashFiles('.tmp/ext_cache_key.txt') }}
+        key: edb-ext-v5-${{ hashFiles('.tmp/ext_cache_key.txt') }}
 
     - name: Handle cached PostgreSQL build
       uses: actions/cache@v4
@@ -114,6 +129,13 @@ jobs:
       with:
         path: build/stolon/bin
         key: edb-stolon-v2-${{ env.STOLON_GIT_REV }}
+
+    - name: Handle cached libpg_query build
+      uses: actions/cache@v4
+      id: libpg-query-cache
+      with:
+        path: edb/pgsql/parser/libpg_query/libpg_query.a
+        key: edb-libpg_query-v1-${{ env.LIBPG_QUERY_GIT_REV }}
 
     # Install system dependencies for building
 
@@ -188,6 +210,9 @@ jobs:
     # Build libpg_query
 
     - name: Build libpg_query
+      if: |
+        steps.libpg-query-cache.outputs.cache-hit != 'true' &&
+        steps.ext-cache.outputs.cache-hit != 'true'
       run: |
         python setup.py build_libpg_query
 
@@ -280,19 +305,13 @@ jobs:
 
     # Install edgedb-server and populate egg-info
 
-    - name: Install edgedb-server and populate egg-info
+    - name: Install edgedb-server
       env:
-        CACHE_HIT: ${{ steps.venv-cache.outputs.cache-hit }}
         BUILD_EXT_MODE: skip
       run: |
-        if [[ "$CACHE_HIT" == "true" ]]; then
-          rsync -av $VIRTUAL_ENV/edgedb_server.egg-info/ ./edgedb_server.egg-info/
-        else
-          # --no-build-isolation because we have explicitly installed all deps
-          # and don't want them to be reinstalled in an "isolated env".
-          pip install --no-build-isolation --no-deps -e .[test,docs]
-          rsync -av ./edgedb_server.egg-info/ $VIRTUAL_ENV/edgedb_server.egg-info/
-        fi
+        # --no-build-isolation because we have explicitly installed all deps
+        # and don't want them to be reinstalled in an "isolated env".
+        pip install --no-build-isolation --no-deps -e .[test,docs]
 
     # Refresh the bootstrap cache
 
@@ -373,27 +392,43 @@ jobs:
 
     - name: Set up Python
       uses: actions/setup-python@v5
+      id: setup-python
       with:
         python-version: '3.12.2'
-
-    - name: Handle virtualenv
-      uses: syphar/restore-virtualenv@v1
-      id: venv-cache
-      with:
-        requirement_files: |
-          setup.py
+        cache: 'pip'
+        cache-dependency-path: |
           pyproject.toml
-        custom_cache_key_element: v2
+
+    # The below is technically a lie as we are technically not
+    # inside a virtual env, but there is really no reason to bother
+    # actually creating and activating one as below works just fine.
+    - name: Export $VIRTUAL_ENV
+      run: |
+        venv="$(python -c 'import sys; sys.stdout.write(sys.prefix)')"
+        echo "VIRTUAL_ENV=${venv}" >> $GITHUB_ENV
+
+    - name: Set up uv cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: uv-cache-${{ runner.os }}-py-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('pyproject.toml') }}
+    
+    - name: Download requirements.txt
+      uses: actions/cache@v4
+      with:
+        path: requirements.txt
+        key: edb-requirements-${{ hashFiles('pyproject.toml') }}
+
+    - name: Install Python dependencies
+      run: python -m pip install uv && uv pip install -U -r requirements.txt
 
     # Restore the artifacts and environment variables
 
     - name: Download shared artifacts
-      uses: Wandalen/wretry.action@a163f62ae554a8f3cbe27b23db15b60c0ae2e93c  # v1.3.0
+      uses: actions/download-artifact@v4
       with:
-        action: actions/download-artifact@v4
-        with: |
-          name: shared-artifacts
-          path: .tmp
+        name: shared-artifacts
+        path: .tmp
 
     - name: Set environment variables
       run: |
@@ -424,7 +459,7 @@ jobs:
       id: ext-cache
       with:
         path: build/extensions
-        key: edb-ext-v4-${{ hashFiles('.tmp/ext_cache_key.txt') }}
+        key: edb-ext-v5-${{ hashFiles('.tmp/ext_cache_key.txt') }}
 
     - name: Restore compiled parsers cache
       uses: actions/cache@v4
@@ -456,7 +491,6 @@ jobs:
 
     - name: Stop if we cannot retrieve the cache
       if: |
-        steps.venv-cache.outputs.cache-hit != 'true' ||
         steps.cli-cache.outputs.cache-hit != 'true' ||
         steps.rust-cache.outputs.cache-hit != 'true' ||
         steps.ext-cache.outputs.cache-hit != 'true' ||
@@ -475,7 +509,14 @@ jobs:
         rsync -av ./build/extensions/edb/ ./edb/
         rsync -av ./build/lib/edb/ ./edb/
         cp build/postgres/install/stamp build/postgres/
-        rsync -av $VIRTUAL_ENV/edgedb_server.egg-info/ ./edgedb_server.egg-info/
+
+    - name: Install edgedb-server
+      env:
+        BUILD_EXT_MODE: skip
+      run: |
+        # --no-build-isolation because we have explicitly installed all deps
+        # and don't want them to be reinstalled in an "isolated env".
+        pip install --no-build-isolation --no-deps -e .[test,docs]
 
     # Run the test
 
@@ -579,27 +620,43 @@ jobs:
 
     - name: Set up Python
       uses: actions/setup-python@v5
+      id: setup-python
       with:
         python-version: '3.12.2'
-
-    - name: Handle virtualenv
-      uses: syphar/restore-virtualenv@v1
-      id: venv-cache
-      with:
-        requirement_files: |
-          setup.py
+        cache: 'pip'
+        cache-dependency-path: |
           pyproject.toml
-        custom_cache_key_element: v2
+
+    # The below is technically a lie as we are technically not
+    # inside a virtual env, but there is really no reason to bother
+    # actually creating and activating one as below works just fine.
+    - name: Export $VIRTUAL_ENV
+      run: |
+        venv="$(python -c 'import sys; sys.stdout.write(sys.prefix)')"
+        echo "VIRTUAL_ENV=${venv}" >> $GITHUB_ENV
+
+    - name: Set up uv cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: uv-cache-${{ runner.os }}-py-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('pyproject.toml') }}
+    
+    - name: Download requirements.txt
+      uses: actions/cache@v4
+      with:
+        path: requirements.txt
+        key: edb-requirements-${{ hashFiles('pyproject.toml') }}
+
+    - name: Install Python dependencies
+      run: python -m pip install uv && uv pip install -U -r requirements.txt
 
     # Restore the artifacts and environment variables
 
     - name: Download shared artifacts
-      uses: Wandalen/wretry.action@a163f62ae554a8f3cbe27b23db15b60c0ae2e93c  # v1.3.0
+      uses: actions/download-artifact@v4
       with:
-        action: actions/download-artifact@v4
-        with: |
-          name: shared-artifacts
-          path: .tmp
+        name: shared-artifacts
+        path: .tmp
 
     - name: Set environment variables
       run: |
@@ -630,7 +687,7 @@ jobs:
       id: ext-cache
       with:
         path: build/extensions
-        key: edb-ext-v4-${{ hashFiles('.tmp/ext_cache_key.txt') }}
+        key: edb-ext-v5-${{ hashFiles('.tmp/ext_cache_key.txt') }}
 
     - name: Restore compiled parsers cache
       uses: actions/cache@v4
@@ -662,7 +719,6 @@ jobs:
 
     - name: Stop if we cannot retrieve the cache
       if: |
-        steps.venv-cache.outputs.cache-hit != 'true' ||
         steps.cli-cache.outputs.cache-hit != 'true' ||
         steps.rust-cache.outputs.cache-hit != 'true' ||
         steps.ext-cache.outputs.cache-hit != 'true' ||
@@ -681,7 +737,14 @@ jobs:
         rsync -av ./build/extensions/edb/ ./edb/
         rsync -av ./build/lib/edb/ ./edb/
         cp build/postgres/install/stamp build/postgres/
-        rsync -av $VIRTUAL_ENV/edgedb_server.egg-info/ ./edgedb_server.egg-info/
+
+    - name: Install edgedb-server
+      env:
+        BUILD_EXT_MODE: skip
+      run: |
+        # --no-build-isolation because we have explicitly installed all deps
+        # and don't want them to be reinstalled in an "isolated env".
+        pip install --no-build-isolation --no-deps -e .[test,docs]
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v1
@@ -833,27 +896,43 @@ jobs:
 
     - name: Set up Python
       uses: actions/setup-python@v5
+      id: setup-python
       with:
         python-version: '3.12.2'
-
-    - name: Handle virtualenv
-      uses: syphar/restore-virtualenv@v1
-      id: venv-cache
-      with:
-        requirement_files: |
-          setup.py
+        cache: 'pip'
+        cache-dependency-path: |
           pyproject.toml
-        custom_cache_key_element: v2
+
+    # The below is technically a lie as we are technically not
+    # inside a virtual env, but there is really no reason to bother
+    # actually creating and activating one as below works just fine.
+    - name: Export $VIRTUAL_ENV
+      run: |
+        venv="$(python -c 'import sys; sys.stdout.write(sys.prefix)')"
+        echo "VIRTUAL_ENV=${venv}" >> $GITHUB_ENV
+
+    - name: Set up uv cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: uv-cache-${{ runner.os }}-py-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('pyproject.toml') }}
+    
+    - name: Download requirements.txt
+      uses: actions/cache@v4
+      with:
+        path: requirements.txt
+        key: edb-requirements-${{ hashFiles('pyproject.toml') }}
+
+    - name: Install Python dependencies
+      run: python -m pip install uv && uv pip install -U -r requirements.txt
 
     # Restore the artifacts and environment variables
 
     - name: Download shared artifacts
-      uses: Wandalen/wretry.action@a163f62ae554a8f3cbe27b23db15b60c0ae2e93c  # v1.3.0
+      uses: actions/download-artifact@v4
       with:
-        action: actions/download-artifact@v4
-        with: |
-          name: shared-artifacts
-          path: .tmp
+        name: shared-artifacts
+        path: .tmp
 
     - name: Set environment variables
       run: |
@@ -884,7 +963,7 @@ jobs:
       id: ext-cache
       with:
         path: build/extensions
-        key: edb-ext-v4-${{ hashFiles('.tmp/ext_cache_key.txt') }}
+        key: edb-ext-v5-${{ hashFiles('.tmp/ext_cache_key.txt') }}
 
     - name: Restore compiled parsers cache
       uses: actions/cache@v4
@@ -916,7 +995,6 @@ jobs:
 
     - name: Stop if we cannot retrieve the cache
       if: |
-        steps.venv-cache.outputs.cache-hit != 'true' ||
         steps.cli-cache.outputs.cache-hit != 'true' ||
         steps.rust-cache.outputs.cache-hit != 'true' ||
         steps.ext-cache.outputs.cache-hit != 'true' ||
@@ -935,7 +1013,14 @@ jobs:
         rsync -av ./build/extensions/edb/ ./edb/
         rsync -av ./build/lib/edb/ ./edb/
         cp build/postgres/install/stamp build/postgres/
-        rsync -av $VIRTUAL_ENV/edgedb_server.egg-info/ ./edgedb_server.egg-info/
+
+    - name: Install edgedb-server
+      env:
+        BUILD_EXT_MODE: skip
+      run: |
+        # --no-build-isolation because we have explicitly installed all deps
+        # and don't want them to be reinstalled in an "isolated env".
+        pip install --no-build-isolation --no-deps -e .[test,docs]
 
     # Run the test
 
@@ -1053,27 +1138,43 @@ jobs:
 
     - name: Set up Python
       uses: actions/setup-python@v5
+      id: setup-python
       with:
         python-version: '3.12.2'
-
-    - name: Handle virtualenv
-      uses: syphar/restore-virtualenv@v1
-      id: venv-cache
-      with:
-        requirement_files: |
-          setup.py
+        cache: 'pip'
+        cache-dependency-path: |
           pyproject.toml
-        custom_cache_key_element: v2
+
+    # The below is technically a lie as we are technically not
+    # inside a virtual env, but there is really no reason to bother
+    # actually creating and activating one as below works just fine.
+    - name: Export $VIRTUAL_ENV
+      run: |
+        venv="$(python -c 'import sys; sys.stdout.write(sys.prefix)')"
+        echo "VIRTUAL_ENV=${venv}" >> $GITHUB_ENV
+
+    - name: Set up uv cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: uv-cache-${{ runner.os }}-py-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('pyproject.toml') }}
+    
+    - name: Download requirements.txt
+      uses: actions/cache@v4
+      with:
+        path: requirements.txt
+        key: edb-requirements-${{ hashFiles('pyproject.toml') }}
+
+    - name: Install Python dependencies
+      run: python -m pip install uv && uv pip install -U -r requirements.txt
 
     # Restore the artifacts and environment variables
 
     - name: Download shared artifacts
-      uses: Wandalen/wretry.action@a163f62ae554a8f3cbe27b23db15b60c0ae2e93c  # v1.3.0
+      uses: actions/download-artifact@v4
       with:
-        action: actions/download-artifact@v4
-        with: |
-          name: shared-artifacts
-          path: .tmp
+        name: shared-artifacts
+        path: .tmp
 
     - name: Set environment variables
       run: |
@@ -1104,7 +1205,7 @@ jobs:
       id: ext-cache
       with:
         path: build/extensions
-        key: edb-ext-v4-${{ hashFiles('.tmp/ext_cache_key.txt') }}
+        key: edb-ext-v5-${{ hashFiles('.tmp/ext_cache_key.txt') }}
 
     - name: Restore compiled parsers cache
       uses: actions/cache@v4
@@ -1136,7 +1237,6 @@ jobs:
 
     - name: Stop if we cannot retrieve the cache
       if: |
-        steps.venv-cache.outputs.cache-hit != 'true' ||
         steps.cli-cache.outputs.cache-hit != 'true' ||
         steps.rust-cache.outputs.cache-hit != 'true' ||
         steps.ext-cache.outputs.cache-hit != 'true' ||
@@ -1155,7 +1255,14 @@ jobs:
         rsync -av ./build/extensions/edb/ ./edb/
         rsync -av ./build/lib/edb/ ./edb/
         cp build/postgres/install/stamp build/postgres/
-        rsync -av $VIRTUAL_ENV/edgedb_server.egg-info/ ./edgedb_server.egg-info/
+
+    - name: Install edgedb-server
+      env:
+        BUILD_EXT_MODE: skip
+      run: |
+        # --no-build-isolation because we have explicitly installed all deps
+        # and don't want them to be reinstalled in an "isolated env".
+        pip install --no-build-isolation --no-deps -e .[test,docs]
 
     # Run the test
 
@@ -1261,27 +1368,43 @@ jobs:
 
     - name: Set up Python
       uses: actions/setup-python@v5
+      id: setup-python
       with:
         python-version: '3.12.2'
-
-    - name: Handle virtualenv
-      uses: syphar/restore-virtualenv@v1
-      id: venv-cache
-      with:
-        requirement_files: |
-          setup.py
+        cache: 'pip'
+        cache-dependency-path: |
           pyproject.toml
-        custom_cache_key_element: v2
+
+    # The below is technically a lie as we are technically not
+    # inside a virtual env, but there is really no reason to bother
+    # actually creating and activating one as below works just fine.
+    - name: Export $VIRTUAL_ENV
+      run: |
+        venv="$(python -c 'import sys; sys.stdout.write(sys.prefix)')"
+        echo "VIRTUAL_ENV=${venv}" >> $GITHUB_ENV
+
+    - name: Set up uv cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: uv-cache-${{ runner.os }}-py-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('pyproject.toml') }}
+    
+    - name: Download requirements.txt
+      uses: actions/cache@v4
+      with:
+        path: requirements.txt
+        key: edb-requirements-${{ hashFiles('pyproject.toml') }}
+
+    - name: Install Python dependencies
+      run: python -m pip install uv && uv pip install -U -r requirements.txt
 
     # Restore the artifacts and environment variables
 
     - name: Download shared artifacts
-      uses: Wandalen/wretry.action@a163f62ae554a8f3cbe27b23db15b60c0ae2e93c  # v1.3.0
+      uses: actions/download-artifact@v4
       with:
-        action: actions/download-artifact@v4
-        with: |
-          name: shared-artifacts
-          path: .tmp
+        name: shared-artifacts
+        path: .tmp
 
     - name: Set environment variables
       run: |
@@ -1312,7 +1435,7 @@ jobs:
       id: ext-cache
       with:
         path: build/extensions
-        key: edb-ext-v4-${{ hashFiles('.tmp/ext_cache_key.txt') }}
+        key: edb-ext-v5-${{ hashFiles('.tmp/ext_cache_key.txt') }}
 
     - name: Restore compiled parsers cache
       uses: actions/cache@v4
@@ -1344,7 +1467,6 @@ jobs:
 
     - name: Stop if we cannot retrieve the cache
       if: |
-        steps.venv-cache.outputs.cache-hit != 'true' ||
         steps.cli-cache.outputs.cache-hit != 'true' ||
         steps.rust-cache.outputs.cache-hit != 'true' ||
         steps.ext-cache.outputs.cache-hit != 'true' ||
@@ -1363,7 +1485,14 @@ jobs:
         rsync -av ./build/extensions/edb/ ./edb/
         rsync -av ./build/lib/edb/ ./edb/
         cp build/postgres/install/stamp build/postgres/
-        rsync -av $VIRTUAL_ENV/edgedb_server.egg-info/ ./edgedb_server.egg-info/
+
+    - name: Install edgedb-server
+      env:
+        BUILD_EXT_MODE: skip
+      run: |
+        # --no-build-isolation because we have explicitly installed all deps
+        # and don't want them to be reinstalled in an "isolated env".
+        pip install --no-build-isolation --no-deps -e .[test,docs]
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v1
