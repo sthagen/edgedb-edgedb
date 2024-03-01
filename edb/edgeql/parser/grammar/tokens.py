@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import sys
 import types
+import typing
 
 from edb.common import parsing
 
@@ -33,16 +34,12 @@ clean_string = re.compile(r"'(?:\s|\n)+'")
 string_quote = re.compile(r'\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$')
 
 
-class TokenMeta(parsing.TokenMeta):
+class Token(parsing.Token, precedence_class=precedence.PrecedenceMeta,
+            is_internal=True):
     pass
 
 
-class Token(parsing.Token, metaclass=TokenMeta,
-            precedence_class=precedence.PrecedenceMeta):
-    pass
-
-
-class GrammarToken(Token):
+class GrammarToken(Token, is_internal=True):
     """
     Instead of having different grammars, we prefix each query with a special
     grammar token which directs the parser to appropriate grammar.
@@ -289,6 +286,9 @@ class T_EOF(Token):
     pass
 
 
+# explicitly define tokens which are referenced elsewhere
+T_THEN: typing.Optional[Token] = None
+
 def _gen_keyword_tokens():
     # Define keyword tokens
 
@@ -300,7 +300,7 @@ def _gen_keyword_tokens():
 
     for token, _ in keywords.edgeql_keywords.values():
         clsname = 'T_{}'.format(token)
-        clskwds = dict(metaclass=parsing.TokenMeta, token=token)
+        clskwds = dict(token=token)
         cls = types.new_class(clsname, (Token,), clskwds, clsexec)
         setattr(mod, clsname, cls)
 
