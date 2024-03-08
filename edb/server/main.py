@@ -272,7 +272,11 @@ async def _run_server(
             return
 
         ss.init_tls(
-            args.tls_cert_file, args.tls_key_file, tls_cert_newly_generated)
+            args.tls_cert_file,
+            args.tls_key_file,
+            tls_cert_newly_generated,
+            args.tls_client_ca_file,
+        )
 
         ss.init_jwcrypto(args.jws_key_file, jws_keys_newly_generated)
 
@@ -290,7 +294,11 @@ async def _run_server(
             try:
                 if args.readiness_state_file:
                     tenant.reload_readiness_state()
-                ss.reload_tls(args.tls_cert_file, args.tls_key_file)
+                ss.reload_tls(
+                    args.tls_cert_file,
+                    args.tls_key_file,
+                    args.tls_client_ca_file,
+                )
                 ss.load_jwcrypto(args.jws_key_file)
             except Exception:
                 logger.critical(
@@ -855,7 +863,7 @@ def initialize_static_cfg(
         except KeyError:
             continue
         choices = setting.enum_values
-        if setting.type == bool:
+        if setting.type is bool:
             choices = ['true', 'false']
         env_value = env_value.lower()
         if choices is not None and env_value not in choices:
@@ -863,7 +871,7 @@ def initialize_static_cfg(
                 f"Environment variable {env_name!r} can only be one of: " +
                 ", ".join(choices)
             )
-        if setting.type == bool:
+        if setting.type is bool:
             env_value = env_value == 'true'
         elif not issubclass(setting.type, statypes.ScalarType):  # type: ignore
             env_value = setting.type(env_value)  # type: ignore
