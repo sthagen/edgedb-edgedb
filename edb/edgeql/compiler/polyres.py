@@ -104,7 +104,7 @@ def find_callable_typemods(
     """
 
     typ = s_pseudo.PseudoType.get(ctx.env.schema, 'anytype')
-    dummy = irast.EmptySet()  # type: ignore
+    dummy = irast.DUMMY_SET
     args = [(typ, dummy)] * num_args
     kwargs = {k: (typ, dummy) for k in kwargs_names}
     options = find_callable(
@@ -612,7 +612,7 @@ def compile_arg(
 
         if fenced:
             arg_ql = qlast.SelectQuery(
-                result=arg_ql, context=arg_ql.context,
+                result=arg_ql, span=arg_ql.span,
                 implicit=True, rptr_passthrough=True)
 
         argctx.inhibit_implicit_limit = True

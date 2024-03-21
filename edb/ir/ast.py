@@ -70,7 +70,7 @@ import dataclasses
 import typing
 import uuid
 
-from edb.common import ast, compiler, parsing, markup, enum as s_enum
+from edb.common import ast, compiler, span, markup, enum as s_enum
 
 from edb.schema import modules as s_mod
 from edb.schema import name as sn
@@ -86,15 +86,17 @@ from .pathid import PathId, Namespace  # noqa
 from .scopetree import ScopeTreeNode  # noqa
 
 
+Span = span.Span
+
 def new_scope_tree() -> ScopeTreeNode:
     return ScopeTreeNode(fenced=True)
 
 
 class Base(ast.AST):
     __abstract_node__ = True
-    __ast_hidden__ = {'context'}
+    __ast_hidden__ = {'span'}
 
-    context: typing.Optional[parsing.ParserContext] = None
+    span: typing.Optional[Span] = None
 
     def __repr__(self) -> str:
         return (
@@ -107,9 +109,9 @@ class Base(ast.AST):
 def _serialize_to_markup_base(
         ir: Base, *, ctx: typing.Any) -> typing.Any:
     node = ast.serialize_to_markup(ir, ctx=ctx)
-    has_context = bool(ir.context)
+    has_span = bool(ir.span)
     node.add_child(
-        label='has_context', node=markup.serialize(has_context, ctx=ctx))
+        label='has_span', node=markup.serialize(has_span, ctx=ctx))
     child = node.children.pop()
     node.children.insert(1, child)
     return node
@@ -582,6 +584,9 @@ if typing.TYPE_CHECKING:
     Set = SetE[typing.Optional[Expr]]
 else:
     Set = SetE
+
+
+DUMMY_SET = Set()  # type: ignore[call-arg]
 
 
 class Command(Base):
@@ -1086,8 +1091,8 @@ class Stmt(Expr):
     name: typing.Optional[str] = None
     # Parts of the edgeql->IR compiler need to create statements and fill in
     # the result later, but making it Optional would cause lots of errors,
-    # so we stick a bogus Empty set in.
-    result: Set = EmptySet()  # type: ignore
+    # so we stick a dummy set set in.
+    result: Set = DUMMY_SET
     parent_stmt: typing.Optional[Stmt] = None
     iterator_stmt: typing.Optional[Set] = None
     bindings: typing.Optional[typing.List[Set]] = None
@@ -1118,12 +1123,12 @@ class SelectStmt(FilteredStmt):
 
 
 class GroupStmt(FilteredStmt):
-    subject: Set = EmptySet()  # type: ignore
+    subject: Set = DUMMY_SET
     using: typing.Dict[str, typing.Tuple[Set, qltypes.Cardinality]] = (
         ast.field(factory=dict))
     by: typing.List[qlast.GroupingElement]
-    result: Set = EmptySet()  # type: ignore
-    group_binding: Set = EmptySet()  # type: ignore
+    result: Set = DUMMY_SET
+    group_binding: Set = DUMMY_SET
     grouping_binding: typing.Optional[Set] = None
     orderby: typing.Optional[typing.List[SortExpr]] = None
     # Optimization information
@@ -1158,8 +1163,8 @@ class MutatingStmt(Stmt, MutatingLikeStmt):
     __abstract_node__ = True
     # Parts of the edgeql->IR compiler need to create statements and fill in
     # the subject later, but making it Optional would cause lots of errors,
-    # so we stick a bogus Empty set in.
-    subject: Set = EmptySet()  # type: ignore
+    # so we stick a dummy set in.
+    subject: Set = DUMMY_SET
     # Conflict checks that we should manually raise constraint violations
     # for.
     conflict_checks: typing.Optional[typing.List[OnConflictClause]] = None
