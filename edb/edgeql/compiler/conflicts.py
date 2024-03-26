@@ -424,7 +424,7 @@ def _compile_conflict_select(
         assert isinstance(select_ir, irast.Set)
 
     # If we have an empty set, remake it with the right type
-    if isinstance(select_ir, irast.EmptySet):
+    if isinstance(select_ir.expr, irast.EmptySet):
         select_ir = setgen.new_empty_set(stype=subject_typ, ctx=ctx)
 
     return select_ir, always_check, from_parent
@@ -593,7 +593,6 @@ def compile_insert_unless_conflict_on(
 
 def _has_explicit_id_write(stmt: irast.MutatingStmt) -> bool:
     for elem, _ in stmt.subject.shape:
-        assert isinstance(elem.expr, irast.Pointer)
         if elem.expr.ptrref.shortname.name == 'id':
             return elem.span is not None
     return False
@@ -656,7 +655,6 @@ def _compile_inheritance_conflict_selects(
 
     shape_ptrs = set()
     for elem, op in stmt.subject.shape:
-        assert isinstance(elem.expr, irast.Pointer)
         if op != qlast.ShapeOp.MATERIALIZE:
             shape_ptrs.add(elem.expr.ptrref.shortname.name)
 
@@ -708,7 +706,7 @@ def _compile_inheritance_conflict_selects(
             constrs=p,
             obj_constrs=o,
             span=stmt.span, ctx=ctx)
-        if isinstance(select_ir, irast.EmptySet):
+        if isinstance(select_ir.expr, irast.EmptySet):
             continue
         cnstr_ref = irast.ConstraintRef(id=cnstr.id)
         clauses.append(
