@@ -138,20 +138,20 @@ def get_schema_type(
     label: Optional[str] = None,
     condition: Optional[Callable[[s_obj.Object], bool]] = None,
     item_type: Optional[Type[s_obj.Object]] = None,
-    srcctx: Optional[parsing.Span] = None,
+    span: Optional[parsing.Span] = None,
 ) -> s_types.Type:
     if item_type is None:
         item_type = s_types.Type
     obj = get_schema_object(name, module, item_type=item_type,
                             condition=condition, label=label,
-                            ctx=ctx, span=srcctx)
+                            ctx=ctx, span=span)
     assert isinstance(obj, s_types.Type)
     return obj
 
 
 def resolve_schema_name(
-        name: str, module: str, *,
-        ctx: context.ContextLevel) -> Optional[sn.QualName]:
+    name: str, module: str, *, ctx: context.ContextLevel
+) -> Optional[sn.QualName]:
     schema_module = ctx.modaliases.get(module)
     if schema_module is None:
         return None
@@ -505,10 +505,7 @@ class TypeIntersectionResult(NamedTuple):
 
 
 def apply_intersection(
-    left: s_types.Type,
-    right: s_types.Type,
-    *,
-    ctx: context.ContextLevel
+    left: s_types.Type, right: s_types.Type, *, ctx: context.ContextLevel
 ) -> TypeIntersectionResult:
     """Compute an intersection of two types: *left* and *right*.
 

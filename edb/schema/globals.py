@@ -148,26 +148,26 @@ class GlobalCommand(
         glob_name = self.get_verbosename()
 
         if spec_required and not required:
-            srcctx = self.get_attribute_span('target')
+            span = self.get_attribute_span('target')
             raise errors.SchemaDefinitionError(
                 f'possibly an empty set returned by an '
                 f'expression for the computed '
                 f'{glob_name} '
                 f"explicitly declared as 'required'",
-                span=srcctx
+                span=span
             )
 
         if (
             spec_card is qltypes.SchemaCardinality.One
             and card is not qltypes.SchemaCardinality.One
         ):
-            srcctx = self.get_attribute_span('target')
+            span = self.get_attribute_span('target')
             raise errors.SchemaDefinitionError(
                 f'possibly more than one element returned by an '
                 f'expression for the computed '
                 f'{glob_name} '
                 f"explicitly declared as 'single'",
-                span=srcctx
+                span=span
             )
 
         if spec_card is None:
@@ -597,7 +597,8 @@ class SetGlobalType(
             )
 
     def record_diff_annotations(
-        self, *,
+        self,
+        *,
         schema: s_schema.Schema,
         orig_schema: Optional[s_schema.Schema],
         context: so.ComparisonContext,

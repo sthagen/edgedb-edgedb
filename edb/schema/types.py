@@ -1021,7 +1021,8 @@ class Collection(Type, s_abc.Collection):
         return True
 
     def get_common_parent_type_distance(
-            self, other: Type, schema: s_schema.Schema) -> int:
+        self, other: Type, schema: s_schema.Schema
+    ) -> int:
         if other.is_any(schema):
             return 1
 
@@ -1088,9 +1089,7 @@ class Collection(Type, s_abc.Collection):
         return ()
 
     @classmethod
-    def get_class(
-        cls, schema_name: str
-    ) -> typing.Type[Collection]:
+    def get_class(cls, schema_name: str) -> typing.Type[Collection]:
         coll_type = _collection_impls.get(schema_name)
         if coll_type:
             return coll_type
@@ -3417,14 +3416,14 @@ def materialize_type_in_attribute(
     if type_ref is None:
         return schema
 
-    srcctx = cmd.get_attribute_span('target')
+    span = cmd.get_attribute_span('target')
 
     if isinstance(type_ref, TypeExprShell):
         cc_cmd = ensure_schema_type_expr_type(
             schema,
             type_ref,
             parent_cmd=cmd,
-            span=srcctx,
+            span=span,
             context=context,
         )
         if cc_cmd is not None:
@@ -3453,11 +3452,11 @@ def materialize_type_in_attribute(
                     modaliases=context.modaliases,
                     schema=schema,
                     item_type=Type,
-                    span=srcctx,
+                    span=span,
                 )
             raise
         except errors.InvalidPropertyDefinitionError as e:
-            e.set_span(srcctx)
+            e.set_span(span)
             raise
     elif not isinstance(type_ref, Type):
         raise AssertionError(
