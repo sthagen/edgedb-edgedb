@@ -11868,6 +11868,112 @@ type default::Foo {
                     EXTENDING enum<Green>;
             ''')
 
+    async def test_edgeql_ddl_enum_06(self):
+        await self.con.execute(
+            "CREATE SCALAR TYPE default::LongLabel EXTENDING enum<\n"
+            "    AAAAAAAAAA"
+                "BBBBBBBBBB"
+                "CCCCCCCCCC"
+                "DDDDDDDDDD"
+                "EEEEEEEEEE"
+                "FFFFFFFFFF"
+                "GGG\n"
+            ">"
+        )
+
+    async def test_edgeql_ddl_enum_07(self):
+        await self.con.execute(
+            "CREATE SCALAR TYPE default::LongLabel EXTENDING enum<\n"
+            "    'AAAAAAAAAA"
+                "BBBBBBBBBB"
+                "CCCCCCCCCC"
+                "DDDDDDDDDD"
+                "EEEEEEEEEE"
+                "FFFFFFFFFF"
+                "GGG'\n"
+            ">"
+        )
+
+    async def test_edgeql_ddl_enum_08(self):
+        with self.assertRaisesRegex(
+            edgedb.SchemaDefinitionError,
+            r'enum labels cannot exceed 63 characters'
+        ):
+            await self.con.execute(
+                "CREATE SCALAR TYPE default::LongLabel EXTENDING enum<\n"
+                "    AAAAAAAAAA"
+                    "BBBBBBBBBB"
+                    "CCCCCCCCCC"
+                    "DDDDDDDDDD"
+                    "EEEEEEEEEE"
+                    "FFFFFFFFFF"
+                    "GGGG\n"
+                ">"
+            )
+
+    async def test_edgeql_ddl_enum_09(self):
+        with self.assertRaisesRegex(
+            edgedb.SchemaDefinitionError,
+            r'enum labels cannot exceed 63 characters'
+        ):
+            await self.con.execute(
+                "CREATE SCALAR TYPE default::LongLabel EXTENDING enum<\n"
+                "    'AAAAAAAAAA"
+                    "BBBBBBBBBB"
+                    "CCCCCCCCCC"
+                    "DDDDDDDDDD"
+                    "EEEEEEEEEE"
+                    "FFFFFFFFFF"
+                    "GGGG'\n"
+                ">"
+            )
+
+    async def test_edgeql_ddl_enum_10(self):
+        await self.con.execute(
+            "CREATE SCALAR TYPE default::LongLabel EXTENDING enum<\n"
+            "    AAAAAAAAAA\n"
+            ">"
+        )
+
+        with self.assertRaisesRegex(
+            edgedb.SchemaDefinitionError,
+            r'enum labels cannot exceed 63 characters'
+        ):
+            await self.con.execute(
+                "ALTER SCALAR TYPE default::LongLabel EXTENDING enum<\n"
+                "    AAAAAAAAAA"
+                    "BBBBBBBBBB"
+                    "CCCCCCCCCC"
+                    "DDDDDDDDDD"
+                    "EEEEEEEEEE"
+                    "FFFFFFFFFF"
+                    "GGGG\n"
+                ">"
+            )
+
+    async def test_edgeql_ddl_enum_11(self):
+        await self.con.execute(
+            "CREATE SCALAR TYPE default::LongLabel EXTENDING enum<\n"
+            "    'AAAAAAAAAA'\n"
+            ">"
+        )
+
+        with self.assertRaisesRegex(
+            edgedb.SchemaDefinitionError,
+            r'enum labels cannot exceed 63 characters'
+        ):
+            await self.con.execute(
+                "ALTER SCALAR TYPE default::LongLabel EXTENDING enum<\n"
+                "    'AAAAAAAAAA"
+                    "BBBBBBBBBB"
+                    "CCCCCCCCCC"
+                    "DDDDDDDDDD"
+                    "EEEEEEEEEE"
+                    "FFFFFFFFFF"
+                    "GGGG'\n"
+                ">"
+            )
+
     async def test_edgeql_ddl_explicit_id(self):
         await self.con.execute('''
             CREATE TYPE ExID {
@@ -12839,6 +12945,130 @@ type default::Foo {
             await self.con.execute('''
                 drop abstract index test;
             ''')
+
+    async def test_edgeql_ddl_deferred_index_01(self):
+        with self.assertRaisesRegex(
+            edgedb.SchemaDefinitionError,
+            r"cannot be declared as deferred",
+            _line=8, _col=21
+        ):
+            await self.con.execute('''
+                create abstract index test() {
+                    set code := ' ((__col__) NULLS FIRST)';
+                };
+
+                create type Foo {
+                    create property bar -> str;
+                    create deferred index test on (.bar);
+                };
+            ''')
+
+    async def test_edgeql_ddl_deferred_index_02(self):
+        with self.assertRaisesRegex(
+            edgedb.SchemaDefinitionError,
+            r"must be declared as deferred",
+        ):
+            await self.con.execute('''
+                create abstract index test() {
+                    set code := ' ((__col__) NULLS FIRST)';
+                    set deferrability := 'Required';
+                };
+
+                create type Foo {
+                    create property bar -> str;
+                    create index test on (.bar);
+                };
+            ''')
+
+    async def test_edgeql_ddl_deferred_index_03(self):
+        with self.assertRaisesRegex(
+            edgedb.SchemaDefinitionError,
+            r"cannot be declared as deferred",
+            _line=12,
+            _col=59,
+        ):
+            await self.con.execute('''
+                create abstract index test() {
+                    set code := ' ((__col__) NULLS FIRST)';
+                    set deferrability := 'Prohibited';
+                };
+
+                create type Foo {
+                    create property bar -> str;
+                    create index test on (.bar);
+                };
+
+                alter type Foo alter index test on (.bar) set deferred;
+            ''')
+
+    async def test_edgeql_ddl_deferred_index_04(self):
+        with self.assertRaisesRegex(
+            edgedb.SchemaDefinitionError,
+            r"must be declared as deferred",
+            _line=12,
+            _col=59,
+        ):
+            await self.con.execute('''
+                create abstract index test() {
+                    set code := ' ((__col__) NULLS FIRST)';
+                    set deferrability := 'Required';
+                };
+
+                create type Foo {
+                    create property bar -> str;
+                    create deferred index test on (.bar);
+                };
+
+                alter type Foo alter index test on (.bar) drop deferred;
+            ''')
+
+    async def test_edgeql_ddl_deferred_index_05(self):
+        with self.assertRaisesRegex(
+            edgedb.SchemaDefinitionError,
+            r"deferrability can only be specified on abstract indexes",
+            _line=5,
+            _col=25,
+        ):
+            await self.con.execute('''
+                create type Foo {
+                    create property bar -> str;
+                    create index on (.bar) {
+                        set deferrability := 'Permitted';
+                    };
+                };
+            ''')
+
+    async def test_edgeql_ddl_deferred_index_06(self):
+        await self.con.execute('''
+            create abstract index test() {
+                set code := ' ((__col__) NULLS FIRST)';
+                set deferrability := 'Permitted';
+            };
+
+            create type Foo {
+                create property bar -> str;
+                create deferred index test on (.bar);
+            };
+        ''')
+
+        await self.assert_query_result(
+            '''
+            SELECT schema::ObjectType {
+                name,
+                indexes: {
+                    deferred,
+                    deferrability,
+                }
+            } FILTER .name = 'default::Foo'
+            ''',
+            [{
+                'name': 'default::Foo',
+                'indexes': [{
+                    'deferred': True,
+                    'deferrability': 'Permitted',
+                }]
+            }]
+        )
 
     async def test_edgeql_ddl_errors_01(self):
         await self.con.execute('''
