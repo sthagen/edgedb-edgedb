@@ -1036,6 +1036,25 @@ class TestSchema(tb.BaseSchemaLoadTest):
             };
        """
 
+    def test_schema_hard_sorting_05(self):
+        """
+            type T {
+                multi as: A;
+                multi bs: B;
+                sections := (
+                    select (.as union .bs)
+                    filter .index > 0
+                );
+            }
+
+            abstract type I {
+                required index: int16;
+            }
+
+            type A extending I;
+            type B extending I;
+       """
+
     def test_schema_refs_01(self):
         schema = self.load_schema("""
             type Object1;
@@ -2479,6 +2498,94 @@ class TestSchema(tb.BaseSchemaLoadTest):
             "GGGG'\n"
         ">"
     )
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        'set returning operator std::DISTINCT is not supported '
+        'in singleton expressions',
+    )
+    def test_schema_constraint_non_singleton_01(self):
+        """
+        type ConstraintNonSingletonTest {
+            property has_bad_constraint -> str {
+                constraint expression on (
+                    distinct __subject__ = __subject__
+                )
+            }
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        'set returning operator std::DISTINCT is not supported '
+        'in singleton expressions',
+    )
+    def test_schema_constraint_non_singleton_02(self):
+        """
+        type ConstraintNonSingletonTest {
+            property has_bad_constraint -> str {
+                constraint exclusive on (
+                    distinct __subject__
+                )
+            }
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        'set returning operator std::DISTINCT is not supported '
+        'in singleton expressions',
+    )
+    def test_schema_constraint_non_singleton_03(self):
+        """
+        type ConstraintNonSingletonTest {
+            property has_bad_constraint -> str;
+
+            constraint exclusive on (distinct .has_bad_constraint);
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        'set returning operator std::DISTINCT is not supported '
+        'in singleton expressions',
+    )
+    def test_schema_constraint_non_singleton_04(self):
+        """
+        type ConstraintNonSingletonTest {
+            property has_bad_constraint -> str;
+
+            constraint exclusive on (.has_bad_constraint) except (
+                distinct __subject__ = __subject__
+            );
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        'set returning operator std::DISTINCT is not supported '
+        'in singleton expressions',
+    )
+    def test_schema_constraint_non_singleton_05(self):
+        """
+        abstract constraint bad_constraint {
+            using (distinct __subject__ = __subject__);
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        'set returning operator std::DISTINCT is not supported '
+        'in singleton expressions',
+    )
+    def test_schema_index_non_singleton_01(self):
+        """
+        type IndexNonSingletonTest {
+            property has_bad_index -> str;
+
+            index on (distinct .has_bad_index)
+        }
+        """
 
 
 class TestGetMigration(tb.BaseSchemaLoadTest):
