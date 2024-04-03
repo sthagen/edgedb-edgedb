@@ -510,6 +510,17 @@ class TestEdgeQLGroup(tb.QueryTestCase):
             ]
         )
 
+    async def test_edgeql_group_duplicate_rejected(self):
+        async with self.assertRaisesRegexTx(
+            edgedb.QueryError,
+            "used directly in the BY clause",
+        ):
+            await self.con.execute('''
+                group Card { name }
+                using element := .cost
+                by cube(.element, element)
+            ''')
+
     async def test_edgeql_group_for_01(self):
         await self.assert_query_result(
             r'''
@@ -947,18 +958,6 @@ class TestEdgeQLGroup(tb.QueryTestCase):
                 }
             ])
         )
-
-    async def test_edgeql_group_agg_with_free_ref_01(self):
-        out = await self.con.query(r'''
-            with module cards
-            select (group Card by .element) {
-                id, els := array_agg((.id, .elements.name))
-            };
-        ''')
-
-        for obj in out:
-            for el in obj.els:
-                self.assertEqual(obj.id, el[0])
 
     async def test_edgeql_group_agg_multi_01(self):
         await self.assert_query_result(
@@ -1568,12 +1567,6 @@ class TestEdgeQLGroup(tb.QueryTestCase):
             always_typenames=True,
         )
 
-    @test.xfail("""
-        Issue #4897
-
-        The link isn't having a view put on it, it's going out raw as
-        just a uuid.
-    """)
     async def test_edgeql_group_issue_4897(self):
         await self.assert_query_result(
             '''
