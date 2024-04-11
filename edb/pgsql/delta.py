@@ -3585,7 +3585,9 @@ def get_reindex_sql(
     "Generate SQL statement that repopulates the index after a restore."
     "Currently this only applies to FTS indexes."
 
-    (fts_index, _) = s_indexes.get_effective_fts_index(obj, schema)
+    (fts_index, _) = s_indexes.get_effective_object_index(
+        schema, obj, sn.QualName("fts", "index")
+    )
     if fts_index:
         options = get_index_compile_options(fts_index, schema, {}, None)
         cmd = deltafts.update_fts_document(fts_index, options, schema)
@@ -3644,25 +3646,8 @@ class CreateIndex(IndexCommand, adapts=s_indexes.CreateIndex):
             root_code = root.get_code(schema)
 
             kwargs = index.get_concrete_kwargs(schema)
-            # Get all the concrete kwargs compiled (they are expected to be
-            # constants)
-            # These are expected to be constants, so we don't have anchors,
-            # path prefixes, etc.
-            kw_options = qlcompiler.CompilerOptions(
-                modaliases=context.modaliases,
-                schema_object_context=cls.get_schema_metaclass(),
-                apply_query_rewrites=False,
-            )
             for name, expr in kwargs.items():
-                # XXX: origin messes up compilation, but by this point we
-                # shouldn't care about the expression's origin.
-                expr.origin = None
-                kw_expr = expr.ensure_compiled(
-                    schema=schema,
-                    options=kw_options,
-                    as_fragment=True,
-                )
-                kw_ir = kw_expr.irast
+                kw_ir = expr.assert_compiled().irast
                 kw_sql_res = compiler.compile_ir_to_sql_tree(
                     kw_ir.expr, singleton_mode=True)
                 kw_sql_tree = kw_sql_res.ast
@@ -3737,8 +3722,14 @@ class CreateIndex(IndexCommand, adapts=s_indexes.CreateIndex):
         with errors.ensure_span(self.span):
             self.pgops.add(self.create_index(index, schema, context))
 
+        # XXX: the below hardcode should be replaced by an index scope
+        #      field instead.
         # FTS
-        if index.has_base_with_name(schema, sn.QualName('fts', 'index')):
+        object_scoped_indexes = (
+            sn.QualName('fts', 'index'),
+        )
+        # FTS
+        if index.has_base_with_name(schema, object_scoped_indexes):
             # update inhviews
 
             subject = index.get_subject(schema)
