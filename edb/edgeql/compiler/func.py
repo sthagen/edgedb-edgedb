@@ -960,6 +960,88 @@ def finalize_args(
     return args
 
 
+@_special_case('ext::ai::search')
+def compile_ext_ai_search(
+    call: irast.FunctionCall, *, ctx: context.ContextLevel
+) -> irast.Expr:
+    indexes = _validate_object_search_call(
+        call,
+        context="ext::ai::search()",
+        object_arg=call.args[0],
+        index_name=sn.QualName("ext::ai", "index"),
+        ctx=ctx,
+    )
+
+    schema = ctx.env.schema
+
+    index_metadata = {}
+    for typeref, index in indexes.items():
+        dimensions = index.must_get_json_annotation(
+            schema,
+            sn.QualName("ext::ai", "embedding_dimensions"),
+            int,
+        )
+        kwargs = index.get_concrete_kwargs(schema)
+        df_expr = kwargs.get("distance_function")
+        if df_expr is not None:
+            df = df_expr.ensure_compiled(
+                schema,
+                as_fragment=True,
+            ).as_python_value()
+        else:
+            df = "Cosine"
+
+        match df:
+            case "Cosine":
+                distance_fname = "cosine_distance"
+            case "InnerProduct":
+                distance_fname = "neg_inner_product"
+            case "L2":
+                distance_fname = "euclidean_distance"
+            case _:
+                raise RuntimeError(f"unsupported distance_function: {df}")
+
+        distance_func = schema.get_functions(
+            sn.QualName("ext::pgvector", distance_fname),
+        )[0]
+
+        index_metadata[typeref] = {
+            "id": index.id,
+            "dimensions": dimensions,
+            "distance_function": (
+                distance_func.get_shortname(schema),
+                distance_func.get_backend_name(schema),
+            ),
+        }
+    call.extras = {"index_metadata": index_metadata}
+
+    return call
+
+
+@_special_case('ext::ai::to_context')
+def compile_ext_ai_to_str(
+    call: irast.FunctionCall, *, ctx: context.ContextLevel
+) -> irast.Expr:
+    indexes = _validate_object_search_call(
+        call,
+        context="ext::ai::to_context()",
+        object_arg=call.args[0],
+        index_name=sn.QualName("ext::ai", "index"),
+        ctx=ctx,
+    )
+
+    index = next(iter(indexes.values()))
+    index_expr = index.get_expr(ctx.env.schema)
+    assert index_expr is not None
+
+    with ctx.detached() as subctx:
+        subctx.partial_path_prefix = call.args[0].expr
+        subctx.anchors["__subject__"] = call.args[0].expr
+        call.body = dispatch.compile(index_expr.qlast, ctx=subctx)
+
+    return call
+
+
 @_special_case('fts::search')
 def compile_fts_search(
     call: irast.FunctionCall, *, ctx: context.ContextLevel
