@@ -248,9 +248,9 @@ def compile_constraint(
     )
 
     final_expr: Optional[s_expr.Expression] = constraint.get_finalexpr(schema)
-    assert final_expr is not None and final_expr.qlast is not None
+    assert final_expr is not None and final_expr.parse() is not None
     ir = qlcompiler.compile_ast_to_ir(
-        final_expr.qlast,
+        final_expr.parse(),
         schema,
         options=options,
     )
@@ -261,7 +261,7 @@ def compile_constraint(
     if except_expr := constraint.get_except_expr(schema):
         assert isinstance(except_expr, s_expr.Expression)
         except_ir = qlcompiler.compile_ast_to_ir(
-            except_expr.qlast,
+            except_expr.parse(),
             schema,
             options=options,
         )
@@ -329,9 +329,9 @@ def compile_constraint(
         )
 
         final_expr = constraint_origin.get_finalexpr(schema)
-        assert final_expr is not None and final_expr.qlast is not None
+        assert final_expr is not None and final_expr.parse() is not None
         origin_ir = qlcompiler.compile_ast_to_ir(
-            final_expr.qlast,
+            final_expr.parse(),
             schema,
             options=origin_options,
         )
@@ -357,7 +357,7 @@ def compile_constraint(
         if except_expr := constraint_origin.get_except_expr(schema):
             assert isinstance(except_expr, s_expr.Expression)
             except_ir = qlcompiler.compile_ast_to_ir(
-                except_expr.qlast,
+                except_expr.parse(),
                 schema,
                 options=origin_options,
             )
@@ -722,11 +722,11 @@ def get_ref_storage_info(
                 src = src.get_bases(schema).first(schema)
         elif ptr.is_tuple_indirection():
             assert rptr
-            refs.append(rptr.source)
+            refs.append(rptr.source)  # noqa: B909
             continue
         elif ptr.is_type_intersection():
             assert rptr
-            refs.append(rptr.source)
+            refs.append(rptr.source)  # noqa: B909
             continue
         else:
             schema, src = irtyputils.ir_typeref_to_type(schema, source_typeref)

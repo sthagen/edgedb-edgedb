@@ -206,6 +206,21 @@ class TestSchema(tb.BaseSchemaLoadTest):
             }
         """
 
+    @tb.must_fail(errors.SchemaError,
+                  "cannot redefine property 'name' of object type "
+                  "'test::UniqueName_2' as scalar type 'std::bytes'",
+                  position=196)
+    def test_schema_overloaded_prop_11(self):
+        """
+            type UniqueName {
+                property name -> str;
+            };
+
+            type UniqueName_2 extending UniqueName {
+                overloaded property name -> bytes;
+            };
+        """
+
     @tb.must_fail(errors.SchemaDefinitionError,
                   "it is illegal for the computed link 'foo' "
                   "of object type 'test::UniqueName_2' to overload "
@@ -2001,7 +2016,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
 
         obj = schema.get('test::Foo')
         asdf = obj.getptr(schema, s_name.UnqualName('asdf'))
-        expr_ast = asdf.get_expr(schema).qlast
+        expr_ast = asdf.get_expr(schema).parse()
         self.assertEqual(
             expr_ast.span.name,
             f'<{asdf.id} expr>'
@@ -2013,7 +2028,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
             }
         """)
         x = obj.getptr(schema, s_name.UnqualName('x'))
-        default_ast = x.get_default(schema).qlast
+        default_ast = x.get_default(schema).parse()
         self.assertEqual(
             default_ast.span.name,
             f'<{x.id} default>'
