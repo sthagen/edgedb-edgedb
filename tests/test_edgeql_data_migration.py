@@ -12416,6 +12416,215 @@ class EdgeQLAIMigrationTestCase(EdgeQLDataMigrationTestCase):
             };
         ''', explicit_modules=True)
 
+    async def test_edgeql_migration_ai_07a(self):
+        await self.migrate('''
+            using extension ai;
+
+            module default {
+                type Astronomy {
+                    content: str;
+                    deferred index ext::ai::index(
+                        embedding_model := 'text-embedding-3-small'
+                    ) on (.content);
+                };
+
+                type Sub extending Astronomy {
+                    deferred index ext::ai::index(
+                        embedding_model := 'text-embedding-3-small'
+                    ) on (.content);
+                };
+
+            };
+        ''', explicit_modules=True)
+
+        await self.migrate('''
+            using extension ai;
+        ''', explicit_modules=True)
+
+    async def test_edgeql_migration_ai_07b(self):
+        await self.migrate('''
+            using extension ai;
+
+            module default {
+                type Astronomy {
+                    content: str;
+                    deferred index ext::ai::index(
+                        embedding_model := 'text-embedding-3-small'
+                    ) on (.content);
+                };
+
+                type Sub extending Astronomy;
+
+            };
+        ''', explicit_modules=True)
+
+        await self.migrate('''
+            using extension ai;
+        ''', explicit_modules=True)
+
+    async def test_edgeql_migration_ai_07c(self):
+        await self.migrate('''
+            using extension ai;
+
+            module default {
+                type Astronomy {
+                    content: str;
+                    deferred index ext::ai::index(
+                        embedding_model := 'text-embedding-3-small'
+                    ) on (.content);
+                };
+
+                type Sub extending Astronomy {
+                };
+
+            };
+        ''', explicit_modules=True)
+
+        await self.migrate('''
+            using extension ai;
+
+            module default {
+                type Astronomy {
+                    content: str;
+                    deferred index ext::ai::index(
+                        embedding_model := 'text-embedding-3-small'
+                    ) on (.content);
+                };
+
+                type Sub extending Astronomy {
+                    deferred index ext::ai::index(
+                        embedding_model := 'text-embedding-3-small'
+                    ) on (.content);
+                };
+
+            };
+        ''', explicit_modules=True)
+
+        await self.migrate('''
+            using extension ai;
+
+            module default {
+                type Astronomy {
+                    content: str;
+                    deferred index ext::ai::index(
+                        embedding_model := 'text-embedding-3-small'
+                    ) on (.content);
+                };
+
+                type Sub extending Astronomy {
+                };
+
+            };
+        ''', explicit_modules=True)
+
+        await self.migrate('''
+            using extension ai;
+        ''', explicit_modules=True)
+
+    async def test_edgeql_migration_ai_08(self):
+        await self.migrate('''
+            using extension ai;
+
+            module default {
+                type Base {
+                    content: str;
+                    deferred index ext::ai::index(
+                        embedding_model := 'text-embedding-3-small'
+                    ) on (.content);
+                };
+
+                type Sub extending Base {
+                    # deferred index ext::ai::index(
+                    #     embedding_model := 'text-embedding-3-small'
+                    # ) on (.content ++ '!');
+                };
+
+            };
+        ''', explicit_modules=True)
+
+        await self.con.query('''
+            select {
+                base := ext::ai::search(Base, <array<float32>>[1]),
+                sub := ext::ai::search(Sub, <array<float32>>[1]),
+            }
+        ''')
+
+        await self.migrate('''
+            using extension ai;
+
+            module default {
+                type Base {
+                    content: str;
+                    deferred index ext::ai::index(
+                        embedding_model := 'text-embedding-3-small'
+                    ) on (.content);
+                };
+
+                type Sub extending Base {
+                    deferred index ext::ai::index(
+                        embedding_model := 'text-embedding-3-small'
+                    ) on (.content ++ '!');
+                };
+
+            };
+        ''', explicit_modules=True)
+
+        await self.con.query('''
+            select {
+                base := ext::ai::search(Base, <array<float32>>[1]),
+                sub := ext::ai::search(Sub, <array<float32>>[1]),
+            }
+        ''')
+
+        await self.migrate('''
+            using extension ai;
+
+            module default {
+                type Base {
+                    content: str;
+                };
+
+                type Sub extending Base {
+                    deferred index ext::ai::index(
+                        embedding_model := 'text-embedding-3-small'
+                    ) on (.content ++ '!');
+                };
+
+            };
+        ''', explicit_modules=True)
+
+        # Base lost the index, just select Sub
+        await self.con.query('''
+            select {
+                sub := ext::ai::search(Sub, <array<float32>>[1]),
+            }
+        ''')
+
+    async def test_edgeql_migration_ai_09(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidDefinitionError,
+            r"with different parameters than on base type",
+        ):
+            await self.migrate('''
+                using extension ai;
+
+                module default {
+                    type Base {
+                        content: str;
+                        deferred index ext::ai::index(
+                            embedding_model := 'text-embedding-3-small'
+                        ) on (.content);
+                    };
+
+                    type Sub extending Base {
+                        deferred index ext::ai::index(
+                            embedding_model := 'text-embedding-3-large'
+                        ) on (.content ++ '!');
+                    };
+
+                };
+            ''', explicit_modules=True)
+
 
 class EdgeQLMigrationRewriteTestCase(EdgeQLDataMigrationTestCase):
     DEFAULT_MODULE = 'default'

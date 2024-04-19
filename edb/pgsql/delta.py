@@ -7540,8 +7540,7 @@ class CreateExtension(ExtensionCommand, adapts=s_exts.CreateExtension):
         if str(self.classname) == "ai":
             self.pgops.add(
                 delta_ext_ai.pg_rebuild_all_pending_embeddings_views(
-                    schema,
-                    context,
+                    schema, context
                 ),
             )
 

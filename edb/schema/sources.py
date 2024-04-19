@@ -172,10 +172,6 @@ class Source(
         Returns a list of columns that are present in the backing table of
         this source, apart from the columns for pointers.
         """
-        # Beware: when adding columns here, make sure to update SQL
-        # introspection views. If you do not, these new addon columns will
-        # appear in pg_attribute and information_schema.column, but will not
-        # be queryable.
         res = []
         from edb.common import debug
 
@@ -200,7 +196,7 @@ class Source(
             schema, self, sn.QualName("ext::ai", "index")
         )
         if ext_ai_index:
-            root_idx_id = ext_ai_index.get_topmost_concrete_base(schema).id.hex
+            idx_id = indexes.get_ai_index_id(schema, ext_ai_index)
             dimensions = ext_ai_index.must_get_json_annotation(
                 schema,
                 sn.QualName(
@@ -209,9 +205,8 @@ class Source(
             )
             res.append(
                 (
-                    f'__ext_ai_{root_idx_id}_embedding__',
-                    f'__ext_ai_{root_idx_id}_embedding__',
-
+                    f'__ext_ai_{idx_id}_embedding__',
+                    f'__ext_ai_{idx_id}_embedding__',
                     (
                         'edgedb',
                         f'vector({dimensions})',
