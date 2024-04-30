@@ -528,6 +528,7 @@ class SchemaTableConstraint:
             except_data=pg_c.except_data,
             scope=pg_c.scope,
             type=pg_c.type,
+            table_type=pg_c.table_type,
             schema=constr.schema,
         )
 
@@ -665,6 +666,8 @@ def ptr_default_to_col_default(schema, ptr, expr):
         return None
 
     if not ir_utils.is_const(ir):
+        return None
+    if ast.find_children(ir, irast.TupleIndirectionPointer):
         return None
 
     try:
