@@ -58,6 +58,8 @@ from . import dbview
 from . import defines
 from . import metrics
 from . import pgcon
+from . import compiler as edbcompiler
+
 from .ha import adaptive as adaptive_ha
 from .ha import base as ha_base
 from .pgcon import errors as pgcon_errors
@@ -393,6 +395,12 @@ class Tenant(ha_base.ClusterProtocol):
         default_sysconfig = await self._load_sys_config("sysconfig_default")
         await self._load_reported_config()
 
+        # To make in-place upgrade failures more testable, check
+        # 'force_database_error' with a 'startup' scope.
+        force_error = self._server.config_lookup(
+            'force_database_error', sys_config)
+        edbcompiler.maybe_force_database_error(force_error, scope='startup')
+
         self._dbindex = dbview.DatabaseIndex(
             self,
             std_schema=self._server.get_std_schema(),
@@ -418,7 +426,7 @@ class Tenant(ha_base.ClusterProtocol):
     def start_watching_files(self):
         if self._readiness_state_file is not None:
 
-            def reload_state_file(_file_modified, _event):
+            def reload_state_file():
                 self.reload_readiness_state()
 
             self._file_watch_finalizers.append(
@@ -429,7 +437,7 @@ class Tenant(ha_base.ClusterProtocol):
 
         if self._jwt_sub_allowlist_file is not None:
 
-            def reload_jwt_sub_allowlist_file(_file_modified, _event):
+            def reload_jwt_sub_allowlist_file():
                 self.load_jwt_sub_allowlist()
 
             self._file_watch_finalizers.append(
@@ -440,7 +448,7 @@ class Tenant(ha_base.ClusterProtocol):
 
         if self._jwt_revocation_list_file is not None:
 
-            def reload_jwt_revocation_list_file(_file_modified, _event):
+            def reload_jwt_revocation_list_file():
                 self.load_jwt_revocation_list()
 
             self._file_watch_finalizers.append(
