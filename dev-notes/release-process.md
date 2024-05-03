@@ -20,15 +20,15 @@ Before the major version, we publish "testing releases":
 ## edgedb-ui
 
 On release branches, `edgedb-ui` should be pinned to the associated branch.
-This can be done is `setup.py` with variable `EDGEDBGUI_COMMIT`.
+This can be done in `setup.py` with the variable `EDGEDBGUI_COMMIT`.
 For example, on branch `release/4.x`, it is pinned to `edgedb-ui`'s branch `4.x`.
 This means any release off `release/4.x` will contain latest commits from
 `edgedb-ui`'s branch `4.x`.
 
 ## Preparing commits for a release
 
-For each major release `N`, we have two labels: `to-backport-N.x` and
-`backported-N.x`. PRs that need to be backported should be tagged with
+For each major release `N`, we have two GitHub labels: `to-backport-N.x` and
+`backported-N.x`. PRs that need to be backported should be labelled with
 `to-backport-N.x` for each of the target versions.
 
 Once a PR is backported, `to-backport-N.x` should be removed and
@@ -38,10 +38,10 @@ Tracking both states makes it easy to tell what needs to be backported
 and what has been backported.
 
 (Historical note: previously we had simply a `backport-N.x` label.
-This made it easy to ensure that everything that got tagged with
+This made it easy to ensure that everything that got labelled with
 `backport` actually got backported, but there was not an at-a-glance
 way to see if something *had* been backported. Even looking at the
-issue didn't always tell you, since sometimes we tagged things as
+issue didn't always tell you, since sometimes we labelled things as
 `backport` and then thought better of it.)
 
 ### Technical helpers
@@ -69,7 +69,7 @@ function cp-pr {
 
 
 ### What to backport?
-Sometimes, people will forget to tag the PR to be back-ported, so a good
+Sometimes, people will forget to label the PR to be back-ported, so a good
 practice is to list all commits since the last release:
 
 ```
@@ -78,7 +78,7 @@ git log master # find the hash of that commit on master
 git log hash_of_that_commit..master > ../to-backport.txt
 ```
 
-Now, one can go trough the list and see if the commits are worth back-porting.
+Now, one can go through the list and see if the commits are worth back-porting.
 A few pointers:
 
 - Don't backport new features, unless it is high-priority for some reason.
@@ -140,7 +140,7 @@ branch, so best course of action if to open a PR to master after kicking off
 the release pipeline. After that PR is merged, the website needs to be
 deployed, for changelog to land on the website (ping dev rel team).
 
-A helper script to generate changelog:
+A helper function to generate changelog is:
 
 ```python
 # I keep this in ../compose-changelog.py
