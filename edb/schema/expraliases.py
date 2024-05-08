@@ -100,6 +100,7 @@ class AliasLikeCommand(
     """
 
     TYPE_FIELD_NAME = ''
+    ALIAS_LIKE_EXPR_FIELDS: tuple[str, ...] = ()
 
     @classmethod
     def _get_alias_name(cls, type_name: sn.QualName) -> sn.QualName:
@@ -188,9 +189,9 @@ class AliasLikeCommand(
         field: so.Field[Any],
         value: Any,
     ) -> Optional[s_expr.Expression]:
-        if field.name == 'expr':
-            # XXX: this is imprecise
-            return s_expr.Expression(text='std::Object')
+        if field.name in self.ALIAS_LIKE_EXPR_FIELDS:
+            rt = self.get_type(self.scls, schema)
+            return s_types.type_dummy_expr(rt, schema)
         else:
             raise NotImplementedError(f'unhandled field {field.name!r}')
 
@@ -250,6 +251,7 @@ class AliasCommand(
     context_class=AliasCommandContext,
 ):
     TYPE_FIELD_NAME = 'type'
+    ALIAS_LIKE_EXPR_FIELDS = ('expr',)
 
     @classmethod
     def _get_alias_name(cls, type_name: sn.QualName) -> sn.QualName:
@@ -374,6 +376,12 @@ class AlterAliasLike(
         context: sd.CommandContext,
     ) -> s_schema.Schema:
         if not context.canonical:
+            schema = self._propagate_if_expr_refs(
+                schema,
+                context,
+                action=self.get_friendly_description(schema=schema),
+            )
+
             expr = self.get_attribute_value('expr')
             is_computable = self._is_computable(self.scls, schema)
             if expr:
@@ -414,12 +422,6 @@ class AlterAliasLike(
                             self.scls, schema, context, unset_type=False
                         )
                     )
-
-            schema = self._propagate_if_expr_refs(
-                schema,
-                context,
-                action=self.get_friendly_description(schema=schema),
-            )
 
         return super()._alter_begin(schema, context)
 
