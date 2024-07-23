@@ -12,6 +12,7 @@ use std::{
     pin::Pin,
     rc::Rc,
     task::{ready, Poll},
+    time::Duration,
 };
 use tracing::error;
 
@@ -135,9 +136,9 @@ impl<C: Connector> Conn<C> {
             ConnInner::Idle(_t, conn, ..) | ConnInner::Active(_t, conn, ..) => {
                 from.inc_all_time(MetricVariant::Disconnecting);
                 from.inc_all_time(MetricVariant::Closed);
-                to.insert(MetricVariant::Connecting);
+                to.insert(MetricVariant::Reconnecting);
                 let f = connector.reconnect(conn, db).boxed_local();
-                ConnInner::Connecting(Instant::now(), f)
+                ConnInner::Reconnecting(Instant::now(), f)
             }
             _ => unreachable!(),
         });
@@ -167,30 +168,38 @@ impl<C: Connector> Conn<C> {
         to: MetricVariant,
     ) -> Poll<ConnResult<()>> {
         let mut lock = self.inner.borrow_mut();
+        debug_assert!(
+            to == MetricVariant::Active || to == MetricVariant::Idle || to == MetricVariant::Closed
+        );
 
         let res = match &mut *lock {
             ConnInner::Idle(..) => Ok(()),
-            ConnInner::Connecting(t, f) => match ready!(f.poll_unpin(cx)) {
-                Ok(c) => {
-                    debug_assert!(to == MetricVariant::Active || to == MetricVariant::Idle);
-                    metrics.transition(MetricVariant::Connecting, to, t.elapsed());
-                    if to == MetricVariant::Active {
-                        *lock = ConnInner::Active(Instant::now(), c);
-                    } else {
-                        *lock = ConnInner::Idle(Instant::now(), c);
+            ConnInner::Connecting(t, f) | ConnInner::Reconnecting(t, f) => {
+                match ready!(f.poll_unpin(cx)) {
+                    Ok(c) => {
+                        let elapsed = t.elapsed();
+                        let from = (&std::mem::replace(&mut *lock, ConnInner::Transition)).into();
+                        metrics.transition(from, to, elapsed);
+                        if to == MetricVariant::Active {
+                            *lock = ConnInner::Active(Instant::now(), c);
+                        } else if to == MetricVariant::Idle {
+                            *lock = ConnInner::Idle(Instant::now(), c);
+                        } else {
+                            unreachable!()
+                        }
+                        Ok(())
                     }
-                    Ok(())
+                    Err(err) => {
+                        metrics.transition(
+                            MetricVariant::Connecting,
+                            MetricVariant::Failed,
+                            t.elapsed(),
+                        );
+                        *lock = ConnInner::Failed;
+                        Err(err)
+                    }
                 }
-                Err(err) => {
-                    metrics.transition(
-                        MetricVariant::Connecting,
-                        MetricVariant::Failed,
-                        t.elapsed(),
-                    );
-                    *lock = ConnInner::Failed;
-                    Err(err)
-                }
-            },
+            }
             ConnInner::Disconnecting(t, f) => match ready!(f.poll_unpin(cx)) {
                 Ok(_) => {
                     debug_assert_eq!(to, MetricVariant::Closed);
@@ -238,7 +247,8 @@ impl<C: Connector> Conn<C> {
             ConnInner::Active(t, _)
             | ConnInner::Idle(t, _)
             | ConnInner::Connecting(t, _)
-            | ConnInner::Disconnecting(t, _) => metrics.remove_time(self.variant(), t.elapsed()),
+            | ConnInner::Disconnecting(t, _)
+            | ConnInner::Reconnecting(t, _) => metrics.remove_time(self.variant(), t.elapsed()),
             other => metrics.remove(other.into()),
         }
     }
@@ -256,6 +266,8 @@ enum ConnInner<C: Connector> {
     Connecting(Instant, Pin<Box<dyn Future<Output = ConnResult<C::Conn>>>>),
     /// Disconnecting connections hold a spot in the pool as they count towards quotas
     Disconnecting(Instant, Pin<Box<dyn Future<Output = ConnResult<()>>>>),
+    /// Reconnecting hold a spot in the pool as they count towards quotas
+    Reconnecting(Instant, Pin<Box<dyn Future<Output = ConnResult<C::Conn>>>>),
     /// The connection is alive, but it is not being held.
     Idle(Instant, C::Conn),
     /// The connection is alive, and is being held.
@@ -274,6 +286,7 @@ impl<C: Connector> From<&ConnInner<C>> for MetricVariant {
         match val {
             ConnInner::Connecting(..) => MetricVariant::Connecting,
             ConnInner::Disconnecting(..) => MetricVariant::Disconnecting,
+            ConnInner::Reconnecting(..) => MetricVariant::Reconnecting,
             ConnInner::Idle(..) => MetricVariant::Idle,
             ConnInner::Active(..) => MetricVariant::Active,
             ConnInner::Failed => MetricVariant::Failed,
@@ -344,5 +357,101 @@ impl<C: Connector> Drop for ConnHandle<C> {
                 unreachable!("Impossible state: {:?}", MetricVariant::from(&inner));
             }
         });
+    }
+}
+
+/// Maintains a list of connections. Tries to provide idle connections for use
+/// in a MRU mode, and for release in a LRU mode where possible.
+#[derive(Debug)]
+pub struct Conns<C: Connector> {
+    conns: RefCell<Vec<Conn<C>>>,
+    youngest: Cell<Instant>,
+}
+
+impl<C: Connector> Default for Conns<C> {
+    fn default() -> Self {
+        Self {
+            conns: Default::default(),
+            youngest: Cell::new(Instant::now()),
+        }
+    }
+}
+
+impl<C: Connector> Conns<C> {
+    pub fn len(&self) -> usize {
+        self.conns.borrow().len()
+    }
+
+    pub fn youngest(&self) -> Duration {
+        self.youngest.get().elapsed()
+    }
+
+    pub fn walk(&self, mut f: impl FnMut(&Conn<C>)) {
+        for conn in self.conns.borrow().iter() {
+            f(conn)
+        }
+    }
+
+    /// Insert a new connection, in the MRU spot.
+    pub fn insert(&self, conn: Conn<C>) {
+        self.conns.borrow_mut().push(conn);
+        self.youngest.set(Instant::now());
+    }
+
+    /// Remove a specific connection from the list. This may break MRU ordering
+    /// for performance reasons.
+    pub fn remove(&self, conn: &Conn<C>) {
+        let lock = self.conns.borrow_mut();
+        let index = lock
+            .iter()
+            .position(|other| conn == other)
+            .expect("Connection unexpectedly could not be found");
+        {
+            let mut lock = lock;
+            lock.swap_remove(index)
+        };
+    }
+
+    /// Acquires the most-recently-used idle connection, moving it to the end of
+    /// the internal vector.
+    pub fn try_acquire_idle_mru(&self, metrics: &MetricsAccum) -> Option<Conn<C>> {
+        let mut lock = self.conns.borrow_mut();
+        let pos = lock
+            .iter()
+            .rev()
+            .position(|conn| conn.variant() == MetricVariant::Idle)?;
+        let last_item = lock.len() - 1;
+        let pos = last_item - pos;
+        lock.swap(last_item, pos);
+        let conn = lock[last_item].clone();
+        if !conn.try_lock(&metrics) {
+            panic!("Connection unexpectedly could not be locked")
+        }
+        Some(conn)
+    }
+
+    /// Gets the least-recently-used idle connection, does not re-order the
+    /// underlying list.
+    pub fn try_get_idle_lru(&self) -> Option<Conn<C>> {
+        for conn in self.conns.borrow().iter() {
+            if conn.variant() == MetricVariant::Idle {
+                return Some(conn.clone());
+            }
+        }
+        None
+    }
+
+    /// Takes the least-recently-used idle connection, does not re-order the
+    /// underlying list.
+    pub fn try_take_idle_lru(&self) -> Option<Conn<C>> {
+        let lock = self.conns.borrow_mut();
+        let pos = lock
+            .iter()
+            .position(|conn| conn.variant() == MetricVariant::Idle)?;
+        let conn = {
+            let mut lock = lock;
+            lock.swap_remove(pos)
+        };
+        Some(conn)
     }
 }
