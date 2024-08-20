@@ -143,11 +143,11 @@ def compile_dml(
     if len(dml_stmts_sql) == 0:
         return []
 
-    # preprocess each SQL dml stmt into EdgeQL
-    stmts = [_preprocess_dml_stmt(s, ctx=ctx) for s in dml_stmts_sql]
+    # un-compile each SQL dml stmt into EdgeQL
+    stmts = [_uncompile_dml_stmt(s, ctx=ctx) for s in dml_stmts_sql]
 
     # merge EdgeQL stmts & compile to SQL
-    ctx.compiled_dml, ctes = _compile_preprocessed_dml(stmts, ctx=ctx)
+    ctx.compiled_dml, ctes = _compile_uncompiled_dml(stmts, ctx=ctx)
 
     return ctes
 
@@ -170,7 +170,7 @@ def _collect_dml_stmts(stmt: pgast.Base) -> List[pgast.DMLQuery]:
 
 
 @dataclasses.dataclass(kw_only=True, eq=False, repr=False)
-class PreprocessedDML:
+class UncompiledDML:
     # the input DML node
     input: pgast.Query
 
@@ -197,7 +197,7 @@ class PreprocessedDML:
 
 
 @functools.singledispatch
-def _preprocess_dml_stmt(stmt: pgast.DMLQuery, *, ctx: Context):
+def _uncompile_dml_stmt(stmt: pgast.DMLQuery, *, ctx: Context):
     """
     Takes an SQL DML query and produces an equivalent EdgeQL query plus a bunch
     of metadata needed to extract associated CTEs from result of the EdgeQL
@@ -217,7 +217,7 @@ def _preprocess_dml_stmt(stmt: pgast.DMLQuery, *, ctx: Context):
     )
 
 
-def _preprocess_dml_subject(
+def _uncompile_dml_subject(
     rvar: pgast.RelRangeVar, *, ctx: Context
 ) -> Tuple[
     context.Table, s_objtypes.ObjectType | s_links.Link | s_properties.Property
@@ -245,15 +245,15 @@ def _preprocess_dml_subject(
     return sub_table, sub
 
 
-def _preprocess_subject_columns(
+def _uncompile_subject_columns(
     sub: s_objtypes.ObjectType | s_links.Link | s_properties.Property,
     sub_table: context.Table,
-    res: PreprocessedDML,
+    res: UncompiledDML,
     *,
     ctx: Context,
 ):
     '''
-    Instruct PreprocessedDML to wrap the EdgeQL DML into a select shape that
+    Instruct UncompiledDML to wrap the EdgeQL DML into a select shape that
     selects all pointers.
     This is applied when a RETURNING clause is present and these columns might
     be used in the clause.
@@ -265,49 +265,49 @@ def _preprocess_subject_columns(
         res.subject_columns.append((column.name, ptr_name))
 
 
-@_preprocess_dml_stmt.register
-def _preprocess_insert_stmt(
+@_uncompile_dml_stmt.register
+def _uncompile_insert_stmt(
     stmt: pgast.InsertStmt, *, ctx: Context
-) -> PreprocessedDML:
+) -> UncompiledDML:
     # determine the subject object
-    sub_table, sub = _preprocess_dml_subject(stmt.relation, ctx=ctx)
+    sub_table, sub = _uncompile_dml_subject(stmt.relation, ctx=ctx)
 
     expected_columns = _pull_columns_from_table(
         sub_table,
         ((c.name, c.span) for c in stmt.cols) if stmt.cols else None,
     )
 
-    res: PreprocessedDML
+    res: UncompiledDML
     if isinstance(sub, s_objtypes.ObjectType):
-        res = _preprocess_insert_object_stmt(
+        res = _uncompile_insert_object_stmt(
             stmt, sub, sub_table, expected_columns, ctx=ctx
         )
     elif isinstance(sub, (s_links.Link, s_properties.Property)):
-        res = _preprocess_insert_pointer_stmt(
+        res = _uncompile_insert_pointer_stmt(
             stmt, sub, sub_table, expected_columns, ctx=ctx
         )
     else:
         raise NotImplementedError()
 
     if stmt.returning_list:
-        _preprocess_subject_columns(sub, sub_table, res, ctx=ctx)
+        _uncompile_subject_columns(sub, sub_table, res, ctx=ctx)
     return res
 
 
-def _preprocess_insert_object_stmt(
+def _uncompile_insert_object_stmt(
     stmt: pgast.InsertStmt,
     sub: s_objtypes.ObjectType,
     sub_table: context.Table,
     expected_columns: List[context.Column],
     *,
     ctx: Context,
-) -> PreprocessedDML:
+) -> UncompiledDML:
     """
     Translates a 'SQL INSERT into an object type table' to an EdgeQL insert.
     """
 
     # handle DEFAULT and prepare the value relation
-    value_relation, expected_columns = _preprocess_default_value(
+    value_relation, expected_columns = _uncompile_default_value(
         stmt.select_stmt, stmt.ctes, expected_columns
     )
 
@@ -406,7 +406,7 @@ def _preprocess_insert_object_stmt(
                 )
             )
 
-    return PreprocessedDML(
+    return UncompiledDML(
         input=stmt,
         subject=sub,
         ql_stmt=ql_stmt,
@@ -424,7 +424,7 @@ def _preprocess_insert_object_stmt(
             output_relation_name='',
             output_namespace={},
         ),
-        # these will be populated by _preprocess_dml_stmt
+        # these will be populated by _uncompile_dml_stmt
         subject_columns=[],
     )
 
@@ -464,14 +464,14 @@ def _construct_assign_element_for_ptr(
     )
 
 
-def _preprocess_insert_pointer_stmt(
+def _uncompile_insert_pointer_stmt(
     stmt: pgast.InsertStmt,
     sub: s_links.Link | s_properties.Property,
     sub_table: context.Table,
     expected_columns: List[context.Column],
     *,
     ctx: Context,
-) -> PreprocessedDML:
+) -> UncompiledDML:
     """
     Translates a SQL 'INSERT INTO a link / multi-property table' into
     an `EdgeQL update SourceObject { subject: ... }`.
@@ -494,7 +494,7 @@ def _preprocess_insert_pointer_stmt(
     assert sub_target
 
     # handle DEFAULT and prepare the value relation
-    value_relation, expected_columns = _preprocess_default_value(
+    value_relation, expected_columns = _uncompile_default_value(
         stmt.select_stmt, stmt.ctes, expected_columns
     )
 
@@ -670,7 +670,7 @@ def _preprocess_insert_pointer_stmt(
                 )
             )
 
-    return PreprocessedDML(
+    return UncompiledDML(
         input=stmt,
         subject=sub,
         ql_stmt=ql_stmt,
@@ -688,14 +688,16 @@ def _preprocess_insert_pointer_stmt(
             output_relation_name='',
             output_namespace={},
         ),
-        # these will be populated by _preprocess_dml_stmt
+        # these will be populated by _uncompile_dml_stmt
         subject_columns=[],
     )
 
 
 def _has_at_most_one_row(query: pgast.Query | None) -> bool:
+    if not query:
+        return True
     return isinstance(query, pgast.SelectStmt) and (
-        (query.values and len(query.values) == 1)
+        (query.values and len(query.values) <= 1)
         or (
             isinstance(query.limit_count, pgast.NumericConstant)
             and query.limit_count.val == '1'
@@ -703,7 +705,7 @@ def _has_at_most_one_row(query: pgast.Query | None) -> bool:
     )
 
 
-def _preprocess_default_value(
+def _uncompile_default_value(
     value_query: Optional[pgast.Query],
     value_ctes: Optional[List[pgast.CommonTableExpr]],
     expected_columns: List[context.Column],
@@ -783,33 +785,33 @@ def _preprocess_default_value(
     return value_query, expected_columns
 
 
-@_preprocess_dml_stmt.register
-def _preprocess_delete_stmt(
+@_uncompile_dml_stmt.register
+def _uncompile_delete_stmt(
     stmt: pgast.DeleteStmt, *, ctx: Context
-) -> PreprocessedDML:
+) -> UncompiledDML:
     # determine the subject object
-    sub_table, sub = _preprocess_dml_subject(stmt.relation, ctx=ctx)
+    sub_table, sub = _uncompile_dml_subject(stmt.relation, ctx=ctx)
 
-    res: PreprocessedDML
+    res: UncompiledDML
     if isinstance(sub, s_objtypes.ObjectType):
-        res = _preprocess_delete_object_stmt(stmt, sub, sub_table, ctx=ctx)
+        res = _uncompile_delete_object_stmt(stmt, sub, sub_table, ctx=ctx)
     elif isinstance(sub, (s_links.Link, s_properties.Property)):
-        res = _preprocess_delete_pointer_stmt(stmt, sub, sub_table, ctx=ctx)
+        res = _uncompile_delete_pointer_stmt(stmt, sub, sub_table, ctx=ctx)
     else:
         raise NotImplementedError()
 
     if stmt.returning_list:
-        _preprocess_subject_columns(sub, sub_table, res, ctx=ctx)
+        _uncompile_subject_columns(sub, sub_table, res, ctx=ctx)
     return res
 
 
-def _preprocess_delete_object_stmt(
+def _uncompile_delete_object_stmt(
     stmt: pgast.DeleteStmt,
     sub: s_objtypes.ObjectType,
     sub_table: context.Table,
     *,
     ctx: Context,
-) -> PreprocessedDML:
+) -> UncompiledDML:
     """
     Translates a 'SQL DELETE of object type table' to an EdgeQL delete.
     """
@@ -889,7 +891,7 @@ def _preprocess_delete_object_stmt(
                 )
             )
 
-    return PreprocessedDML(
+    return UncompiledDML(
         input=stmt,
         subject=sub,
         ql_stmt=ql_stmt,
@@ -907,18 +909,18 @@ def _preprocess_delete_object_stmt(
             output_relation_name='',
             output_namespace={},
         ),
-        # these will be populated by _preprocess_dml_stmt
+        # these will be populated by _uncompile_dml_stmt
         subject_columns=[],
     )
 
 
-def _preprocess_delete_pointer_stmt(
+def _uncompile_delete_pointer_stmt(
     stmt: pgast.DeleteStmt,
     sub: s_links.Link | s_properties.Property,
     sub_table: context.Table,
     *,
     ctx: Context,
-) -> PreprocessedDML:
+) -> UncompiledDML:
     """
     Translates a SQL 'DELETE FROM a link / multi-property table' into
     an `EdgeQL update SourceObject { subject: ... }`.
@@ -1076,7 +1078,7 @@ def _preprocess_delete_pointer_stmt(
                 )
             )
 
-    return PreprocessedDML(
+    return UncompiledDML(
         input=stmt,
         subject=sub,
         ql_stmt=ql_stmt,
@@ -1094,17 +1096,17 @@ def _preprocess_delete_pointer_stmt(
             output_relation_name='',
             output_namespace={},
         ),
-        # these will be populated by _preprocess_dml_stmt
+        # these will be populated by _uncompile_dml_stmt
         subject_columns=[],
     )
 
 
-@_preprocess_dml_stmt.register
-def _preprocess_update_stmt(
+@_uncompile_dml_stmt.register
+def _uncompile_update_stmt(
     stmt: pgast.UpdateStmt, *, ctx: Context
-) -> PreprocessedDML:
+) -> UncompiledDML:
     # determine the subject object
-    sub_table, sub = _preprocess_dml_subject(stmt.relation, ctx=ctx)
+    sub_table, sub = _uncompile_dml_subject(stmt.relation, ctx=ctx)
 
     # convert the general repr of SET clause into a list of columns
     update_targets: List[pgast.UpdateTarget] = []
@@ -1143,9 +1145,9 @@ def _preprocess_update_stmt(
     )
     column_updates = list(zip(set_columns, (c.val for c in update_targets)))
 
-    res: PreprocessedDML
+    res: UncompiledDML
     if isinstance(sub, s_objtypes.ObjectType):
-        res = _preprocess_update_object_stmt(
+        res = _uncompile_update_object_stmt(
             stmt, sub, sub_table, column_updates, ctx=ctx
         )
     elif isinstance(sub, (s_links.Link, s_properties.Property)):
@@ -1158,29 +1160,24 @@ def _preprocess_update_stmt(
         raise NotImplementedError()
 
     if stmt.returning_list:
-        _preprocess_subject_columns(sub, sub_table, res, ctx=ctx)
+        _uncompile_subject_columns(sub, sub_table, res, ctx=ctx)
     return res
 
 
-def _preprocess_update_object_stmt(
+def _uncompile_update_object_stmt(
     stmt: pgast.UpdateStmt,
     sub: s_objtypes.ObjectType,
     sub_table: context.Table,
     column_updates: List[Tuple[context.Column, pgast.BaseExpr]],
     *,
     ctx: Context,
-) -> PreprocessedDML:
+) -> UncompiledDML:
     """
     Translates a 'SQL UPDATE into an object type table' to an EdgeQL update.
     """
 
-    for _c, v in column_updates:
-        if isinstance(v, pgast.Keyword):
-            raise errors.QueryError(
-                f'Keyword {v.name} within UPDATE is not supported',
-                pgext_code=pgerror.ERROR_FEATURE_NOT_SUPPORTED,
-                span=v.span,
-            )
+    def is_default(e: pgast.BaseExpr) -> bool:
+        return isinstance(e, pgast.Keyword) and e.name == 'DEFAULT'
 
     # prepare value relation
 
@@ -1201,7 +1198,11 @@ def _preprocess_update_object_stmt(
                 )
             )
         ]
-        + [pgast.ResTarget(val=val, name=c.name) for c, val in column_updates],
+        + [
+            pgast.ResTarget(val=val, name=c.name)
+            for c, val in column_updates
+            if not is_default(val)  # skip DEFAULT column updates
+        ],
         from_clause=[
             pgast.RelRangeVar(
                 relation=stmt.relation.relation,
@@ -1212,8 +1213,6 @@ def _preprocess_update_object_stmt(
         where_clause=stmt.where_clause,
     )
     stmt.ctes = []
-
-    # TODO: handle DEFAULT and prepare the value relation
 
     # prepare anchors for inserted value columns
     value_name = ctx.alias_generator.get('upd_val')
@@ -1229,7 +1228,7 @@ def _preprocess_update_object_stmt(
 
     # a phantom relation that is supposed to hold the inserted value
     # (in the resolver, this will be replaced by the real value relation)
-    value_cte_name = ctx.alias_generator.get('ins_value')
+    value_cte_name = ctx.alias_generator.get('upd_value')
     value_rel = pgast.Relation(name=value_cte_name)
 
     output_var = pgast.ColumnRef(name=('id',))
@@ -1238,9 +1237,10 @@ def _preprocess_update_object_stmt(
 
     value_columns = [('id', False)]
     update_shape = []
-    for index, (col, _val) in enumerate(column_updates):
+    for index, (col, val) in enumerate(column_updates):
         ptr, ptr_name, is_link = _get_pointer_for_column(col, sub, ctx)
-        value_columns.append((ptr_name, is_link))
+        if not is_default(val):
+            value_columns.append((ptr_name, is_link))
 
         # inject type annotation into value relation
         if is_link:
@@ -1260,15 +1260,33 @@ def _preprocess_update_object_stmt(
             value_rel.path_outputs[(ptr_id, pgce.PathAspect.VALUE)] = output_var
 
         # prepare insert shape that will use the paths from source_outputs
-        update_shape.append(
-            _construct_assign_element_for_ptr(
-                value_ql,
-                ptr_name,
-                ptr,
-                is_link,
-                ctx,
+        if is_default(val):
+            # special case: DEFAULT
+            default_ql: qlast.Expr
+            if ptr.get_default(ctx.schema) is None:
+                default_ql = qlast.Set(elements=[])  # NULL
+            else:
+                default_ql = qlast.Path(
+                    steps=[qlast.SpecialAnchor(name='__default__')]
+                )
+            update_shape.append(
+                qlast.ShapeElement(
+                    expr=qlast.Path(steps=[qlast.Ptr(name=ptr_name)]),
+                    operation=qlast.ShapeOperation(op=qlast.ShapeOp.ASSIGN),
+                    compexpr=default_ql,
+                )
             )
-        )
+        else:
+            # base case
+            update_shape.append(
+                _construct_assign_element_for_ptr(
+                    value_ql,
+                    ptr_name,
+                    ptr,
+                    is_link,
+                    ctx,
+                )
+            )
 
     # construct the EdgeQL DML AST
     sub_name = sub.get_name(ctx.schema)
@@ -1306,7 +1324,7 @@ def _preprocess_update_object_stmt(
                 )
             )
 
-    return PreprocessedDML(
+    return UncompiledDML(
         input=stmt,
         subject=sub,
         ql_stmt=ql_stmt,
@@ -1324,13 +1342,13 @@ def _preprocess_update_object_stmt(
             output_relation_name='',
             output_namespace={},
         ),
-        # these will be populated by _preprocess_dml_stmt
+        # these will be populated by _uncompile_dml_stmt
         subject_columns=[],
     )
 
 
-def _compile_preprocessed_dml(
-    stmts: List[PreprocessedDML], ctx: context.ResolverContextLevel
+def _compile_uncompiled_dml(
+    stmts: List[UncompiledDML], ctx: context.ResolverContextLevel
 ) -> Tuple[
     Mapping[pgast.Query, context.CompiledDML],
     List[pgast.CommonTableExpr],
@@ -1338,7 +1356,7 @@ def _compile_preprocessed_dml(
     """
     Compiles *all* DML statements in the query.
 
-    Statements must already be preprocessed into equivalent EdgeQL statements.
+    Statements must already be uncompiled into equivalent EdgeQL statements.
     Will merge the statements into one large shape of all DML queries and
     compile that with a single invocation of EdgeQL compiler.
 
@@ -1409,6 +1427,8 @@ def _compile_preprocessed_dml(
     except errors.QueryError as e:
         raise errors.QueryError(
             msg=e.args[0],
+            details=e.details,
+            hint=e.hint,
             # not sure if this is ok, but it is better than InternalServerError,
             # which is the default
             pgext_code=pgerror.ERROR_DATA_EXCEPTION,
@@ -1484,7 +1504,7 @@ def _compile_preprocessed_dml(
 
 def _merge_and_prepare_external_rels(
     ir_stmt: irast.Statement,
-    stmts: List[PreprocessedDML],
+    stmts: List[UncompiledDML],
     stmt_names: List[str],
 ) -> Tuple[
     Dict[irast.PathId, Tuple[pgast.BaseRelation, Tuple[str, ...]]],
@@ -1584,7 +1604,7 @@ def _resolve_dml_value_rel(compiled_dml: context.CompiledDML, *, ctx: Context):
     if len(compiled_dml.value_columns) != len(val_table.columns):
         col_names = ', '.join(c for c, _ in compiled_dml.value_columns)
         raise errors.QueryError(
-            f'INSERT expected {len(compiled_dml.value_columns)} columns '
+            f'Expected {len(compiled_dml.value_columns)} columns '
             f'({col_names}), but got {len(val_table.columns)}',
             span=compiled_dml.value_relation_input.span,
         )
@@ -1592,6 +1612,8 @@ def _resolve_dml_value_rel(compiled_dml: context.CompiledDML, *, ctx: Context):
     if val_rel.ctes:
         ctx.ctes_buffer.extend(val_rel.ctes)
         val_rel.ctes = None
+
+    val_table.alias = ctx.alias_generator.get('rel')
 
     # wrap the value relation into a "pre-projection",
     # so we can add type casts for link ids and an iterator column
@@ -1630,7 +1652,12 @@ def _resolve_dml_value_rel(compiled_dml: context.CompiledDML, *, ctx: Context):
             )
 
         val_rel = pgast.SelectStmt(
-            from_clause=[pgast.RangeSubselect(subquery=val_rel)],
+            from_clause=[
+                pgast.RangeSubselect(
+                    subquery=val_rel,
+                    alias=pgast.Alias(aliasname=val_table.alias)
+                )
+            ],
             target_list=value_target_list,
         )
 
