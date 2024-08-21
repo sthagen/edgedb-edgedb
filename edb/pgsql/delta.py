@@ -3318,7 +3318,7 @@ def get_reindex_sql(
     if fts_index and '__fts_document__' not in restore_desc.fields:
         options = get_index_compile_options(fts_index, schema, {}, None)
         cmd = deltafts.update_fts_document(fts_index, options, schema)
-        return cmd.code(None)
+        return cmd.code()
 
     return None
 
@@ -6712,7 +6712,7 @@ class DatabaseMixin:
             )
 
 
-class CreateDatabase(MetaCommand, DatabaseMixin, adapts=s_db.CreateDatabase):
+class CreateDatabase(MetaCommand, DatabaseMixin, adapts=s_db.CreateBranch):
     def apply(
         self,
         schema: s_schema.Schema,
@@ -6754,7 +6754,7 @@ class CreateDatabase(MetaCommand, DatabaseMixin, adapts=s_db.CreateDatabase):
         return schema
 
 
-class DropDatabase(MetaCommand, DatabaseMixin, adapts=s_db.DropDatabase):
+class DropDatabase(MetaCommand, DatabaseMixin, adapts=s_db.DropBranch):
     def apply(
         self,
         schema: s_schema.Schema,
@@ -6771,11 +6771,11 @@ class DropDatabase(MetaCommand, DatabaseMixin, adapts=s_db.DropDatabase):
         return schema
 
 
-class AlterDatabase(MetaCommand, DatabaseMixin, adapts=s_db.AlterDatabase):
+class AlterDatabase(MetaCommand, DatabaseMixin, adapts=s_db.AlterBranch):
     pass
 
 
-class RenameDatabase(MetaCommand, DatabaseMixin, adapts=s_db.RenameDatabase):
+class RenameDatabase(MetaCommand, DatabaseMixin, adapts=s_db.RenameBranch):
     def apply(
         self,
         schema: s_schema.Schema,

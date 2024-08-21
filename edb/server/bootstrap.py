@@ -1602,11 +1602,11 @@ async def _init_stdlib(
             set_metadata_text = dbops.SetMetadata(
                 dbops.DatabaseWithTenant(name=tpl_db_name),
                 global_metadata,
-            ).code(pl_block)
+            ).code_with_block(pl_block)
 
             set_single_db_metadata_text = dbops.SetSingleDBMetadata(
                 edbdef.EDGEDB_TEMPLATE_DB, global_metadata
-            ).code(pl_block)
+            ).code_with_block(pl_block)
 
             pl_block.add_command(textwrap.dedent(trampoline.fixup_query(f"""\
                 IF (edgedb_VER.get_backend_capabilities()
@@ -1881,7 +1881,7 @@ def compile_sys_queries(
         compiler,
         schema,
         f"""SELECT (
-            SELECT sys::Database
+            SELECT sys::Branch
             FILTER .name != "{edbdef.EDGEDB_TEMPLATE_DB}"
         ).name""",
         expected_cardinality_one=False,
