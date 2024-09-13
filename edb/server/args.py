@@ -42,6 +42,7 @@ import psutil
 from edb import buildmeta
 from edb.common import devmode
 from edb.common import enum
+from edb.common import typeutils
 from edb.schema import defines as schema_defines
 from edb.pgsql import params as pgsql_params
 
@@ -229,6 +230,7 @@ class ServerConfig(NamedTuple):
     bootstrap_only: bool
     inplace_upgrade_prepare: Optional[pathlib.Path]
     inplace_upgrade_finalize: bool
+    inplace_upgrade_rollback: bool
     bootstrap_command: str
     bootstrap_command_file: pathlib.Path
     default_branch: Optional[str]
@@ -608,7 +610,7 @@ class EnvvarResolver(click.Option):
         return None
 
 
-_server_options = [
+server_options = typeutils.chain_decorators([
     click.option(
         '-D', '--data-dir', type=PathPath(),
         envvar="EDGEDB_SERVER_DATADIR", cls=EnvvarResolver,
@@ -679,12 +681,17 @@ _server_options = [
     click.option(
         '--inplace-upgrade-prepare', type=PathPath(),
         envvar="EDGEDB_SERVER_INPLACE_UPGRADE_PREPARE",
-        cls=EnvvarResolver,  # XXX?
+        cls=EnvvarResolver,
         help='try to do an in-place upgrade with the specified dump file'),
+    click.option(
+        '--inplace-upgrade-rollback', type=bool, is_flag=True,
+        envvar="EDGEDB_SERVER_INPLACE_UPGRADE_ROLLBACK",
+        cls=EnvvarResolver,
+        help='rollback a prepared upgrade'),
     click.option(
         '--inplace-upgrade-finalize', type=bool, is_flag=True,
         envvar="EDGEDB_SERVER_INPLACE_UPGRADE_FINALIZE",
-        cls=EnvvarResolver,  # XXX?
+        cls=EnvvarResolver,
         help='finalize an in-place upgrade'),
     click.option(
         '--default-branch', type=str,
@@ -1031,16 +1038,10 @@ _server_options = [
         help='Specifies when to reload the config files. See the docstring of '
              'ReloadTrigger for more information.',
     ),
-]
+])
 
 
-def server_options(func):
-    for option in reversed(_server_options):
-        func = option(func)
-    return func
-
-
-_compiler_options = [
+compiler_options = typeutils.chain_decorators([
     click.option(
         "--pool-size",
         type=int,
@@ -1077,13 +1078,7 @@ _compiler_options = [
         '--metrics-port', type=PortType(),
         help=f'Port to listen on for metrics HTTP API.',
     ),
-]
-
-
-def compiler_options(func):
-    for option in reversed(_compiler_options):
-        func = option(func)
-    return func
+])
 
 
 def parse_args(**kwargs: Any):
