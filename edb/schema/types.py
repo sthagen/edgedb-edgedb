@@ -535,9 +535,7 @@ class Type(
 
 
 class QualifiedType(so.QualifiedObject, Type):
-    @classmethod
-    def get_schema_class_displayname(cls) -> str:
-        return 'type'
+    pass
 
 
 class InheritingType(so.DerivableInheritingObject, QualifiedType):
@@ -1088,19 +1086,13 @@ class Collection(Type, s_abc.Collection):
     def issubclass(
         self,
         schema: s_schema.Schema,
-        # TODO: once the hardcoded `issubclass` checks are removed, we no
-        # longer need the `issubclass` allow None as parent argument.
         parent: Union[
-            Optional[so.SubclassableObject],
-            typing.Tuple[Optional[so.SubclassableObject], ...],
+            so.SubclassableObject,
+            typing.Tuple[so.SubclassableObject, ...],
         ],
     ) -> bool:
         if isinstance(parent, tuple):
             return any(self.issubclass(schema, p) for p in parent)
-        # TODO: once the hardcoded `issubclass` checks are removed, we no
-        # longer need the `issubclass` allow None as parent argument.
-        elif parent is None:
-            return False
 
         if isinstance(parent, Type) and parent.is_any(schema):
             return True
@@ -1140,6 +1132,7 @@ class Collection(Type, s_abc.Collection):
     def dump(self, schema: s_schema.Schema) -> str:
         return repr(self)
 
+    # We define this specifically to override children
     @classmethod
     def get_schema_class_displayname(cls) -> str:
         return 'collection'
