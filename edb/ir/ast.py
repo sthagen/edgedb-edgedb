@@ -72,6 +72,8 @@ import uuid
 
 from edb.common import ast, compiler, span, markup, enum as s_enum
 
+from edb import errors
+
 from edb.schema import modules as s_mod
 from edb.schema import name as sn
 from edb.schema import objects as so
@@ -625,7 +627,7 @@ class Command(Base):
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Param:
-    """Query parameter with it's schema type and IR type"""
+    """Query parameter with its schema type and IR type"""
 
     name: str
     """Parameter name"""
@@ -801,6 +803,7 @@ class Statement(Command):
     type_rewrites: typing.Dict[typing.Tuple[uuid.UUID, bool], Set]
     singletons: typing.List[PathId]
     triggers: tuple[tuple[Trigger, ...], ...]
+    warnings: tuple[errors.EdgeDBError, ...]
 
 
 class TypeIntrospection(ImmutableExpr):
