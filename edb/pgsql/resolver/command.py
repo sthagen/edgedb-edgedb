@@ -727,7 +727,8 @@ def _uncompile_insert_pointer_stmt(
     sub_name = sub.get_shortname(ctx.schema)
 
     target_ql: qlast.Expr = qlast.Path(
-        steps=[value_ql, qlast.Ptr(name='__target__')])
+        steps=[value_ql, qlast.Ptr(name='__target__')]
+    )
 
     if isinstance(sub_target, s_objtypes.ObjectType):
         assert isinstance(target_ql, qlast.Path)
@@ -1619,6 +1620,7 @@ def _compile_uncompiled_dml(
             singletons=singletons,
             anchors=anchors,
             allow_user_specified_id=ctx.options.allow_user_specified_id,
+            apply_user_access_policies=ctx.options.apply_access_policies
         )
         ir_stmt = qlcompiler.compile_ast_to_ir(
             ql_stmt,
@@ -2058,7 +2060,7 @@ def merge_params(
                 i
                 for i, p in enumerate(ctx.query_params)
                 if isinstance(p, dbstate.SQLParamGlobal)
-                and p.global_name == glob.name
+                and p.global_name == glob.global_name
             ),
             None,
         )
@@ -2093,3 +2095,20 @@ class ParamMapper(ast.NodeVisitor):
 
     def visit_Param(self, p: pgast.Param) -> None:
         p.index = self.mapping[p.index]
+
+
+def init_external_params(query: pgast.Base, ctx: Context):
+    counter = ParamCounter()
+    counter.node_visit(query)
+    for _ in range(counter.param_count):
+        ctx.query_params.append(dbstate.SQLParamExternal())
+
+
+class ParamCounter(ast.NodeVisitor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.param_count = 0
+
+    def visit_ParamRef(self, p: pgast.ParamRef) -> None:
+        if self.param_count < p.number:
+            self.param_count = p.number

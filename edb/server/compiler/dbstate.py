@@ -600,8 +600,8 @@ class SQLParamExternal(SQLParam):
     # An internal query param whose value is provided by an external param.
     # So a user-visible param.
 
-    # External index
-    index: int
+    # External params share the index with internal params
+    pass
 
 
 @dataclasses.dataclass(kw_only=True, eq=False, slots=True, repr=False)
@@ -630,6 +630,7 @@ DEFAULT_SQL_SETTINGS: SQLSettings = immutables.Map()
 DEFAULT_SQL_FE_SETTINGS: SQLSettings = immutables.Map({
     "search_path": ("public",),
     "allow_user_specified_id": ("false",),
+    "apply_access_policies_sql": ("false",),
     "server_version": cast(SQLSetting, (defines.PGEXT_POSTGRES_VERSION,)),
     "server_version_num": cast(
         SQLSetting, (defines.PGEXT_POSTGRES_VERSION_NUM,)

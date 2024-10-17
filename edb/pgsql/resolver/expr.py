@@ -29,7 +29,6 @@ from edb.pgsql import ast as pgast
 from edb.pgsql import common
 from edb.pgsql import compiler as pgcompiler
 from edb.pgsql.compiler import enums as pgce
-from edb.server.compiler import dbstate
 
 from edb.schema import types as s_types
 
@@ -158,6 +157,7 @@ def resolve_column_kind(
                 path_prefix_anchor='__source__',
                 singletons=singletons,
                 make_globals_empty=False,
+                apply_user_access_policies=ctx.options.apply_access_policies,
             )
             compiled = expr.compiled(ctx.schema, options=options, context=None)
 
@@ -172,6 +172,7 @@ def resolve_column_kind(
                     ),
                 },
                 output_format=pgcompiler.OutputFormat.NATIVE_INTERNAL,
+                alias_generator=ctx.alias_generator,
             )
             command.merge_params(sql_tree, compiled.irast, ctx)
 
@@ -513,20 +514,8 @@ def resolve_ParamRef(
     *,
     ctx: Context,
 ) -> pgast.ParamRef:
-    internal_index: Optional[int] = None
-    param: Optional[dbstate.SQLParam] = None
-    for i, p in enumerate(ctx.query_params):
-        if isinstance(p, dbstate.SQLParamExternal) and p.index == expr.number:
-            param = p
-            internal_index = i + 1
-            break
-    if not param:
-        param = dbstate.SQLParamExternal(index=expr.number)
-        internal_index = len(ctx.query_params) + 1
-        ctx.query_params.append(param)
-    assert internal_index
-
-    return pgast.ParamRef(number=internal_index)
+    # external params map one-to-one to internal params
+    return expr
 
 
 @dispatch._resolve.register
