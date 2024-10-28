@@ -4747,53 +4747,6 @@ class FTSToRegconfig(trampoline.VersionedFunction):
         )
 
 
-class FormatTypeFunction(trampoline.VersionedFunction):
-    """Used instead of pg_catalog.format_type in pg_dump."""
-
-    text = r'''
-    SELECT
-        CASE WHEN t.typcategory = 'A'
-        THEN (
-            SELECT
-                quote_ident(nspname) || '.' ||
-                quote_ident(el.typname) || tm.mod || '[]'
-            FROM edgedbsql_VER.pg_namespace
-            WHERE oid = el.typnamespace
-        )
-        ELSE (
-            SELECT
-                quote_ident(nspname) || '.' ||
-                quote_ident(t.typname) || tm.mod
-            FROM edgedbsql_VER.pg_namespace
-            WHERE oid = t.typnamespace
-        )
-        END
-    FROM
-        (
-            SELECT
-                CASE WHEN typemod >= 0
-                THEN '(' || typemod::text || ')'
-                ELSE ''
-                END AS mod
-        ) as tm,
-        edgedbsql_VER.pg_type t
-    LEFT JOIN edgedbsql_VER.pg_type el ON t.typelem = el.oid
-    WHERE t.oid = typeoid
-    '''
-
-    def __init__(self) -> None:
-        super().__init__(
-            name=('edgedb', '_format_type'),
-            args=[
-                ('typeoid', ('oid',)),
-                ('typemod', ('integer',)),
-            ],
-            returns=('text',),
-            volatility='stable',
-            text=self.text,
-        )
-
-
 class UuidGenerateV1mcFunction(trampoline.VersionedFunction):
     def __init__(self, ext_schema: str) -> None:
         super().__init__(
@@ -6017,7 +5970,7 @@ def _generate_sql_information_schema(
         volatility='stable',
         text=r'''
             SELECT COALESCE (
-                -- is the nmae in virtual_tables?
+                -- is the name in virtual_tables?
                 (
                     SELECT vt.table_name::name
                     FROM edgedbsql_VER.virtual_tables vt
@@ -6875,6 +6828,37 @@ def _generate_sql_information_schema(
         WHERE FALSE
         """,
         ),
+        trampoline.VersionedView(
+            name=("edgedbsql", "pg_tables"),
+            query="""
+        SELECT
+            n.nspname AS schemaname,
+            c.relname AS tablename,
+            pg_get_userbyid(c.relowner) AS tableowner,
+            t.spcname AS tablespace,
+            c.relhasindex AS hasindexes,
+            c.relhasrules AS hasrules,
+            c.relhastriggers AS hastriggers,
+            c.relrowsecurity AS rowsecurity
+        FROM edgedbsql_VER.pg_class c
+        LEFT JOIN edgedbsql_VER.pg_namespace n ON n.oid = c.relnamespace
+        LEFT JOIN pg_tablespace t ON t.oid = c.reltablespace
+        WHERE c.relkind = ANY (ARRAY['r'::"char", 'p'::"char"])
+        """,
+        ),
+        trampoline.VersionedView(
+            name=("edgedbsql", "pg_views"),
+            query="""
+        SELECT
+            n.nspname AS schemaname,
+            c.relname AS viewname,
+            pg_get_userbyid(c.relowner) AS viewowner,
+            pg_get_viewdef(c.oid) AS definition
+        FROM edgedbsql_VER.pg_class c
+        LEFT JOIN edgedbsql_VER.pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'v'::"char"
+        """,
+        ),
     ]
 
     # We expose most of the views as empty tables, just to prevent errors when
@@ -6921,6 +6905,8 @@ def _generate_sql_information_schema(
         'pg_constraint',
         'pg_trigger',
         'pg_subscription',
+        'pg_tables',
+        'pg_views',
     }
 
     PG_TABLES_WITH_SYSTEM_COLS = {
@@ -7181,6 +7167,57 @@ def _generate_sql_information_schema(
                 FROM edgedbsql_VER.pg_class pc
                 WHERE id = pc.oid
             '''
+        ),
+        trampoline.VersionedFunction(
+            # Used instead of pg_catalog.format_type in pg_dump.
+            name=('edgedbsql', '_format_type'),
+            args=[
+                ('typeoid', ('oid',)),
+                ('typemod', ('integer',)),
+            ],
+            returns=('text',),
+            volatility='STABLE',
+            text=r'''
+                SELECT
+                    CASE
+                        -- arrays
+                        WHEN t.typcategory = 'A' THEN (
+                            SELECT
+                                quote_ident(nspname) || '.' ||
+                                quote_ident(el.typname) || tm.mod || '[]'
+                            FROM edgedbsql_VER.pg_namespace
+                            WHERE oid = el.typnamespace
+                        )
+
+                        -- composite (tuples) and types in irregular schemas
+                        WHEN (
+                            t.typcategory = 'C' OR COALESCE(tn.nspname IN (
+                                'edgedb', 'edgedbt', 'edgedbpub', 'edgedbstd',
+                                'edgedb_VER', 'edgedbstd_VER'
+                            ), TRUE)
+                        ) THEN (
+                            SELECT
+                                quote_ident(nspname) || '.' ||
+                                quote_ident(t.typname) || tm.mod
+                            FROM edgedbsql_VER.pg_namespace
+                            WHERE oid = t.typnamespace
+                        )
+                        ELSE format_type(typeoid, typemod)
+                    END
+                FROM edgedbsql_VER.pg_type t
+                LEFT JOIN pg_namespace tn ON t.typnamespace = tn.oid
+                LEFT JOIN edgedbsql_VER.pg_type el ON t.typelem = el.oid
+
+                CROSS JOIN (
+                    SELECT
+                        CASE
+                            WHEN typemod >= 0 THEN '(' || typemod::text || ')'
+                            ELSE ''
+                        END AS mod
+                ) as tm
+
+                WHERE t.oid = typeoid
+            ''',
         )
     ]
 
@@ -7406,7 +7443,6 @@ async def generate_support_functions(
         dbops.CreateFunction(IssubclassFunction()),
         dbops.CreateFunction(IssubclassFunction2()),
         dbops.CreateFunction(GetSchemaObjectNameFunction()),
-        dbops.CreateFunction(FormatTypeFunction()),
     ]
     commands.add_commands(cmds)
 
