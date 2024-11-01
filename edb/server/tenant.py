@@ -246,9 +246,18 @@ class Tenant(ha_base.ClusterProtocol):
         self._server = server
         self.__loop = server.get_loop()
 
-    def get_http_client(self) -> HttpClient:
+    def get_http_client(self, *, originator: str) -> HttpClient:
         if self._http_client is None:
-            self._http_client = HttpClient(HTTP_MAX_CONNECTIONS)
+            http_max_connections = self._server.config_lookup(
+                'http_max_connections', self.get_sys_config()
+            )
+            self._http_client = HttpClient(
+                http_max_connections,
+                user_agent=f"EdgeDB {buildmeta.get_version_string(short=True)}",
+                stat_callback=lambda stat: logger.debug(
+                    f"HTTP stat: {originator} {stat}"
+                ),
+            )
         return self._http_client
 
     def on_switch_over(self):
@@ -752,13 +761,13 @@ class Tenant(ha_base.ClusterProtocol):
     @contextlib.asynccontextmanager
     async def use_sys_pgcon(self) -> AsyncGenerator[pgcon.PGConnection, None]:
         if not self._initing and not self._running:
-            raise RuntimeError("EdgeDB server is not running.")
+            raise RuntimeError("Gel server is not running.")
 
         await self._sys_pgcon_waiter.acquire()
 
         if not self._initing and not self._running:
             self._sys_pgcon_waiter.release()
-            raise RuntimeError("EdgeDB server is not running.")
+            raise RuntimeError("Gel server is not running.")
 
         if self.__sys_pgcon is None or not self.__sys_pgcon.is_healthy():
             conn, self.__sys_pgcon = self.__sys_pgcon, None
@@ -998,7 +1007,7 @@ class Tenant(ha_base.ClusterProtocol):
             if close_frontend_conns:
                 self._server.request_stop_fe_conns(dbname)
             else:
-                # If there are open EdgeDB connections to the `dbname` DB
+                # If there are open Gel connections to the `dbname` DB
                 # just raise the error Postgres would have raised itself.
                 raise errors.ExecutionError(
                     f"database branch {dbname!r} is being accessed by "
@@ -1218,6 +1227,7 @@ class Tenant(ha_base.ClusterProtocol):
             backend_ids=backend_ids,
             extensions=extensions,
             ext_config_settings=parsed_db.ext_config_settings,
+            feature_used_metrics=parsed_db.feature_used_metrics,
         )
         db.set_state_serializer(
             parsed_db.protocol_version,

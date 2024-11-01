@@ -814,6 +814,9 @@ class Compiler:
             ext_config_settings=ext_config_settings,
             protocol_version=defines.CURRENT_PROTOCOL,
             state_serializer=state_serializer,
+            feature_used_metrics=ddl.produce_feature_used_metrics(
+                self.state, user_schema
+            ),
         )
 
     def make_state_serializer(
@@ -995,23 +998,6 @@ class Compiler:
             ddl_source = edgeql.Source.from_string(
                 delta_ext_ai.get_ext_ai_pre_restore_script(schema))
             units += compile(ctx=ctx, source=ddl_source).units
-
-        if allow_dml_in_functions:
-            # Check if any functions actually contained DML.
-            for func in schema.get_objects(
-                type=s_func.Function,
-                exclude_stdlib=True,
-            ):
-                if (
-                    func.get_volatility(schema) == qltypes.Volatility.Modifying
-                    and not func.get_is_inlined(schema)
-                ):
-                    break
-            else:
-                ddl_source = edgeql.Source.from_string(
-                    'CONFIGURE CURRENT DATABASE RESET allow_dml_in_functions;',
-                )
-                units += compile(ctx=ctx, source=ddl_source).units
 
         restore_blocks = []
         tables = []
@@ -1945,6 +1931,11 @@ def _compile_ql_transaction(
         global_schema=final_global_schema,
         sp_name=sp_name,
         sp_id=sp_id,
+        feature_used_metrics=(
+            ddl.produce_feature_used_metrics(
+                ctx.compiler_state, final_user_schema
+            ) if final_user_schema else None
+        ),
     )
 
 
@@ -2477,6 +2468,7 @@ def _try_compile(
                     unit.extensions, unit.ext_config_settings = (
                         _extract_extensions(ctx, comp.user_schema)
                     )
+                unit.feature_used_metrics = comp.feature_used_metrics
                 if comp.cached_reflection is not None:
                     unit.cached_reflection = \
                         pickle.dumps(comp.cached_reflection, -1)
@@ -2505,6 +2497,7 @@ def _try_compile(
                     unit.extensions, unit.ext_config_settings = (
                         _extract_extensions(ctx, comp.user_schema)
                     )
+                unit.feature_used_metrics = comp.feature_used_metrics
                 if comp.cached_reflection is not None:
                     unit.cached_reflection = \
                         pickle.dumps(comp.cached_reflection, -1)
