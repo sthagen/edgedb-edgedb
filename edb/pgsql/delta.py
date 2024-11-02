@@ -2821,7 +2821,12 @@ class AlterScalarType(ScalarTypeMetaCommand, adapts=s_scalars.AlterScalarType):
 
         # do an apply of the schema-level command to force it to canonicalize,
         # which prunes out duplicate deletions
+        #
+        # HACK: Clear out the context's stack so that
+        # context.canonical is false while doing this.
+        stack, context.stack = context.stack, []
         cmd.apply(schema, context)
+        context.stack = stack
 
         for sub in cmd.get_subcommands():
             acmd2 = CommandMeta.adapt(sub)
@@ -6056,14 +6061,14 @@ class UpdateEndpointDeleteActions(MetaCommand):
                                     || linkname || ' of ' || endname || ' ('
                                     || srcid || ').';
                     END IF;
-                ''')).format(
+                '''.format(
                     tables=tables,
                     id='id',
                     tgtname=target.get_displayname(schema),
                     near_endpoint=near_endpoint,
                     far_endpoint=far_endpoint,
                     prefix=prefix,
-                )
+                )))
 
                 chunks.append(text)
 
@@ -6287,14 +6292,14 @@ class UpdateEndpointDeleteActions(MetaCommand):
                                     || linkname || ' of ' || endname || ' ('
                                     || srcid || ').';
                     END IF;
-                ''')).format(
+                '''.format(
                     tables=tables,
                     id='id',
                     tgtname=target.get_displayname(schema),
                     near_endpoint=near_endpoint,
                     far_endpoint=far_endpoint,
                     prefix=prefix,
-                )
+                )))
 
                 chunks.append(text)
 
