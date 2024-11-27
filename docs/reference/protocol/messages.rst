@@ -114,7 +114,7 @@ Format:
 See the :ref:`list of error codes <ref_protocol_error_codes>` for all possible
 error codes.
 
-Known headers:
+Known attributes:
 
 * 0x0001 ``HINT``: ``str`` -- error hint.
 * 0x0002 ``DETAILS``: ``str`` -- error details.
@@ -228,6 +228,13 @@ Format:
 .. eql:struct:: edb.protocol.Dump
 
 .. eql:struct:: edb.protocol.Annotation
+
+.. eql:struct:: edb.protocol.DumpFlag
+
+Use:
+
+* ``DUMP_SECRETS`` to include secrets in the backup. By default, secrets are
+  not included.
 
 
 .. _ref_protocol_msg_command_data_description:
@@ -447,7 +454,7 @@ Format:
 
 .. eql:struct:: edb.protocol.DumpObjectDesc
 
-Known headers:
+Known attributes:
 
 * 101 ``BLOCK_TYPE`` -- block type, always "I"
 * 102 ``SERVER_TIME`` -- server time when dump is started as a floating point
@@ -473,7 +480,7 @@ Format:
 .. eql:struct:: edb.protocol.DumpBlock
 
 
-Known headers:
+Known attributes:
 
 * 101 ``BLOCK_TYPE`` -- block type, always "D"
 * 110 ``BLOCK_ID`` -- block identifier (16 bytes of UUID)

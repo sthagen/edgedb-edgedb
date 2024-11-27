@@ -94,9 +94,11 @@ cdef class EdgeConnection(frontend.FrontendConnection):
     cdef WriteBuffer make_state_data_description_msg(self)
     cdef WriteBuffer make_command_complete_msg(self, capabilities, status)
 
-    cdef inline reject_headers(self)
     cdef inline ignore_headers(self)
     cdef dict parse_headers(self)
+    cdef dict parse_annotations(self)
+    cdef inline ignore_annotations(self)
+    cdef get_checked_tag(self, dict annotations)
 
     cdef write_status(self, bytes name, bytes value)
     cdef write_edgedb_error(self, exc)
