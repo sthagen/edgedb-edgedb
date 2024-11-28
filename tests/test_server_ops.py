@@ -40,7 +40,6 @@ import urllib.request
 import uuid
 
 import edgedb
-from edgedb import errors
 
 import edb
 from edb import buildmeta
@@ -420,6 +419,19 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
                 finally:
                     await con.aclose()
 
+    async def test_server_alter_role_fallback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            async with tb.start_edgedb_server(
+                data_dir=temp_dir,
+                default_auth_method=args.ServerAuthMethod.Scram,
+                bootstrap_command='ALTER ROLE edgedb SET password := "first";'
+            ) as sd:
+                con = await sd.connect(password='first')
+                try:
+                    await con.query_single('SELECT 1')
+                finally:
+                    await con.aclose()
+
     async def test_server_ops_bogus_bind_addr_in_mix(self):
         async with tb.start_edgedb_server(
             bind_addrs=('host.invalid', '127.0.0.1',),
@@ -579,7 +591,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
                     # stop the postgres
                     await cluster.stop()
                     with self.assertRaisesRegex(
-                        errors.BackendUnavailableError,
+                        edgedb.BackendUnavailableError,
                         'Postgres is not available',
                     ):
                         await con.query_single('SELECT 123+456')
@@ -589,7 +601,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
 
                     # give the EdgeDB server some time to recover
                     async for tr in self.try_until_succeeds(
-                        ignore=errors.BackendUnavailableError,
+                        ignore=edgedb.BackendUnavailableError,
                         timeout=30,
                     ):
                         async with tr:
@@ -952,7 +964,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
                 con.close()
 
             with self.assertRaisesRegex(
-                errors.BinaryProtocolError, "TLS Required"
+                edgedb.BinaryProtocolError, "TLS Required"
             ):
                 await sd.connect(test_no_tls=True)
 
@@ -1096,7 +1108,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
                 print("default", file=rf, flush=True)
                 await asyncio.sleep(0.05)
                 async for tr in self.try_until_succeeds(
-                    ignore=(errors.AccessError, AssertionError),
+                    ignore=(edgedb.AccessError, AssertionError),
                 ):
                     async with tr:
                         with self.http_con(server=sd) as http_con:
@@ -1115,7 +1127,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
                 print("not_ready", file=rf, flush=True)
                 await asyncio.sleep(0.05)
                 async for tr in self.try_until_succeeds(
-                    ignore=(errors.AccessError, AssertionError),
+                    ignore=(edgedb.AccessError, AssertionError),
                 ):
                     async with tr:
                         conn = await sd.connect()
@@ -1136,7 +1148,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
                 os.unlink(rf_name)
                 await asyncio.sleep(0.05)
                 async for tr in self.try_until_succeeds(
-                    ignore=(errors.AccessError, AssertionError),
+                    ignore=(edgedb.AccessError, AssertionError),
                 ):
                     async with tr:
                         with self.http_con(server=sd) as http_con:
@@ -1155,7 +1167,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
                 print("not_ready", file=rf, flush=True)
                 await sd.connect()
                 async for tr in self.try_until_succeeds(
-                    ignore=(errors.AccessError, AssertionError),
+                    ignore=(edgedb.AccessError, AssertionError),
                 ):
                     async with tr:
                         with self.http_con(server=sd) as http_con:
@@ -1197,7 +1209,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
                 print("read_only", file=rf, flush=True)
                 await asyncio.sleep(0.05)
                 async for tr in self.try_until_succeeds(
-                    ignore=(errors.AccessError, AssertionError),
+                    ignore=(edgedb.AccessError, AssertionError),
                 ):
                     async with tr:
                         with self.assertRaisesRegex(
@@ -1225,7 +1237,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
                 os.unlink(rf_name)
                 await asyncio.sleep(0.05)
                 async for tr in self.try_until_succeeds(
-                    ignore=(errors.AccessError, AssertionError),
+                    ignore=(edgedb.AccessError, AssertionError),
                 ):
                     async with tr:
                         await conn.execute("insert A")
@@ -1268,7 +1280,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
                 os.unlink(rf_name)
                 await asyncio.sleep(0.05)
                 async for tr in self.try_until_succeeds(
-                    ignore=(errors.ClientConnectionError,),
+                    ignore=(edgedb.ClientConnectionError,),
                 ):
                     async with tr:
                         await conn.execute("select 1")
@@ -1396,7 +1408,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
 
             # The re-introspection has a delay, but should eventually happen
             async for tr in self.try_until_succeeds(
-                ignore=errors.InvalidReferenceError,
+                ignore=edgedb.InvalidReferenceError,
                 timeout=30,
             ):
                 async with tr:
@@ -1522,7 +1534,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
         mtargs.reload_server()
 
         async for tr in self.try_until_fails(
-            wait_for=errors.AvailabilityError
+            wait_for=edgedb.AvailabilityError
         ):
             async with tr:
                 await self._test_server_ops_multi_tenant_1(mtargs)
@@ -1553,7 +1565,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
         mtargs.reload_server()
 
         async for tr in self.try_until_succeeds(
-            ignore=errors.AvailabilityError
+            ignore=edgedb.AvailabilityError
         ):
             async with tr:
                 await self._test_server_ops_multi_tenant_1(mtargs)
@@ -1587,7 +1599,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
         mtargs.rd1.file.flush()
 
         async for tr in self.try_until_fails(
-            wait_for=errors.ClientConnectionClosedError
+            wait_for=edgedb.ClientConnectionClosedError
         ):
             async with tr:
                 await self._test_server_ops_multi_tenant_1(
@@ -1613,7 +1625,7 @@ class TestServerOps(tb.BaseHTTPTestCase, tb.CLITestCaseMixin):
         mtargs.rd1.file.flush()
 
         async for tr in self.try_until_fails(
-            wait_for=errors.AvailabilityError
+            wait_for=edgedb.AvailabilityError
         ):
             async with tr:
                 await self._test_server_ops_multi_tenant_1(
