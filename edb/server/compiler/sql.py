@@ -50,7 +50,7 @@ FE_SETTINGS_MUTABLE: immutables.Map[str, bool] = immutables.Map(
     {
         'search_path': True,
         'allow_user_specified_id': True,
-        'apply_access_policies_sql': True,
+        'apply_access_policies_pg': True,
         'server_version': False,
         'server_version_num': False,
     }
@@ -58,6 +58,58 @@ FE_SETTINGS_MUTABLE: immutables.Map[str, bool] = immutables.Map(
 
 
 def compile_sql(
+    source: pg_parser.Source,
+    *,
+    schema: s_schema.Schema,
+    tx_state: dbstate.SQLTransactionState,
+    prepared_stmt_map: Mapping[str, str],
+    current_database: str,
+    current_user: str,
+    allow_user_specified_id: Optional[bool],
+    apply_access_policies: Optional[bool],
+    include_edgeql_io_format_alternative: bool = False,
+    allow_prepared_statements: bool = True,
+    disambiguate_column_names: bool,
+    backend_runtime_params: pg_params.BackendRuntimeParams,
+    protocol_version: defines.ProtocolVersion,
+) -> List[dbstate.SQLQueryUnit]:
+    def _try(q: str) -> List[dbstate.SQLQueryUnit]:
+        return _compile_sql(
+            q,
+            schema=schema,
+            tx_state=tx_state,
+            prepared_stmt_map=prepared_stmt_map,
+            current_database=current_database,
+            current_user=current_user,
+            allow_user_specified_id=allow_user_specified_id,
+            apply_access_policies=apply_access_policies,
+            include_edgeql_io_format_alternative=(
+                include_edgeql_io_format_alternative),
+            allow_prepared_statements=allow_prepared_statements,
+            disambiguate_column_names=disambiguate_column_names,
+            backend_runtime_params=backend_runtime_params,
+            protocol_version=protocol_version,
+        )
+
+    try:
+        return _try(source.text())
+    except errors.EdgeDBError as original_err:
+        if isinstance(source, pg_parser.NormalizedSource):
+            # try non-normalized source
+            try:
+                _try(source.original_text())
+            except errors.EdgeDBError as denormalized_err:
+                raise denormalized_err
+            except Exception:
+                raise original_err
+            else:
+                raise AssertionError(
+                    "Normalized query is broken while original is valid")
+        else:
+            raise original_err
+
+
+def _compile_sql(
     query_str: str,
     *,
     schema: s_schema.Schema,
@@ -66,7 +118,7 @@ def compile_sql(
     current_database: str,
     current_user: str,
     allow_user_specified_id: Optional[bool],
-    apply_access_policies_sql: Optional[bool],
+    apply_access_policies: Optional[bool],
     include_edgeql_io_format_alternative: bool = False,
     allow_prepared_statements: bool = True,
     disambiguate_column_names: bool,
@@ -78,7 +130,7 @@ def compile_sql(
         current_database=current_database,
         current_user=current_user,
         allow_user_specified_id=allow_user_specified_id,
-        apply_access_policies_sql=apply_access_policies_sql,
+        apply_access_policies=apply_access_policies,
         include_edgeql_io_format_alternative=(
             include_edgeql_io_format_alternative
         ),
@@ -329,10 +381,10 @@ def compile_sql(
                     'allow_user_specified_id',
                     ('true' if allow_user_specified_id else 'false',),
                 )
-            if apply_access_policies_sql is not None:
+            if apply_access_policies is not None:
                 cconfig.setdefault(
-                    'apply_access_policies_sql',
-                    ('true' if apply_access_policies_sql else 'false',),
+                    'apply_access_policies',
+                    ('true' if apply_access_policies else 'false',),
                 )
             search_path = parse_search_path(cconfig.pop("search_path", ("",)))
             cconfig = dict(sorted((k, v) for k, v in cconfig.items()))
@@ -389,7 +441,7 @@ class ResolverOptionsPartial:
     current_database: str
     query_str: str
     allow_user_specified_id: Optional[bool]
-    apply_access_policies_sql: Optional[bool]
+    apply_access_policies: Optional[bool]
     include_edgeql_io_format_alternative: Optional[bool]
     disambiguate_column_names: bool
 
@@ -422,10 +474,10 @@ def resolve_query(
         allow_user_specified_id = False
 
     apply_access_policies = lookup_bool_setting(
-        tx_state, 'apply_access_policies_sql'
+        tx_state, 'apply_access_policies_pg'
     )
     if apply_access_policies is None:
-        apply_access_policies = opts.apply_access_policies_sql
+        apply_access_policies = opts.apply_access_policies
     if apply_access_policies is None:
         apply_access_policies = False
 

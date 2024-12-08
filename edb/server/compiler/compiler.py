@@ -91,6 +91,7 @@ from edb.pgsql import common as pg_common
 from edb.pgsql import debug as pg_debug
 from edb.pgsql import dbops as pg_dbops
 from edb.pgsql import params as pg_params
+from edb.pgsql import parser as pg_parser
 from edb.pgsql import patches as pg_patches
 from edb.pgsql import types as pg_types
 from edb.pgsql import delta as pg_delta
@@ -552,20 +553,22 @@ class Compiler:
         if setting and setting.value:
             allow_user_specified_id = sql.is_setting_truthy(setting.value)
 
-        setting = database_config.get('apply_access_policies_sql', None)
-        apply_access_policies_sql = None
+        setting = database_config.get('apply_access_policies_pg', None)
+        apply_access_policies_pg = None
         if setting and setting.value:
-            apply_access_policies_sql = sql.is_setting_truthy(setting.value)
+            apply_access_policies_pg = sql.is_setting_truthy(setting.value)
+
+        query_source = pg_parser.Source(query_str)
 
         return sql.compile_sql(
-            query_str,
+            query_source,
             schema=schema,
             tx_state=tx_state,
             prepared_stmt_map=prepared_stmt_map,
             current_database=current_database,
             current_user=current_user,
             allow_user_specified_id=allow_user_specified_id,
-            apply_access_policies_sql=apply_access_policies_sql,
+            apply_access_policies=apply_access_policies_pg,
             disambiguate_column_names=False,
             backend_runtime_params=self.state.backend_runtime_params,
             protocol_version=defines.POSTGRES_PROTOCOL,
@@ -2509,14 +2512,14 @@ def compile_sql_as_unit_group(
     )
 
     sql_units = sql.compile_sql(
-        source.text(),
+        source,
         schema=schema,
         tx_state=sql_tx_state,
         prepared_stmt_map={},
         current_database=ctx.branch_name or "<unknown>",
         current_user=ctx.role_name or "<unknown>",
         allow_user_specified_id=allow_user_specified_id,
-        apply_access_policies_sql=apply_access_policies,
+        apply_access_policies=apply_access_policies,
         include_edgeql_io_format_alternative=True,
         allow_prepared_statements=False,
         disambiguate_column_names=True,

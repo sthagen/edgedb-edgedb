@@ -623,7 +623,7 @@ class TestSQLQuery(tb.SQLQueryTestCase):
         # system columns when access policies are applied
         tran = self.scon.transaction()
         await tran.start()
-        await self.scon.execute('SET LOCAL apply_access_policies_sql TO true')
+        await self.scon.execute('SET LOCAL apply_access_policies_pg TO true')
         await self.scon.execute(
             """SET LOCAL "global default::filter_title" TO 'Halo 3'"""
         )
@@ -1353,7 +1353,7 @@ class TestSQLQuery(tb.SQLQueryTestCase):
         self.assertEqual(res, [["public"]])
 
     async def test_sql_query_set_04(self):
-        # database settings allow_user_specified_ids & apply_access_policies_sql
+        # database settings allow_user_specified_ids & apply_access_policies_pg
         # should be unified over EdgeQL and SQL adapter
 
         async def set_current_database(val: Optional[bool]):
@@ -1361,14 +1361,14 @@ class TestSQLQuery(tb.SQLQueryTestCase):
                 await self.con.execute(
                     f'''
                     configure current database
-                        reset apply_access_policies_sql;
+                        reset apply_access_policies_pg;
                     '''
                 )
             else:
                 await self.con.execute(
                     f'''
                     configure current database
-                        set apply_access_policies_sql := {str(val).lower()};
+                        set apply_access_policies_pg := {str(val).lower()};
                     '''
                 )
 
@@ -1376,13 +1376,13 @@ class TestSQLQuery(tb.SQLQueryTestCase):
             if val is None:
                 await self.scon.execute(
                     f'''
-                    RESET apply_access_policies_sql;
+                    RESET apply_access_policies_pg;
                     '''
                 )
             else:
                 await self.scon.execute(
                     f'''
-                    SET apply_access_policies_sql TO '{str(val).lower()}';
+                    SET apply_access_policies_pg TO '{str(val).lower()}';
                     '''
                 )
 
@@ -2150,7 +2150,7 @@ class TestSQLQuery(tb.SQLQueryTestCase):
             ],
         )
 
-        await self.scon.execute('SET LOCAL apply_access_policies_sql TO true')
+        await self.scon.execute('SET LOCAL apply_access_policies_pg TO true')
 
         # access policies applied
         res = await self.squery_values(
@@ -2179,7 +2179,7 @@ class TestSQLQuery(tb.SQLQueryTestCase):
         res = await self.squery_values('SELECT x FROM "ContentSummary"')
         self.assertEqual(res, [[5]])
 
-        await self.scon.execute('SET LOCAL apply_access_policies_sql TO true')
+        await self.scon.execute('SET LOCAL apply_access_policies_pg TO true')
 
         # access policies applied
         res = await self.squery_values('SELECT x FROM "ContentSummary"')
@@ -2202,7 +2202,7 @@ class TestSQLQuery(tb.SQLQueryTestCase):
 
         # allowed without applying access policies
 
-        await self.scon.execute('SET LOCAL apply_access_policies_sql TO true')
+        await self.scon.execute('SET LOCAL apply_access_policies_pg TO true')
 
         # allowed when filter_title == 'summary'
         await self.scon.execute(
@@ -2233,7 +2233,7 @@ class TestSQLQuery(tb.SQLQueryTestCase):
         res = await self.squery_values('SELECT * FROM ONLY "Content"')
         self.assertEqual(len(res), 1)
 
-        await self.scon.execute('SET LOCAL apply_access_policies_sql TO true')
+        await self.scon.execute('SET LOCAL apply_access_policies_pg TO true')
 
         await self.scon.execute(
             """SET LOCAL "global default::filter_title" TO 'Halo 3'"""
@@ -2313,7 +2313,7 @@ class TestSQLQuery(tb.SQLQueryTestCase):
             "locking clause not supported",
         ):
             await self.scon.execute(
-                'SET LOCAL apply_access_policies_sql TO TRUE'
+                'SET LOCAL apply_access_policies_pg TO TRUE'
             )
             await self.squery_values(
                 '''
@@ -2548,7 +2548,7 @@ class TestSQLQuery(tb.SQLQueryTestCase):
         with self.assertRaisesRegex(
             edgedb.errors.QueryError,
             'duplicate column name: `a`',
-            _position=16,
+            _position=15,
         ):
             await self.assert_sql_query_result('SELECT 1 AS a, 2 AS a', [])
 
@@ -2581,7 +2581,7 @@ class TestSQLQuery(tb.SQLQueryTestCase):
         with self.assertRaisesRegex(
             edgedb.errors.QueryError,
             'duplicate column name: `y_a`',
-            # _position=114, TODO: spans are messed up somewhere
+            _position=137,
         ):
             await self.assert_sql_query_result(
                 '''
@@ -2597,7 +2597,7 @@ class TestSQLQuery(tb.SQLQueryTestCase):
         with self.assertRaisesRegex(
             edgedb.errors.QueryError,
             'duplicate column name: `x_a`',
-            # _position=83, TODO: spans are messed up somewhere
+            _position=92,
         ):
             await self.assert_sql_query_result(
                 '''
@@ -2858,4 +2858,37 @@ class TestSQLQuery(tb.SQLQueryTestCase):
                     "1": 42,
                 },
                 apply_access_policies=False,
+            )
+
+    async def test_native_sql_query_18(self):
+        with self.assertRaisesRegex(
+            edgedb.errors.QueryError,
+            'cannot find column `asdf`',
+            _position=35,
+        ):
+            await self.con.query_sql(
+                '''select title, 'aaaaaaaaaaaaaaaaa', asdf from "Content";'''
+            )
+
+    @test.xerror('See #8077')
+    async def test_native_sql_query_19(self):
+        with self.assertRaisesRegex(
+            edgedb.errors.QueryError,
+            '',
+            _position=37,
+        ):
+            await self.con.query_sql(
+                '''select title, 'aaaaaaaaaaaaaaaaa', asdf() from "Content";'''
+            )
+
+    @test.xfail('See #8077')
+    async def test_native_sql_query_20(self):
+        with self.assertRaisesRegex(
+            edgedb.errors.InvalidValueError,
+            'invalid input syntax for type integer',
+            _position=35,
+        ):
+            await self.con.query_sql(
+                '''\
+select title, 'aaaaaaaaaaaaaaaaa', ('goo'::text::integer) from "Content";'''
             )
