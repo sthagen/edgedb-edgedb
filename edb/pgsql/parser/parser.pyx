@@ -114,6 +114,7 @@ class PgLiteralTypeOID(enum.IntEnum):
     BOOL = 16
     INT4 = 23
     TEXT = 25
+    UNKNOWN = 705
     VARBIT = 1562
     NUMERIC = 1700
 
@@ -236,14 +237,16 @@ cdef class Source:
     def original_text(self) -> str:
         return self._text
 
-    def _compute_cache_key(self) -> bytes:
-        h = hashlib.blake2b(self._tag().to_bytes())
-        h.update(bytes(self.text(), 'UTF-8'))
-        return h.digest()
-
     def cache_key(self) -> bytes:
         if not self._cache_key:
-            self._cache_key = self._compute_cache_key()
+            h = hashlib.blake2b(self._tag().to_bytes())
+            h.update(bytes(self.text(), 'UTF-8'))
+
+            # Include types of extracted constants
+            for extra_type_oid in self.extra_type_oids():
+                h.update(extra_type_oid.to_bytes(8, signed=True))
+            self._cache_key = h.digest()
+
         return self._cache_key
 
     def variables(self) -> dict[str, Any]:
@@ -338,7 +341,7 @@ cdef class NormalizedSource(Source):
             ):
                 oids.append(PgLiteralTypeOID.BOOL)
             elif token is LiteralTokenType.SCONST:
-                oids.append(PgLiteralTypeOID.TEXT)
+                oids.append(PgLiteralTypeOID.UNKNOWN)
             elif (
                 token is LiteralTokenType.XCONST
                 or token is LiteralTokenType.BCONST
@@ -348,13 +351,6 @@ cdef class NormalizedSource(Source):
                 raise AssertionError(f"unexpected literal token type: {token}")
 
         return oids
-
-    def _compute_cache_key(self) -> bytes:
-        h = hashlib.blake2b(super()._compute_cache_key())
-        # Include the types of the extracted constants
-        for oid in self.extra_type_oids():
-            h.update(oid.to_bytes(length=2))
-        return h.digest()
 
     @classmethod
     def from_string(cls, text: str) -> NormalizedSource:
