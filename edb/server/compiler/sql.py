@@ -80,6 +80,7 @@ def compile_sql(
     disambiguate_column_names: bool,
     backend_runtime_params: pg_params.BackendRuntimeParams,
     protocol_version: defines.ProtocolVersion,
+    implicit_limit: Optional[int] = None,
 ) -> List[dbstate.SQLQueryUnit]:
     def _try(
         q: str, normalized_params: List[int]
@@ -101,6 +102,7 @@ def compile_sql(
             backend_runtime_params=backend_runtime_params,
             protocol_version=protocol_version,
             normalized_params=normalized_params,
+            implicit_limit=implicit_limit,
         )
 
     normalized_params = list(source.extra_type_oids())
@@ -207,6 +209,7 @@ def _compile_sql(
     backend_runtime_params: pg_params.BackendRuntimeParams,
     protocol_version: defines.ProtocolVersion,
     normalized_params: List[int],
+    implicit_limit: Optional[int] = None,
 ) -> List[dbstate.SQLQueryUnit]:
     opts = ResolverOptionsPartial(
         query_str=query_str,
@@ -219,6 +222,7 @@ def _compile_sql(
         ),
         disambiguate_column_names=disambiguate_column_names,
         normalized_params=normalized_params,
+        implicit_limit=implicit_limit,
     )
 
     # orig_stmts are the statements prior to constant extraction
@@ -354,6 +358,10 @@ def _compile_sql(
                     "SQL prepared statements are not supported"
                 )
 
+            if not isinstance(stmt.query, (pgast.Query, pgast.CopyStmt)):
+                from edb.pgsql import resolver as pg_resolver
+                pg_resolver.dispatch._raise_unsupported(stmt.query)
+
             # Translate the underlying query.
             stmt_resolved, stmt_source, _ = resolve_query(
                 stmt.query, schema, tx_state, opts
@@ -438,6 +446,13 @@ def _compile_sql(
             # just ignore
             unit.query = "DO $$ BEGIN END $$;"
         elif isinstance(stmt, (pgast.Query, pgast.CopyStmt)):
+            if (
+                protocol_version != defines.POSTGRES_PROTOCOL
+                and isinstance(stmt, pgast.CopyStmt)
+            ):
+                from edb.pgsql import resolver as pg_resolver
+                pg_resolver.dispatch._raise_unsupported(stmt)
+
             stmt_resolved, stmt_source, edgeql_fmt_src = resolve_query(
                 stmt, schema, tx_state, opts
             )
@@ -546,10 +561,11 @@ class ResolverOptionsPartial:
     include_edgeql_io_format_alternative: Optional[bool]
     disambiguate_column_names: bool
     normalized_params: List[int]
+    implicit_limit: Optional[int]
 
 
 def resolve_query(
-    stmt: pgast.Base,
+    stmt: pgast.Query | pgast.CopyStmt,
     schema: s_schema.Schema,
     tx_state: dbstate.SQLTransactionState,
     opts: ResolverOptionsPartial,
@@ -595,6 +611,7 @@ def resolve_query(
         ),
         disambiguate_column_names=opts.disambiguate_column_names,
         normalized_params=opts.normalized_params,
+        implicit_limit=opts.implicit_limit,
     )
     resolved = pg_resolver.resolve(stmt, schema, options)
     source = pg_codegen.generate(resolved.ast, with_source_map=True)
