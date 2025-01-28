@@ -1174,6 +1174,33 @@ class TestSQLQuery(tb.SQLQueryTestCase):
             [12, 4],
         ])
 
+    async def test_sql_query_57(self):
+        res = await self.squery_values(
+            f'''
+            (select 1 limit 1) union (select 2 limit 1);
+            '''
+        )
+        self.assertEqual(
+            res,
+            [
+                [1],
+                [2],
+            ]
+        )
+
+        res = await self.squery_values(
+            f'''
+            (select 1) union (select 2) LIMIT $1;
+            ''',
+            1
+        )
+        self.assertEqual(
+            res,
+            [
+                [1],
+            ]
+        )
+
     async def test_sql_query_introspection_00(self):
         dbname = self.con.dbname
         res = await self.squery_values(
@@ -2299,6 +2326,17 @@ class TestSQLQuery(tb.SQLQueryTestCase):
             [[206]],
         )
 
+    async def test_sql_query_having_01(self):
+        res = await self.squery_values(
+            '''
+            select 1 having false
+            '''
+        )
+        self.assertEqual(
+            res,
+            [],
+        )
+
     async def test_sql_query_unsupported_01(self):
         # test error messages of unsupported queries
 
@@ -2894,6 +2932,19 @@ class TestSQLQuery(tb.SQLQueryTestCase):
             'VALUES (1), (2), (3), (4), (5), (6), (7)',
             [{'column1': 1}, {'column1': 2}, {'column1': 3}],
             implicit_limit=3,
+        )
+
+    async def test_sql_native_query_26(self):
+        await self.assert_sql_query_result(
+            """
+                select distinct title, pages from "Book"
+                order by title, pages;
+            """,
+            [
+                {'title': 'Chronicles of Narnia', 'pages': 206},
+                {'title': 'Hunger Games', 'pages': 374},
+            ],
+            apply_access_policies=False,
         )
 
 

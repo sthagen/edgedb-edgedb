@@ -102,11 +102,9 @@ def resolve_SelectStmt(
                 span=stmt.span,
             )
 
-        relation = pgast.SelectStmt(
+        relation = stmt.replace(
             larg=cast(pgast.Query, larg),
             rarg=cast(pgast.Query, rarg),
-            op=stmt.op,
-            all=stmt.all,
             ctes=ctes + extract_ctes_from_ctx(ctx),
         )
         return (relation, ltable)
@@ -124,6 +122,9 @@ def resolve_SelectStmt(
         register_projections(stmt.target_list, ctx=subctx)
 
         group_clause = dispatch.resolve_opt_list(stmt.group_clause, ctx=subctx)
+
+    # HAVING
+    having = dispatch.resolve_opt(stmt.having_clause, ctx=ctx)
 
     # SELECT projection
     table = context.Table()
@@ -176,6 +177,7 @@ def resolve_SelectStmt(
         from_clause=from_clause,
         target_list=target_list,
         group_clause=group_clause,
+        having_clause=having,
         where_clause=where,
         sort_clause=sort_clause,
         limit_offset=limit_offset,
