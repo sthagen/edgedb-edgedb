@@ -1262,6 +1262,9 @@ cdef class DatabaseConnectionView:
                     # Only recompile queries from the *latest* version,
                     # to avoid quadratic slowdown problems.
                     and req.schema_version == self.schema_version
+                    # SQL queries require _amend_typedesc_in_sql() with a
+                    # backend connection, which is not available here.
+                    and req.input_language != enums.InputLanguage.SQL
                 ):
                     g.create_task(recompile_request(req))
 
@@ -1437,7 +1440,7 @@ cdef class DatabaseConnectionView:
                 if unit.user_schema:
                     user_schema = unit.user_schema
                     user_schema_version = unit.user_schema_version
-            if user_schema and not self.server.config_lookup(
+            if user_schema and not self.config_lookup(
                 "auto_rebuild_query_cache",
             ):
                 user_schema = None
@@ -1447,9 +1450,14 @@ cdef class DatabaseConnectionView:
                 )
 
         if use_metrics:
-            metrics.edgeql_query_compilations.inc(
-                1.0, self.tenant.get_instance_name(), 'compiler'
-            )
+            if query_req.input_language is enums.InputLanguage.EDGEQL:
+                metrics.edgeql_query_compilations.inc(
+                    1.0, self.tenant.get_instance_name(), 'compiler'
+                )
+            else:
+                metrics.sql_compilations.inc(
+                    1.0, self.tenant.get_instance_name()
+                )
 
         source = query_req.source
         if query_unit_group.force_non_normalized:
