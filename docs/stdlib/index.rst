@@ -1,4 +1,3 @@
-.. eql:section-intro-page:: stdlib
 .. versioned-section::
 
 .. _ref_std:
@@ -40,7 +39,7 @@ Standard Library
     pgvector
     deprecated
 
-EdgeDB comes with a rigorously defined type system consisting of **scalar
+|Gel| comes with a rigorously defined type system consisting of **scalar
 types**, **collection types** (like arrays and tuples), and **object types**.
 There is also a library of built-in functions and operators for working with
 each datatype.

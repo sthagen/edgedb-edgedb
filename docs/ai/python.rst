@@ -1,87 +1,59 @@
-.. _ref_ai_python:
+.. _ref_ai_python_reference:
 
-======
-Python
-======
+==========
+Python API
+==========
 
-:edb-alt-title: EdgeDB AI's Python package
-
-The ``edgedb.ai`` package is an optional binding of the AI extension in EdgeDB.
-To use the AI binding, you need to install ``edgedb-python`` with the ``ai``
-extra dependencies:
+The ``gel.ai`` package is an optional binding of the AI extension in |Gel|.
 
 .. code-block:: bash
 
-  $ pip install 'edgedb[ai]'
+  $ pip install 'gel[ai]'
 
 
-Usage
-=====
+Blocking and async API
+======================
 
-Start by importing ``edgedb`` and ``edgedb.ai``:
+The AI binding is built on top of the regular |Gel| client objects, providing
+both blocking and asynchronous versions of its API.
 
-.. code-block:: python
-
-    import edgedb
-    import edgedb.ai
-
-
-Blocking
---------
-
-The AI binding is built on top of the regular EdgeDB client objects, providing
-both blocking and asynchronous versions of its API. For example, a blocking AI
-client is initialized like this:
+**Blocking client example**:
 
 .. code-block:: python
 
-    client = edgedb.create_client()
-    gpt4ai = edgedb.ai.create_ai(
+    import gel
+    import gel.ai
+
+    client = gel.create_client()
+    gpt4ai = gel.ai.create_rag_client(
         client,
         model="gpt-4-turbo-preview"
     )
-
-Add your query as context:
-
-.. code-block:: python
 
     astronomy_ai = gpt4ai.with_context(
         query="Astronomy"
     )
 
-The default text generation prompt will ask your selected provider to limit
-answer to information provided in the context and will pass the queried
-objects' AI index as context along with that prompt.
-
-Call your AI client's ``query_rag`` method, passing in a text query.
-
-.. code-block:: python
-
     print(
         astronomy_ai.query_rag("What color is the sky on Mars?")
     );
-
-or stream back the results by using ``stream_rag`` instead:
-
-.. code-block:: python
 
     for data in astronomy_ai.stream_rag("What color is the sky on Mars?"):
         print(data)
 
 
-Async
------
-
-To use an async client instead, do this:
+**Async client example**:
 
 .. code-block:: python
 
-    import asyncio  # alongside the EdgeDB imports
+    import gel
+    import gel.ai
+    import asyncio
 
-    client = edgedb.create_async_client()
+    client = gel.create_async_client()
 
     async def main():
-        gpt4ai = await edgedb.ai.create_async_ai(
+        gpt4ai = await gel.ai.create_async_rag_client(
             client,
             model="gpt-4-turbo-preview"
         )
@@ -100,21 +72,21 @@ To use an async client instead, do this:
     asyncio.run(main())
 
 
-API reference
-=============
+Factory functions
+=================
 
-.. py:function:: create_ai(client, **kwargs) -> EdgeDBAI
+.. py:function:: create_rag_client(client, **kwargs) -> RAGClient
 
-   Creates an instance of ``EdgeDBAI`` with the specified client and options.
+   Creates an instance of ``RAGClient`` with the specified client and options.
 
    This function ensures that the client is connected before initializing the
    AI with the specified options.
 
    :param client:
-       An EdgeDB client instance.
+       A |Gel| client instance.
 
    :param kwargs:
-       Keyword arguments that are passed to the ``AIOptions`` data class to
+       Keyword arguments that are passed to the ``RAGOptions`` data class to
        configure AI-specific options. These options are:
 
        * ``model``: The name of the model to be used. (required)
@@ -122,34 +94,30 @@ API reference
          ``None`` will result in the client using the default prompt.
          (default: ``None``)
 
-.. py:function:: create_async_ai(client, **kwargs) -> AsyncEdgeDBAI
+.. py:function:: create_async_rag_client(client, **kwargs) -> AsyncRAGClient
 
-   Creates an instance of ``AsyncEdgeDBAI`` w/ the specified client & options.
+   Creates an instance of ``AsyncRAGClient`` w/ the specified client & options.
 
    This function ensures that the client is connected asynchronously before
    initializing the AI with the specified options.
 
    :param client:
-       An asynchronous EdgeDB client instance.
+       An asynchronous |Gel| client instance.
 
    :param kwargs:
-       Keyword arguments that are passed to the ``AIOptions`` data class to
+       Keyword arguments that are passed to the ``RAGOptions`` data class to
        configure AI-specific options. These options are:
 
        * ``model``: The name of the model to be used. (required)
        * ``prompt``: An optional prompt to guide the model's behavior. (default: None)
 
 
-AI client classes
------------------
+Core classes
+============
 
+.. py:class:: BaseRAGClient
 
-BaseEdgeDBAI
-^^^^^^^^^^^^
-
-.. py:class:: BaseEdgeDBAI
-
-   The base class for EdgeDB AI clients.
+   The base class for |Gel| AI clients.
 
    This class handles the initialization and configuration of AI clients and
    provides methods to modify their configuration and context dynamically.
@@ -158,7 +126,7 @@ BaseEdgeDBAI
    these methods are available on an AI client of either type.
 
    :ivar options:
-       An instance of :py:class:`AIOptions`, storing the AI options.
+       An instance of :py:class:`RAGOptions`, storing the RAG options.
 
    :ivar context:
        An instance of :py:class:`QueryContext`, storing the context for AI
@@ -168,7 +136,7 @@ BaseEdgeDBAI
        A placeholder for the client class, should be implemented by subclasses.
 
    :param client:
-       An instance of EdgeDB client, which could be either a synchronous or
+       An instance of |Gel| client, which could be either a synchronous or
        asynchronous client.
 
    :param options:
@@ -210,12 +178,9 @@ BaseEdgeDBAI
          objects returned by the query.
 
 
-EdgeDBAI
-^^^^^^^^
+.. py:class:: RAGClient
 
-.. py:class:: EdgeDBAI
-
-   A synchronous class for creating EdgeDB AI clients.
+   A synchronous class for creating |Gel| AI clients.
 
    This class provides methods to send queries and receive responses using both
    blocking and streaming communication modes synchronously.
@@ -253,13 +218,19 @@ EdgeDBAI
        the query. If not provided, uses the default context of this AI client
        instance.
 
+.. py:method:: generate_embeddings(*inputs: str, model: str) -> list[float]
 
-AsyncEdgeDBAI
-^^^^^^^^^^^^^
+    Generates embeddings for input texts.
 
-.. py:class:: AsyncEdgeDBAI
+    :param inputs:
+        Input texts.
+    :param model:
+        The embedding model to use
 
-   An asynchronous class for creating EdgeDB AI clients.
+
+.. py:class:: AsyncRAGClient
+
+   An asynchronous class for creating |Gel| AI clients.
 
    This class provides methods to send queries and receive responses using both
    blocking and streaming communication modes asynchronously.
@@ -301,9 +272,19 @@ AsyncEdgeDBAI
        the query. If not provided, uses the default context of this AI client
        instance.
 
+.. py:method:: generate_embeddings(*inputs: str, model: str) -> list[float]
+    :noindex:
 
-Other classes
--------------
+    Generates embeddings for input texts.
+
+    :param inputs:
+        Input texts.
+    :param model:
+        The embedding model to use
+
+
+Configuration classes
+=====================
 
 .. py:class:: ChatParticipantRole
 
@@ -343,9 +324,9 @@ Other classes
        role-specific content within the prompt.
 
 
-.. py:class:: AIOptions
+.. py:class:: RAGOptions
 
-   A data class for AI options, specifying model and prompt settings.
+   A data class for RAG options, specifying model and prompt settings.
 
    :ivar model:
        The name of the AI model.
@@ -354,8 +335,8 @@ Other classes
        the model.
 
    :method derive(kwargs):
-       Creates a new instance of :py:class:`AIOptions` by merging existing options
-       with provided keyword arguments. Returns a new :py:class:`AIOptions`
+       Creates a new instance of :py:class:`RAGOptions` by merging existing options
+       with provided keyword arguments. Returns a new :py:class:`RAGOptions`
        instance with updated attributes.
 
        :param kwargs:
@@ -414,3 +395,4 @@ Other classes
    :method to_httpx_request():
        Converts the RAGRequest into a dictionary suitable for making an HTTP
        request using the httpx library.
+

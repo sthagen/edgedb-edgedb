@@ -1,20 +1,14 @@
-.. eql:section-intro-page:: clients
-
 .. _ref_clients_index:
 
 ================
 Client Libraries
 ================
 
-**Official Client Libraries**
+**Client Libraries**
 
 * `Python <python/index>`_
 * `TypeScript/JavaScript <js/index>`_
 * `Go <go/index>`_
-* `Rust <rust/index>`_
-* `.NET <dotnet/index>`_
-* `Java <java/index>`_
-* `Elixir <elixir/index>`_
 
 **HTTP Protocols**
 
@@ -30,10 +24,5 @@ Client Libraries
     js/index
     python/index
     go/index
-    rust/index
-    dart/index
-    dotnet/index
-    java/index
-    elixir/index
     http/index
     graphql/index

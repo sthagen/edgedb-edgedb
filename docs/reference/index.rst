@@ -1,4 +1,3 @@
-.. eql:section-intro-page:: reference
 .. versioned-section::
 
 .. _ref_reference_index:
@@ -13,12 +12,10 @@ Reference
 
 
     edgeql/index
-    sdl/index
-    ddl/index
     connection
     environment
     projects
-    edgedb_toml
+    gel_toml
     dsn
     dump_format
     backend_ha
@@ -31,4 +28,4 @@ Reference
 
 
 This section contains comprehensive reference documentation on the internals of
-EdgeDB, the binary protocol, the formal syntax of EdgeQL, and more.
+|Gel|, the binary protocol, the formal syntax of EdgeQL, and more.
