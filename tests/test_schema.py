@@ -455,8 +455,11 @@ class TestSchema(tb.BaseSchemaLoadTest):
             };
         """
 
-    @tb.must_fail(errors.QueryError,
-                  "could not resolve partial path")
+    @tb.must_fail(
+        errors.QueryError,
+        "could not resolve partial path",
+        hint="Did you mean __source__.name?"
+    )
     def test_schema_partial_path_in_default_of_link_prop_01(self):
         """
             module default {
@@ -472,6 +475,21 @@ class TestSchema(tb.BaseSchemaLoadTest):
                     }
 
                 }
+            }
+        """
+
+    @tb.must_fail(
+        errors.QueryError,
+        "could not resolve partial path",
+        hint="Did you mean __new__.wow?"
+    )
+    def test_schema_partial_path_in_trigger_01(self):
+        """
+            type Foo {
+                property wow: bool;
+                trigger prohibit_queue after insert for each do (
+                    select assert(.wow, message := "wow!")
+                );
             }
         """
 
@@ -740,6 +758,44 @@ class TestSchema(tb.BaseSchemaLoadTest):
         type Foo {
             property val -> enum<VariantA, VariantB>;
         };
+        """
+
+    @tb.must_fail(
+        errors.InvalidReferenceError,
+        "type 'test::Bar' does not exist",
+    )
+    def test_schema_bad_type_19a(self):
+        """
+        function foo() -> Bar using (1);
+        """
+
+    @tb.must_fail(
+        errors.InvalidReferenceError,
+        "type 'test::Bar' does not exist",
+    )
+    def test_schema_bad_type_19b(self):
+        """
+        function foo(x: Bar) -> int64 using (1);
+        """
+
+    @tb.must_fail(
+        errors.InvalidReferenceError,
+        "type 'test::Baz' does not exist",
+    )
+    def test_schema_bad_type_19c(self):
+        """
+        type Bar;
+        function foo() -> Bar | Baz using (1);
+        """
+
+    @tb.must_fail(
+        errors.InvalidReferenceError,
+        "type 'test::Baz' does not exist",
+    )
+    def test_schema_bad_type_19d(self):
+        """
+        type Bar;
+        function foo(x: Bar | Baz) -> int64 using (1);
         """
 
     def test_schema_computable_cardinality_inference_01(self):

@@ -20,19 +20,17 @@
   </a>
   <br />
   <br />
-  <a href="https://www.geldata.com/docs/guides/quickstart">Quickstart</a>
+  <a href="https://docs.geldata.com/learn/quickstart/overview/nextjs">Learn: build an app with Gel</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
   <a href="https://www.geldata.com">Website</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
-  <a href="https://www.geldata.com/docs">Docs</a>
-  <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
-  <a href="https://www.geldata.com/tutorial">Playground</a>
+  <a href="https://docs.geldata.com">Docs</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
   <a href="https://www.geldata.com/blog">Blog</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
-  <a href="https://discord.gg/umUueND6ag">Discord</a>
+  <a href="https://discord.gg/gel">Discord</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
-  <a href="https://twitter.com/usegel">Twitter</a>
+  <a href="https://twitter.com/geldata">Twitter</a>
   <br />
 
 </div>
@@ -86,7 +84,7 @@ This example is intentionally simple, but Gel supports everything you'd
 expect from your database: a strict type system, indexes, constraints, computed
 properties, stored procedures...the list goes on. Plus it gives you some shiny
 new features too: link properties, schema mixins, and best-in-class JSON
-support. Read the [schema docs](https://www.geldata.com/docs/datamodel/index)
+support. Read the [schema docs](https://docs.geldata.com/reference/datamodel)
 for details.
 
 <!-- ### Objects, not rows. ❄️ -->
@@ -131,7 +129,7 @@ insert Movie {
 
 There's a lot more to EdgeQL: a comprehensive standard library, computed
 properties, polymorphic queries, `with` blocks, transactions, and much more.
-Read the [EdgeQL docs](https://www.geldata.com/docs/edgeql/index) for the full
+Read the [EdgeQL docs](https://docs.geldata.com/reference/edgeql) for the full
 picture.
 
 <br/>
@@ -142,13 +140,14 @@ picture.
 
 While Gel solves the same problems as ORM libraries, it's so much more. It's
 a full-fledged database with a
-[powerful and elegant query language](https://www.geldata.com/docs/edgeql/index), a
-[migrations system](https://www.geldata.com/docs/guides/migrations/index), a
-[suite of client libraries](https://www.geldata.com/docs/clients/index) in
+[powerful and elegant query language](https://docs.geldata.com/reference/edgeql), a
+[migrations system](https://docs.geldata.com/learn/migrations), a
+[suite of client libraries](https://docs.geldata.com/reference/clients) in
 different languages, a
-[command line tool](https://www.geldata.com/docs/cli/index), and—coming soon—a
-cloud hosting platform. The goal is to rethink every aspect of how developers
-model, migrate, manage, and query their database.
+[command line tool](https://docs.geldata.com/learn/cli), and a managed
+[cloud service](https://geldata.com/cloud).
+The goal is to rethink every aspect of how developers model, migrate,
+manage, and query their database.
 
 Here's a taste-test of Gel's next-level developer experience: you can
 install our CLI, spin up an instance, and open an interactive EdgeQL shell with
@@ -173,15 +172,15 @@ PS> iwr https://geldata.com/ps1 -useb | iex
 
 To start learning about Gel, check out the following resources:
 
-- **[The quickstart](https://www.geldata.com/docs/guides/quickstart)**. If
+- **[The quickstart](https://docs.geldata.com/learn/quickstart/overview/nextjs)**. If
   you're just starting out, the 10-minute quickstart guide is the fastest way
   to get up and running.
 - **[Gel Cloud 🌤️](https://www.geldata.com/cloud)**. The best
   most effortless way to host your Gel database in the cloud.
-- **[The interactive tutorial](https://www.geldata.com/tutorial)**. For a
+<!--- **[The interactive tutorial](https://www.geldata.com/tutorial)**. For a
   structured deep-dive into the EdgeQL query language, try the web-based
   tutorial— no need to install anything.
-<!-- The e-book needs to be converted to Gel
+ The e-book needs to be converted to Gel
 
 - **[The e-book](https://www.edgedb.com/easy-edgedb)**. For the most
   comprehensive walkthrough of EdgeDB concepts, check out our illustrated
@@ -190,22 +189,22 @@ To start learning about Gel, check out the following resources:
   advanced concepts.
 -->
 - **The docs.** Jump straight into the docs for
-  [schema modeling](https://www.geldata.com/docs/datamodel/index) or
-  [EdgeQL](https://www.geldata.com/docs/edgeql/index)!
+  [schema modeling](https://docs.geldata.com/reference/datamodel) or
+  [EdgeQL](https://docs.geldata.com/reference/edgeql)!
 
 <br />
 
 ## Contributing
 
 PRs are always welcome! To get started, follow
-[this guide](https://www.geldata.com/docs/internals/dev) to build Gel from
+[this guide](https://docs.geldata.com/resources/guides/contributing) to build Gel from
 source on your local machine.
 
 [File an issue 👉](https://github.com/geldata/gel/issues/new/choose)
 <br />
 [Start a Discussion 👉](https://github.com/geldata/gel/discussions/new)
 <br />
-[Join the discord 👉](https://discord.gg/umUueND6ag)
+[Join the discord 👉](https://discord.gg/gel)
 
 <br />
 
