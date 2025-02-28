@@ -259,7 +259,6 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
             ]
         )
 
-    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_props_basic_03(self):
         await self.assert_query_result(
             r'''
@@ -272,7 +271,7 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
                         cost,
                         @count
                     } ORDER BY @count DESC THEN .name ASC
-                } FILTER .deck.cost = .deck@count
+                } FILTER any((for d in .deck select d.cost = d@count))
                   ORDER BY .name;
             ''',
             [
@@ -433,7 +432,6 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
             ]
         )
 
-    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_props_cross_02(self):
         await self.assert_query_result(
             r'''
@@ -442,39 +440,11 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
                     name,
                     same := EXISTS (
                         SELECT User
-                        FILTER
-                            Card.cost = User.deck@count AND
-                            Card = User.deck
-                    )
-                }
-                ORDER BY .name;
-            ''',
-            [
-                {'name': 'Bog monster', 'same': False},
-                {'name': 'Djinn', 'same': False},
-                {'name': 'Dragon', 'same': False},
-                {'name': 'Dwarf', 'same': False},
-                {'name': 'Giant eagle', 'same': False},
-                {'name': 'Giant turtle', 'same': True},
-                {'name': 'Golem', 'same': True},
-                {'name': 'Imp', 'same': False},
-                {'name': 'Sprite', 'same': False},
-            ]
-        )
-
-    @tb.ignore_warnings('more than one.* in a FILTER clause')
-    async def test_edgeql_props_cross_03(self):
-        await self.assert_query_result(
-            r'''
-                # get cards that have the same count in some deck as their cost
-                SELECT Card {
-                    name,
-                    same := EXISTS (
-                        SELECT
-                            User
-                        FILTER
-                            Card.cost = User.deck@count AND
-                            Card = User.deck
+                        FILTER any ((
+                            FOR User IN User FOR deck IN User.deck SELECT
+                            Card.cost = deck@count AND
+                            Card = deck
+                        ))
                     )
                 }
                 ORDER BY .name;
@@ -940,7 +910,10 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
 
         await self.assert_query_result(
             r'''
-                SELECT _ := (sum(User.deck@count), User.name)
+                SELECT _ := (
+                    FOR User in User
+                    SELECT (sum(User.deck@count), User.name)
+                )
                 ORDER BY _;
             ''',
             [
@@ -1182,7 +1155,9 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
     async def test_edgeql_props_back_01(self):
         await self.assert_query_result(
             """
-            with X1 := (Card { z := (.<deck[IS User], .<deck[IS User]@count)}),
+            with X1 := (Card { z := (
+                       for d in .<deck[IS User] union
+                       (d, d@count))}),
                  X2 := X1 { owners2 := assert_distinct(
                      .z.0 { count := X1.z.1 }) },
             select X2 { name, owners2: {name, count} order BY .name }
@@ -1349,9 +1324,13 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
     async def test_edgeql_props_schema_back_01(self):
         await self.assert_query_result(
             r'''
-                select (Card.name, Card.owners.name, Card.owners@count)
-                filter Card.name = 'Dragon'
-                order by Card.owners.name
+                select (
+                    for Card in Card
+                    for owner in Card.owners
+                    select (Card.name, owner.name, owner@count)
+                    filter Card.name = 'Dragon'
+                )
+                order by .1
             ''',
             [["Dragon", "Alice", 2], ["Dragon", "Dave", 1]],
         )

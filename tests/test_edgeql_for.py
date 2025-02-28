@@ -692,14 +692,16 @@ class TestEdgeQLFor(tb.QueryTestCase):
                         {
                             "name": "Bog monster",
                             "letter": {"B!!", "B!?"},
-                            "correlated": {("!", "!"), ("?", "?")},
+                            "correlated": {("!", "!"), ("!", "?"),
+                                           ("?", "!"), ("?", "?")},
                             "uncorrelated": {("!", "!"), ("!", "?"),
                                              ("?", "!"), ("?", "?")}
                         },
                         {
                             "name": "Imp",
                             "letter": {"I!!", "I!?"},
-                            "correlated": {("!", "!"), ("?", "?")},
+                            "correlated": {("!", "!"), ("!", "?"),
+                                           ("?", "!"), ("?", "?")},
                             "uncorrelated": {("!", "!"), ("!", "?"),
                                              ("?", "!"), ("?", "?")}
                         },
@@ -996,7 +998,7 @@ class TestEdgeQLFor(tb.QueryTestCase):
                     SELECT (X, (FOR x in {X} UNION (SELECT x)))
                 ));
             ''',
-            [2],
+            [4],
         )
 
         await self.assert_query_result(
@@ -1006,7 +1008,7 @@ class TestEdgeQLFor(tb.QueryTestCase):
                     SELECT ((FOR x in {X} UNION (SELECT x)), X)
                 ));
             ''',
-            [2],
+            [4],
         )
 
     async def test_edgeql_for_correlated_02(self):
@@ -1016,7 +1018,7 @@ class TestEdgeQLFor(tb.QueryTestCase):
                               (FOR x in {Card} UNION (SELECT x.name)),
                 ));
             ''',
-            [9],
+            [81],
         )
 
     async def test_edgeql_for_correlated_03(self):
@@ -1026,7 +1028,7 @@ class TestEdgeQLFor(tb.QueryTestCase):
                                Card.name,
                 ));
             ''',
-            [9],
+            [81],
         )
 
     async def test_edgeql_for_empty_01(self):
