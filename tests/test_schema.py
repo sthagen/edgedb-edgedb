@@ -18,7 +18,7 @@
 
 
 from __future__ import annotations
-from typing import Type, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import random
 import re
@@ -3214,7 +3214,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
         self,
         schema_text: str,
         invalid_queries: list[str],
-        error_type: Type,
+        error_type: type,
         error_message: str,
     ) -> None:
         for query in invalid_queries:
@@ -10099,7 +10099,6 @@ class BaseDescribeTest(tb.BaseSchemaLoadTest):
             schema, _ = s_ddl.apply_sdl(
                 sdl_schema,
                 base_schema=schema,
-                current_schema=schema,
             )
         else:
             schema = self.load_schema(schema_text, modname=default_module)
@@ -12206,7 +12205,6 @@ class TestSDLTextFromSchema(BaseDescribeTest):
             schema, _ = s_ddl.apply_sdl(
                 sdl_schema,
                 base_schema=schema,
-                current_schema=schema,
             )
         else:
             schema = self.load_schema(schema_text, modname=default_module)
