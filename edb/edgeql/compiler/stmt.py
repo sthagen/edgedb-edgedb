@@ -544,6 +544,9 @@ def compile_InsertQuery(
                 stmt.on_conflict = conflicts.compile_insert_unless_conflict(
                     stmt, stmt_subject_stype, ctx=ictx)
 
+        conflicts.check_for_isolation_conflicts(
+            stmt, stmt_subject_stype, ctx=ictx)
+
         mat_stype = schemactx.get_material_type(stmt_subject_stype, ctx=ctx)
         result = setgen.class_set(
             mat_stype, path_id=stmt.subject.path_id, ctx=ctx
@@ -623,7 +626,7 @@ def compile_UpdateQuery(
     with ctx.subquery() as ictx:
         stmt = irast.UpdateStmt(
             span=expr.span,
-            sql_mode_link_only=expr.sql_mode_link_only,
+            sql_on_conflict=expr.sql_on_conflict,
         )
         init_stmt(stmt, expr, ctx=ictx, parent_ctx=ctx)
 
@@ -680,12 +683,6 @@ def compile_UpdateQuery(
                 ctx=bodyctx,
                 span=expr.span,
             )
-            # If we are doing a SQL-mode link only update (that is,
-            # we are doing a SQL INSERT or DELETE to a link table),
-            # disable rewrites.
-            # HACK: This is a really ass-backwards way to accomplish that.
-            if stmt.sql_mode_link_only:
-                ctx.env.dml_rewrites.pop(stmt.subject, None)
 
         result = setgen.class_set(
             mat_stype, path_id=stmt.subject.path_id, ctx=ctx,
@@ -710,6 +707,9 @@ def compile_UpdateQuery(
                 dtype, result, mode=qltypes.AccessKind.UpdateWrite, ctx=ictx
             ):
                 stmt.write_policies[dtype.id] = write_pol
+
+            conflicts.check_for_isolation_conflicts(
+                stmt, dtype, mat_stype, ctx=ictx)
 
         stmt.conflict_checks = conflicts.compile_inheritance_conflict_checks(
             stmt, mat_stype, ctx=ictx)

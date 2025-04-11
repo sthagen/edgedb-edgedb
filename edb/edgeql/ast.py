@@ -599,7 +599,8 @@ class UpdateQuery(Query):
 
     where: typing.Optional[Expr] = None
 
-    sql_mode_link_only: bool = False
+    # Temporary metadata needed for SQL ON CONFLICT
+    sql_on_conflict: typing.Optional[tuple[typing.Any, typing.Any]] = None
 
 
 class DeleteQuery(Query):
@@ -687,6 +688,11 @@ class DDLOperation(DDL):
 
 class DDLCommand(DDLOperation, Command):
     __abstract_node__ = True
+
+
+class DDLQuery(DDLCommand):
+    '''A query wrapped in DDL. Appears in migrations.'''
+    query: Query
 
 
 class NonTransactionalDDLCommand(DDLCommand):

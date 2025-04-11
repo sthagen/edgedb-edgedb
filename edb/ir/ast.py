@@ -806,6 +806,7 @@ class Statement(Command):
     singletons: list[PathId]
     triggers: tuple[tuple[Trigger, ...], ...]
     warnings: tuple[errors.EdgeDBError, ...]
+    unsafe_isolation_dangers: tuple[errors.UnsafeIsolationLevelError, ...]
 
 
 class TypeIntrospection(ImmutableExpr):
@@ -1279,7 +1280,7 @@ class OnConflictClause(Base):
     select_ir: Set
     always_check: bool
     else_ir: typing.Optional[Set]
-    update_query_set: typing.Optional[Set] = None
+    check_anchor: typing.Optional[PathId] = None
     else_fail: typing.Optional[MutatingStmt] = None
 
 
@@ -1310,12 +1311,13 @@ class Rewrites:
 class UpdateStmt(MutatingStmt, FilteredStmt):
     _material_type: TypeRef | None = None
 
+    # Temporary metadata needed for SQL ON CONFLICT
+    sql_on_conflict: typing.Optional[tuple[PathId, PathId]] = None
+
     @property
     def material_type(self) -> TypeRef:
         assert self._material_type
         return self._material_type
-
-    sql_mode_link_only: bool = False
 
 
 class DeleteStmt(MutatingStmt, FilteredStmt):
