@@ -1377,7 +1377,7 @@ class Compiler:
         schema_a: bytes,
         schema_b: bytes,
         global_schema: bytes,
-        conn_state_pickle: Any,
+        conn_state_pickle: Optional[bytes],
     ) -> None:
         if conn_state_pickle:
             conn_state = pickle.loads(conn_state_pickle)
@@ -1592,9 +1592,11 @@ def _get_compile_options(
     ctx: CompileContext,
     *,
     is_explain: bool = False,
+    no_implicit_fields: bool = False,
 ) -> qlcompiler.CompilerOptions:
-    can_have_implicit_fields = (
-        ctx.output_format is enums.OutputFormat.BINARY)
+    can_have_implicit_fields = not no_implicit_fields and (
+        ctx.output_format is enums.OutputFormat.BINARY
+    )
 
     return qlcompiler.CompilerOptions(
         modaliases=ctx.state.current_tx().get_modaliases(),
@@ -1610,6 +1612,7 @@ def _get_compile_options(
         json_parameters=ctx.json_parameters,
         implicit_limit=ctx.implicit_limit,
         bootstrap_mode=ctx.bootstrap_mode,
+        dump_restore_mode=ctx.dump_restore_mode,
         apply_query_rewrites=(
             not ctx.bootstrap_mode
             and not ctx.schema_reflection_mode
@@ -1925,45 +1928,20 @@ def _compile_ql_query(
         list[dbstate.ServerParamConversion]
     ] = None
     if isinstance(ir, irast.Statement) and ir.server_param_conversions:
-        # A server param conversion is either:
-        # - a query parameter
-        #   eg. `<str>$my_var`;
-        # - a normalized constant
-        #   eg. `select 1` normalizes to `select <int64>$0`; or,
-        # - a constant value, when a conversion is part of a schema expression,
-        #   no normalization takes place.
-        #
         # The irast.ServerParamConversion we get from the ql compiler contains
         # either a script_param_index or a constant value.
         #
-        # The script_param_index may refer to either a query param or a
-        # normalized constant. We need to check the source's extra variable
-        # indexes to see if a param_name refers to an normalized constant.
+        # A script_param_index can refer to either an actual query param or a
+        # constant that was normalized out of a query.
         #
-        # If a parameter is a normalized constant, pass on the blob and arg
-        # indexes to the server.
-        #
-        # Query parameters and constant values can be passed on as they are.
-
-        extra_variable_indexes = (
-            ctx.source.extra_variable_indexes() if ctx.source else {}
-        )
+        # A constant value is used as is by the server.
 
         server_param_conversions = [
             dbstate.ServerParamConversion(
                 param_name=p.param_name,
                 conversion_name=p.conversion_name,
                 additional_info=p.additional_info,
-                bind_args_index=(
-                    p.script_param_index
-                    if p.param_name not in extra_variable_indexes else
-                    None
-                ),
-                extra_blob_arg_indexes=(
-                    extra_variable_indexes[p.param_name]
-                    if p.param_name in extra_variable_indexes else
-                    None
-                ),
+                script_param_index=p.script_param_index,
                 constant_value=p.constant_value
             )
             for p in ir.server_param_conversions
@@ -2436,7 +2414,6 @@ def _compile_ql_config_op(
     current_tx = ctx.state.current_tx()
     schema = current_tx.get_schema(ctx.compiler_state.std_schema)
 
-    modaliases = current_tx.get_modaliases()
     session_config = current_tx.get_session_config()
     database_config = current_tx.get_database_config()
 
@@ -2450,14 +2427,13 @@ def _compile_ql_config_op(
         raise errors.QueryError(
             'CONFIGURE INSTANCE cannot be executed in a transaction block')
 
+    options = _get_compile_options(ctx, no_implicit_fields=True)
+    options.in_server_config_op = True
+
     ir = qlcompiler.compile_ast_to_ir(
         ql,
         schema=schema,
-        options=qlcompiler.CompilerOptions(
-            modaliases=modaliases,
-            in_server_config_op=True,
-            dump_restore_mode=ctx.dump_restore_mode,
-        ),
+        options=options,
     )
 
     globals = None
