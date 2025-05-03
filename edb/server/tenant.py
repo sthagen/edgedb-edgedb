@@ -2086,11 +2086,6 @@ class Tenant(ha_base.ClusterProtocol):
                         use_prep_stmt=True,
                     )
 
-            # XXX: TODO: We don't need to signal here in the
-            # non-function version, but in the function caching
-            # situation this will be fraught.
-            # await self.signal_sysevent("query-cache-changes", dbname=dbname)
-
         except Exception:
             logger.exception("error in evict_query_cache():")
             metrics.background_errors.inc(
@@ -2100,17 +2095,26 @@ class Tenant(ha_base.ClusterProtocol):
     def on_remote_query_cache_change(
         self,
         dbname: str,
-        keys: Optional[list[str]],
+        to_add: Optional[list[str]],
+        to_invalidate: Optional[list[str]],
     ) -> None:
         if not self.is_db_ready(dbname):
             return
+
+        if to_invalidate:
+            if db := self.maybe_get_db(dbname=dbname):
+                db.invalidate_cache_entries(
+                    [uuid.UUID(s) for s in to_invalidate]
+                )
 
         async def task():
             try:
                 async with self._with_intro_pgcon(dbname) as conn:
                     if not conn:
                         return
-                    query_cache = await self._load_query_cache(conn, keys=keys)
+                    query_cache = await self._load_query_cache(
+                        conn, keys=to_add
+                    )
 
                 if query_cache and (db := self.maybe_get_db(dbname=dbname)):
                     db.hydrate_cache(query_cache)
@@ -2122,7 +2126,10 @@ class Tenant(ha_base.ClusterProtocol):
                 )
                 raise
 
-        self.create_task(task(), interruptable=True)
+        # If neither to_add nor to_invalidate are specified, then we do
+        # a full introspection.
+        if to_add or not to_invalidate:
+            self.create_task(task(), interruptable=True)
 
     def get_debug_info(self) -> dict[str, Any]:
         from . import smtp
