@@ -7804,9 +7804,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail(
-        "from_alias is set on new collection types from computed globals"
-    )
     async def test_edgeql_ddl_global_type_changes_03(self):
         # Create computed global
         # Delete computed global
@@ -7831,9 +7828,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail(
-        "from_alias is set on new collection types from computed globals"
-    )
     async def test_edgeql_ddl_global_type_changes_04(self):
         # Create computed global
         # Delete computed global
@@ -7858,9 +7852,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail(
-        "from_alias is set on new collection types from computed globals"
-    )
     async def test_edgeql_ddl_global_type_changes_05(self):
         # Create computed global
         # Delete computed global
@@ -7890,9 +7881,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail(
-        "from_alias is set on new collection types from computed globals"
-    )
     async def test_edgeql_ddl_global_type_changes_06(self):
         # Create computed global
         # Delete computed global
@@ -7922,9 +7910,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail(
-        "from_alias is set on new collection types from computed globals"
-    )
     async def test_edgeql_ddl_global_type_changes_07(self):
         # Create computed global
         # Delete computed global
@@ -7975,7 +7960,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
     async def test_edgeql_ddl_global_type_changes_10(self):
         # Create non-computed global
         # Delete non-computed global
@@ -7995,7 +7979,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
     async def test_edgeql_ddl_global_type_changes_11(self):
         # Create non-computed global
         # Delete non-computed global
@@ -8015,7 +7998,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
     async def test_edgeql_ddl_global_type_changes_12(self):
         # Create non-computed global
         # Delete non-computed global
@@ -8040,7 +8022,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
     async def test_edgeql_ddl_global_type_changes_13(self):
         # Create non-computed global
         # Delete non-computed global
@@ -8065,7 +8046,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
     async def test_edgeql_ddl_global_type_changes_14(self):
         # Create non-computed global
         # Delete non-computed global
@@ -8085,7 +8065,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
     async def test_edgeql_ddl_global_type_changes_15(self):
         # Create computed global
         # Create non-computed global
@@ -8156,7 +8135,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global bar', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
     async def test_edgeql_ddl_global_type_changes_16(self):
         # Create computed global
         # Create non-computed global
@@ -8232,7 +8210,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
     async def test_edgeql_ddl_global_type_changes_17(self):
         # Create non-computed global
         # Create computed global
@@ -8298,7 +8275,6 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
     async def test_edgeql_ddl_global_type_changes_18(self):
         # Create non-computed global
         # Create computed global
@@ -8369,8 +8345,267 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global bar', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
     async def test_edgeql_ddl_global_type_changes_19(self):
+        # Create computed global
+        # Create reference to type
+        # Delete computed global
+        # Delete reference to type
+
+        await self._check_ddl_global_type_changes([
+            (
+                'create global foo := ((1,),)',
+                [
+                    {
+                        'name': 'default::foo@default|foo@global',
+                        'from_alias': True,
+                        'type_name': 'schema::TupleExprAlias',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'create function bar() -> array<tuple<int64>> using([(1,)])',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'default::foo@default|foo@global',
+                        'from_alias': True,
+                        'type_name': 'schema::TupleExprAlias',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'drop global foo',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            ('drop function bar()', []),
+        ])
+
+    async def test_edgeql_ddl_global_type_changes_20(self):
+        # Create reference to type
+        # Create computed global
+        # Delete reference to type
+        # Delete computed global
+
+        await self._check_ddl_global_type_changes([
+            (
+                'create function foo() -> array<tuple<int64>> using([(1,)])',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'create global bar := ((1,),)',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'default::bar@default|bar@global',
+                        'from_alias': True,
+                        'type_name': 'schema::TupleExprAlias',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'drop function foo()',
+                [
+                    {
+                        'name': 'default::bar@default|bar@global',
+                        'from_alias': True,
+                        'type_name': 'schema::TupleExprAlias',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            ('drop global bar', []),
+        ])
+
+    async def test_edgeql_ddl_global_type_changes_21(self):
+        # Create non-computed global
+        # Create reference to type
+        # Delete non-computed global
+        # Delete reference to type
+
+        await self._check_ddl_global_type_changes([
+            (
+                'create global foo: tuple<tuple<int64>>',
+                [
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'create function bar() -> array<tuple<int64>> using([(1,)])',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'drop global foo',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            ('drop function bar()', []),
+        ])
+
+    async def test_edgeql_ddl_global_type_changes_22(self):
+        # Create reference to type
+        # Create non-computed global
+        # Delete reference to type
+        # Delete non-computed global
+
+        await self._check_ddl_global_type_changes([
+            (
+                'create function foo() -> array<tuple<int64>> using([(1,)])',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'create global bar: tuple<tuple<int64>>',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'drop function foo()',
+                [
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            ('drop global bar', []),
+        ])
+
+    async def test_edgeql_ddl_global_type_changes_23(self):
         # Create computed global
         # Alter expr, same type
         # Delete global
@@ -8409,8 +8644,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
-    async def test_edgeql_ddl_global_type_changes_20(self):
+    async def test_edgeql_ddl_global_type_changes_24(self):
         # Create computed global
         # Alter expr, different type
         # Delete global
@@ -8449,8 +8683,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
-    async def test_edgeql_ddl_global_type_changes_21(self):
+    async def test_edgeql_ddl_global_type_changes_25(self):
         # Create computed global
         # Alter to non-computed, same type
         # Delete global
@@ -8489,8 +8722,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
-    async def test_edgeql_ddl_global_type_changes_22(self):
+    async def test_edgeql_ddl_global_type_changes_26(self):
         # Create computed global
         # Alter to non-computed, different type
         # Delete global
@@ -8529,8 +8761,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
-    async def test_edgeql_ddl_global_type_changes_23(self):
+    async def test_edgeql_ddl_global_type_changes_27(self):
         # Create non-computed global
         # Alter target type
         # Delete global
@@ -8563,7 +8794,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    async def test_edgeql_ddl_global_type_changes_24(self):
+    async def test_edgeql_ddl_global_type_changes_28(self):
         # Create non-computed global
         # Alter to computed, same type
         # Delete global
@@ -8604,8 +8835,7 @@ class TestEdgeQLDDL(tb.DDLTestCase):
             ('drop global foo', []),
         ])
 
-    @test.xfail("non-computed globals don't tidy up when deleted")
-    async def test_edgeql_ddl_global_type_changes_25(self):
+    async def test_edgeql_ddl_global_type_changes_29(self):
         # Create non-computed global
         # Alter to computed, different type
         # Delete global
@@ -12064,7 +12294,6 @@ type default::Foo {
             ('drop alias foo', []),
         ])
 
-    @test.xfail("from_alias is set on new collection types from aliases")
     async def test_edgeql_ddl_alias_type_changes_03(self):
         # Create alias
         # Delete alias
@@ -12089,7 +12318,6 @@ type default::Foo {
             ('drop alias foo', []),
         ])
 
-    @test.xfail("from_alias is set on new collection types from aliases")
     async def test_edgeql_ddl_alias_type_changes_04(self):
         # Create alias
         # Delete alias
@@ -12114,7 +12342,6 @@ type default::Foo {
             ('drop alias foo', []),
         ])
 
-    @test.xfail("from_alias is set on new collection types from aliases")
     async def test_edgeql_ddl_alias_type_changes_05(self):
         # Create alias
         # Delete alias
@@ -12144,7 +12371,6 @@ type default::Foo {
             ('drop alias foo', []),
         ])
 
-    @test.xfail("from_alias is set on new collection types from aliases")
     async def test_edgeql_ddl_alias_type_changes_06(self):
         # Create alias
         # Delete alias
@@ -12174,7 +12400,6 @@ type default::Foo {
             ('drop alias foo', []),
         ])
 
-    @test.xfail("from_alias is set on new collection types from aliases")
     async def test_edgeql_ddl_alias_type_changes_07(self):
         # Create alias
         # Delete alias
@@ -12199,7 +12424,6 @@ type default::Foo {
             ('drop alias foo', []),
         ])
 
-    @test.xfail("from_alias is set on new collection types from aliases")
     async def test_edgeql_ddl_alias_type_changes_08(self):
         # Create alias 1
         # Create alias 2
@@ -12280,7 +12504,6 @@ type default::Foo {
             ('drop alias bar', []),
         ])
 
-    @test.xfail("from_alias is set on new collection types from aliases")
     async def test_edgeql_ddl_alias_type_changes_09(self):
         # Create alias 1
         # Create alias 2
@@ -12361,8 +12584,147 @@ type default::Foo {
             ('drop alias foo', []),
         ])
 
-    @test.xfail("from_alias is set on new collection types from aliases")
     async def test_edgeql_ddl_alias_type_changes_10(self):
+        # Create alias
+        # Create reference to type
+        # Delete alias
+        # Delete reference to type
+
+        await self._check_ddl_global_type_changes([
+            (
+                'create alias foo := ((1,),)',
+                [
+                    {
+                        'name': 'default::foo',
+                        'from_alias': True,
+                        'type_name': 'schema::TupleExprAlias',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'create function bar() -> array<tuple<int64>> using([(1,)])',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'default::foo',
+                        'from_alias': True,
+                        'type_name': 'schema::TupleExprAlias',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'drop alias foo',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            ('drop function bar()', []),
+        ])
+
+    async def test_edgeql_ddl_alias_type_changes_11(self):
+        # Create reference to type
+        # Create alias
+        # Delete reference to type
+        # Delete alias
+
+        await self._check_ddl_global_type_changes([
+            (
+                'create function foo() -> array<tuple<int64>> using([(1,)])',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'create alias bar := ((1,),)',
+                [
+                    {
+                        'name': 'array<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Array',
+                    },
+                    {
+                        'name': 'default::bar',
+                        'from_alias': True,
+                        'type_name': 'schema::TupleExprAlias',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            (
+                'drop function foo()',
+                [
+                    {
+                        'name': 'default::bar',
+                        'from_alias': True,
+                        'type_name': 'schema::TupleExprAlias',
+                    },
+                    {
+                        'name': 'tuple<std::int64>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                    {
+                        'name': 'tuple<tuple<std|int64>>',
+                        'from_alias': False,
+                        'type_name': 'schema::Tuple',
+                    },
+                ]
+            ),
+            ('drop alias bar', []),
+        ])
+
+    async def test_edgeql_ddl_alias_type_changes_12(self):
         # Create alias
         # Alter expr, same type
         # Delete alias
@@ -12401,8 +12763,7 @@ type default::Foo {
             ('drop alias foo', []),
         ])
 
-    @test.xfail("from_alias is set on new collection types from aliases")
-    async def test_edgeql_ddl_alias_type_changes_11(self):
+    async def test_edgeql_ddl_alias_type_changes_13(self):
         # Create alias
         # Alter expr, different type
         # Delete alias
