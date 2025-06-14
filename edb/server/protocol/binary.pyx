@@ -269,10 +269,14 @@ cdef class EdgeConnection(frontend.FrontendConnection):
                 f'database {database!r} does not accept connections'
             )
 
-        await self._start_connection(database)
-
         self.dbname = database
         self.username = user
+        # In the tunneled HTTP endpoint, auth gets done after we have
+        # set up a dbview, so we need to update it..
+        if self._dbview:
+            self._dbview._role_name = user
+
+        await self._start_connection(database)
 
         if self._transport_proto is srvargs.ServerConnTransport.HTTP:
             return
@@ -365,6 +369,7 @@ cdef class EdgeConnection(frontend.FrontendConnection):
             dbname=database,
             query_cache=self.query_cache_enabled,
             protocol_version=self.protocol_version,
+            role_name=self.username,
         )
         assert type(dbv) is dbview.DatabaseConnectionView
         self._dbview = <dbview.DatabaseConnectionView>dbv
@@ -465,7 +470,6 @@ cdef class EdgeConnection(frontend.FrontendConnection):
                 dbv,
                 compiled,
                 bind_args,
-                role_name=self.username,
                 fe_conn=self,
                 query_req=query_req,
             )
@@ -795,7 +799,6 @@ cdef class EdgeConnection(frontend.FrontendConnection):
                 dbv,
                 compiled,
                 bind_args,
-                role_name=self.username,
                 fe_conn=self,
                 use_prep_stmt=use_prep_stmt,
                 query_req=query_req,
@@ -1898,6 +1901,11 @@ async def eval_buffer(
         raise RuntimeError(
             'cannot process the request, the server is shutting down')
 
+    # HACK: In the tunneled protocol we don't have the username when
+    # we create the dbview, so put in an empty username. It will be
+    # filled in once auth is called.
+    proto.username = ''
+
     try:
         await proto._start_connection(database)
         proto.data_received(data)
@@ -1949,6 +1957,7 @@ async def run_script(
         dbview.CompiledQuery compiled
         dbview.DatabaseConnectionView _dbview
     conn = new_edge_connection(server, tenant)
+    conn.username = user
     await conn._start_connection(database)
     try:
         _dbview = conn.get_dbview()
