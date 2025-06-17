@@ -20,10 +20,10 @@ import json
 
 import edgedb
 
-from edb.testbase import server as tb
+from edb.testbase import http as tb
 
 
-class TestServerPermissions(tb.ConnectedTestCase):
+class TestServerPermissions(tb.EdgeQLTestCase):
 
     PARALLELISM_GRANULARITY = 'system'
     TRANSACTION_ISOLATION = False
@@ -36,7 +36,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
                 SET password := 'secret';
             };
             CREATE PERMISSION default::perm_a;
-        ''')  # noqa
+        ''')
 
         try:
             conn = await self.connect(
@@ -66,7 +66,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
             };
             CREATE PERMISSION default::perm_a;
             CREATE PERMISSION default::perm_b;
-        ''')  # noqa
+        ''')
 
         try:
             conn = await self.connect(
@@ -74,12 +74,20 @@ class TestServerPermissions(tb.ConnectedTestCase):
                 password='secret',
             )
 
-            result = await conn.query("""
+            qry = """
                 SELECT [
                     global default::perm_a,
                     global default::perm_b,
                 ];
-            """)
+            """
+            result = await conn.query(qry)
+            self.assert_data_shape(result, [[True, False]])
+
+            result, _ = self.edgeql_query(
+                qry,
+                user='foo',
+                password='secret',
+            )
             self.assert_data_shape(result, [[True, False]])
 
         finally:
@@ -105,7 +113,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
             CREATE PERMISSION default::perm_a;
             CREATE PERMISSION default::perm_b;
             CREATE PERMISSION default::perm_c;
-        ''')  # noqa
+        ''')
 
         try:
             conn = await self.connect(
@@ -142,7 +150,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
             };
             CREATE PERMISSION default::perm_a;
             CREATE PERMISSION default::perm_b;
-        ''')  # noqa
+        ''')
 
         try:
             conn = await self.connect(
@@ -162,7 +170,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
                 ALTER ROLE foo {
                     SET permissions := default::perm_b;
                 };
-            ''')  # noqa
+            ''')
 
             result = await conn.query("""
                 SELECT [
@@ -198,7 +206,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
             CREATE PERMISSION default::perm_a;
             CREATE PERMISSION default::perm_b;
             CREATE PERMISSION default::perm_c;
-        ''')  # noqa
+        ''')
 
         try:
             conn = await self.connect(
@@ -243,7 +251,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
                     ALLOW INSERT
                     USING (global default::perm_a);
             };
-        ''')  # noqa
+        ''')
 
         try:
             conn = await self.connect(
@@ -289,7 +297,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
                     ALLOW INSERT
                     USING (global default::perm_a);
             };
-        ''')  # noqa
+        ''')
 
         try:
             conn = await self.connect(
@@ -334,7 +342,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
                     ALLOW INSERT
                     USING (global default::perm_a);
             };
-        ''')  # noqa
+        ''')
 
         try:
             conn = await self.connect(
@@ -369,7 +377,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
             CREATE TYPE Widget {
                 CREATE PROPERTY n -> int64;
             };
-        ''')  # noqa
+        ''')
 
         await self.con.execute('INSERT Widget { n := 1 };')
 
@@ -435,7 +443,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
             CREATE TYPE Widget {
                 CREATE PROPERTY n -> int64;
             };
-        ''')  # noqa
+        ''')
 
         await self.con.execute('INSERT Widget { n := 1 };')
 
@@ -495,7 +503,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
             CREATE TYPE Widget {
                 CREATE PROPERTY n -> int64;
             };
-        ''')  # noqa
+        ''')
 
         await self.con.execute('INSERT Widget { n := 1 };')
 
@@ -571,6 +579,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
 
     async def test_server_permissions_session_config_01(self):
         # Non-superuser can run session config commands
+        # But not certain ones
 
         await self.con.query('''
             CREATE ROLE foo {
@@ -580,10 +589,11 @@ class TestServerPermissions(tb.ConnectedTestCase):
             CREATE TYPE custom::Widget {
                 CREATE PROPERTY n -> int64;
             };
-        ''')  # noqa
+        ''')
 
         await self.con.execute('INSERT custom::Widget { n := 1 };')
 
+        conn2 = None
         try:
             conn = await self.connect(
                 user='foo',
@@ -597,8 +607,32 @@ class TestServerPermissions(tb.ConnectedTestCase):
             """))
             self.assert_data_shape(result, [{'n': 1}])
 
+            async with self.assertRaisesRegexTx(
+                edgedb.DisabledCapabilityError,
+                'role foo does not have permission'
+            ):
+                await conn.execute('''
+                    CONFIGURE SESSION SET apply_access_policies := false
+                ''')
+
+            # Try configuring with client directly
+            args = self.get_connect_args(database=self.con.dbname)
+            args.update(dict(
+                user='foo',
+                password='secret',
+            ))
+            conn2 = edgedb.create_async_client(**args)
+            conn2a = conn2.with_config(apply_access_policies=False)
+            async with self.assertRaisesRegexTx(
+                edgedb.DisabledCapabilityError,
+                'role foo does not have permission'
+            ):
+                await conn2a.query('select 1')
+
         finally:
             await conn.aclose()
+            if conn2:
+                await conn2.aclose()
             await self.con.query('''
                 DROP TYPE custom::Widget;
                 DROP MODULE custom;
@@ -611,10 +645,15 @@ class TestServerPermissions(tb.ConnectedTestCase):
         await self.con.query('''
             CREATE ROLE foo {
                 SET password := 'secret';
+                SET permissions := cfg::perm::configure_apply_access_policies;
             };
             CREATE GLOBAL default::bar -> int64;
-        ''')  # noqa
+            CREATE TYPE T;
+            INSERT T;
+            ALTER TYPE T { create access policy no allow all using (false); }
+        ''')
 
+        conn2 = None
         try:
             conn = await self.connect(
                 user='foo',
@@ -629,8 +668,46 @@ class TestServerPermissions(tb.ConnectedTestCase):
             """))
             self.assert_data_shape(result, [1])
 
+            await self.assert_query_result(
+                '''
+                select count(T)
+                ''',
+                [0],
+            )
+
+            await conn.execute('''
+                CONFIGURE SESSION SET apply_access_policies := false
+            ''')
+
+            await self.assert_query_result(
+                '''
+                select count(T)
+                ''',
+                [0],
+            )
+
+            # Try configuring with client directly
+            args = self.get_connect_args(database=self.con.dbname)
+            args.update(dict(
+                user='foo',
+                password='secret',
+            ))
+            conn2 = edgedb.create_async_client(**args)
+            self.assertEqual(
+                await conn2.query_single('select count(T)'),
+                0,
+            )
+
+            conn2a = conn2.with_config(apply_access_policies=False)
+            self.assertEqual(
+                await conn2a.query_single('select count(T)'),
+                1,
+            )
+
         finally:
             await conn.aclose()
+            if conn2:
+                await conn2.aclose()
             await self.con.query('''
                 DROP GLOBAL default::bar;
                 DROP ROLE foo;
@@ -643,7 +720,7 @@ class TestServerPermissions(tb.ConnectedTestCase):
             CREATE ROLE foo {
                 SET password := 'secret';
             };
-        ''')  # noqa
+        ''')
 
         try:
             conn = await self.connect(
