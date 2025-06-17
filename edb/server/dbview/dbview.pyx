@@ -1034,6 +1034,13 @@ cdef class DatabaseConnectionView:
             )
         return False, ()
 
+    def get_role_capability(self) -> enums.Capability:
+        if capability := self.tenant.get_role_capabilities().get(
+            self._role_name
+        ):
+            return capability
+        return enums.Capability.NONE
+
     cpdef in_tx(self):
         return self._in_tx
 
@@ -1791,6 +1798,14 @@ cdef class DatabaseConnectionView:
                 allowed_capabilities,
                 error_constructor,
                 reason,
+            )
+
+        role_capability = self.get_role_capability()
+        if query_capabilities & ~role_capability:
+            raise query_capabilities.make_error(
+                role_capability,
+                error_constructor,
+                f"role {self._role_name} does not have permission",
             )
 
         if self.tenant.is_readonly():
