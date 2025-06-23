@@ -16,14 +16,18 @@
 # limitations under the License.
 #
 
+import asyncio
 import json
+import os
+import tempfile
 
 import edgedb
 
+from edb.testbase import server as server_tb
 from edb.testbase import http as tb
 
 
-class TestServerPermissions(tb.EdgeQLTestCase):
+class TestServerPermissions(tb.EdgeQLTestCase, server_tb.CLITestCaseMixin):
 
     PARALLELISM_GRANULARITY = 'system'
     TRANSACTION_ISOLATION = False
@@ -784,6 +788,129 @@ class TestServerPermissions(tb.EdgeQLTestCase):
 
         finally:
             await conn.aclose()
+            await self.con.query('''
+                DROP ROLE foo;
+            ''')
+
+    async def test_server_permissions_ddl_02(self):
+        # Non-superuser with sys::perm::ddl can run ddl commands
+
+        await self.con.query('''
+            CREATE ROLE foo {
+                SET password := 'secret';
+                SET permissions := sys::perm::ddl;
+            };
+        ''')
+
+        try:
+            conn = await self.connect(
+                user='foo',
+                password='secret',
+            )
+
+            await conn.execute("""
+                CREATE TYPE Widget;
+            """)
+
+        finally:
+            await conn.aclose()
+            await self.con.query('''
+                DROP TYPE Widget;
+                DROP ROLE foo;
+            ''')
+
+    async def test_server_permissions_admin_01(self):
+        # Non-superuser cannot run administer, describe, and analyze commands
+
+        await self.con.query('''
+            CREATE ROLE foo {
+                SET password := 'secret';
+            };
+        ''')
+
+        try:
+            conn = await self.connect(
+                user='foo',
+                password='secret',
+            )
+
+            with self.assertRaisesRegex(
+                edgedb.DisabledCapabilityError,
+                'cannot execute ADMINISTER commands: '
+                'role foo does not have permission'
+            ):
+                await conn.execute("""
+                    ADMINISTER schema_repair();
+                """)
+
+            with self.assertRaisesRegex(
+                edgedb.DisabledCapabilityError,
+                'cannot execute DESCRIBE commands: '
+                'role foo does not have permission'
+            ):
+                await conn.execute("""
+                    DESCRIBE SCHEMA
+                """)
+
+            with self.assertRaisesRegex(
+                edgedb.DisabledCapabilityError,
+                'cannot execute ANALYZE commands: '
+                'role foo does not have permission'
+            ):
+                await conn.execute("""
+                    ANALYZE SELECT 1
+                """)
+
+        finally:
+            await conn.aclose()
+            await self.con.query('''
+                DROP ROLE foo;
+            ''')
+
+    async def test_server_permissions_dump_01(self):
+        # Non-superuser cannot do dumps or restores
+
+        await self.con.query('''
+            CREATE ROLE foo {
+                SET password := 'secret';
+            };
+        ''')
+
+        try:
+            conn_args = self.get_connect_args(
+                user='foo',
+                password='secret',
+            )
+            with tempfile.TemporaryDirectory() as f:
+                fname = os.path.join(f, 'dump')
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    'role foo does not have permission'
+                ):
+                    await asyncio.to_thread(
+                        self.run_cli_on_connection,
+                        conn_args,
+                        '-d', self.get_database_name(), 'dump', fname
+                    )
+
+                # Do a real dump so we can check restore fails for the
+                # right reason
+                await asyncio.to_thread(
+                    self.run_cli,
+                    '-d', self.get_database_name(), 'dump', fname
+                )
+
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    'role foo does not have permission'
+                ):
+                    await asyncio.to_thread(
+                        self.run_cli_on_connection,
+                        conn_args,
+                        '-d', self.get_database_name(), 'restore', fname
+                    )
+
+        finally:
             await self.con.query('''
                 DROP ROLE foo;
             ''')
