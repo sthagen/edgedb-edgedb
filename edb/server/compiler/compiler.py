@@ -2579,10 +2579,12 @@ def _compile_dispatch_ql(
             return query, enums.Capability(0)
 
     elif isinstance(ql, qlast.DDLCommand):
-        return (
-            ddl.compile_and_apply_ddl_stmt(ctx, ql, source=source),
-            enums.Capability.DDL,
-        )
+        query = ddl.compile_and_apply_ddl_stmt(ctx, ql, source=source)
+        capability = enums.Capability.DDL
+        if isinstance(ql, qlast.GlobalObjectCommand):
+            capability |= enums.Capability.GLOBAL_DDL
+
+        return (query, capability)
 
     elif isinstance(ql, qlast.Transaction):
         return (
@@ -2609,8 +2611,16 @@ def _compile_dispatch_ql(
                 capability = enums.Capability(0)
             else:
                 capability = enums.Capability.SESSION_CONFIG
+        elif ql.scope is qltypes.ConfigScope.DATABASE:
+            capability = (
+                enums.Capability.PERSISTENT_CONFIG
+                | enums.Capability.BRANCH_CONFIG
+            )
         else:
-            capability = enums.Capability.PERSISTENT_CONFIG
+            capability = (
+                enums.Capability.PERSISTENT_CONFIG
+                | enums.Capability.INSTANCE_CONFIG
+            )
         return (
             _compile_ql_config_op(ctx, ql),
             capability,
