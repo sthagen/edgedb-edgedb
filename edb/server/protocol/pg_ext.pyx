@@ -30,6 +30,7 @@ import sys
 import time
 import uuid
 from collections import deque
+from typing import Sequence
 
 cimport cython
 import immutables
@@ -45,7 +46,7 @@ cimport edb.pgsql.parser.parser as pg_parser
 from edb.server import args as srvargs
 from edb.server import defines, metrics
 from edb.server import tenant as edbtenant
-from edb.server.compiler import dbstate
+from edb.server.compiler import dbstate, enums
 from edb.server.pgcon import errors as pgerror
 from edb.server.pgcon.pgcon cimport PGAction, PGMessage
 from edb.server.protocol cimport frontend
@@ -1000,6 +1001,9 @@ cdef class PgConnection(frontend.FrontendConnection):
             source = pg_parser.Source.from_string(query_str)
             query_units = await self.compile(source, dbv)
 
+        for qu in query_units:
+            self.check_capabilities(qu)
+
         already_in_implicit_tx = dbv._in_tx_implicit
         metrics.sql_queries.inc(
             len(query_units), self.tenant.get_instance_name()
@@ -1329,6 +1333,35 @@ cdef class PgConnection(frontend.FrontendConnection):
             self.debug_print("extended_query", actions)
         return actions, None
 
+    def check_capabilities(
+        self,
+        query_unit,
+    ):
+        query_capabilities = query_unit.capabilities
+
+        role_capability = self.get_role_capability()
+        if query_capabilities & ~role_capability:
+            raise query_capabilities.make_error(
+                role_capability,
+                errors.DisabledCapabilityError,
+                f"role {self.username} does not have permission",
+            )
+
+    def get_role_capability(self) -> enums.Capability:
+        if capability := self.tenant.get_role_capabilities().get(
+            self.username
+        ):
+            return capability
+        return enums.Capability.NONE
+
+    def get_permissions(self) -> tuple[bool, Sequence[str]]:
+        if role_desc := self.tenant.get_roles().get(self.username):
+            return (
+                bool(role_desc.get('superuser')),
+                (role_desc.get('all_permissions') or ())
+            )
+        return False, ()
+
     async def _ensure_ps_locality(
         self,
         dbv: ConnectionView,
@@ -1618,6 +1651,9 @@ cdef class PgConnection(frontend.FrontendConnection):
                 "cannot insert multiple commands into a prepared "
                 "statement",
             )
+
+        for qu in query_units:
+            self.check_capabilities(qu)
 
         return await self._parse_unit(
             stmt_name,

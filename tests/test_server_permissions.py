@@ -980,3 +980,272 @@ class TestServerPermissions(tb.EdgeQLTestCase, server_tb.CLITestCaseMixin):
             await self.con.query('''
                 DROP ROLE foo;
             ''')
+
+
+class TestServerPermissionsSQL(server_tb.SQLQueryTestCase):
+
+    PARALLELISM_GRANULARITY = 'system'
+    TRANSACTION_ISOLATION = False
+
+    async def test_server_permissions_sql_config_01(self):
+        # Non-superuser cannot use SET statements
+
+        import asyncpg
+
+        await self.con.query('''
+            CREATE ROLE foo {
+                SET password := 'secret';
+            };
+        ''')
+
+        try:
+            conn = await self.create_sql_connection(
+                user='foo',
+                password='secret',
+            )
+
+            with self.assertRaisesRegex(
+                asyncpg.exceptions.InternalServerError,
+                'cannot execute sql session configuration commands: '
+                'role foo does not have permission'
+            ):
+                await conn.execute("""
+                    SET LOCAL transaction_isolation TO 'serializable'
+                """)
+
+            with self.assertRaisesRegex(
+                asyncpg.exceptions.InternalServerError,
+                'cannot execute sql session configuration commands: '
+                'role foo does not have permission'
+            ):
+                await conn.execute("""
+                    SET SESSION transaction_isolation TO 'serializable'
+                """)
+
+        finally:
+            await conn.close()
+            await self.con.query('''
+                DROP ROLE foo;
+            ''')
+
+    async def test_server_permissions_sql_config_02(self):
+        # Non-superuser can use SET statements
+        # with sys::perm::sql_session_config
+
+        await self.con.query('''
+            CREATE ROLE foo {
+                SET password := 'secret';
+                SET permissions := sys::perm::sql_session_config;
+            };
+        ''')
+
+        try:
+            conn = await self.create_sql_connection(
+                user='foo',
+                password='secret',
+            )
+
+            await conn.execute("""
+                SET LOCAL transaction_isolation TO 'serializable'
+            """)
+
+            await conn.execute("""
+                SET SESSION transaction_isolation TO 'serializable'
+            """)
+
+        finally:
+            await conn.close()
+            await self.con.query('''
+                DROP ROLE foo;
+            ''')
+
+    async def test_server_permissions_sql_config_03(self):
+        # SET and RESET only supported via postgres protocol
+
+        await self.con.query('''
+            CREATE ROLE foo {
+                SET password := 'secret';
+            };
+        ''')
+
+        try:
+            conn = await self.connect(
+                user='foo',
+                password='secret',
+            )
+
+            with self.assertRaisesRegex(
+                edgedb.UnsupportedFeatureError,
+                'not supported: VARIABLE SET'
+            ):
+                await conn.query_sql("""
+                    SET LOCAL transaction_isolation TO 'serializable'
+                """)
+
+            with self.assertRaisesRegex(
+                edgedb.UnsupportedFeatureError,
+                'not supported: VARIABLE SET'
+            ):
+                await conn.query_sql("""
+                    SET SESSION transaction_isolation TO 'serializable'
+                """)
+
+        finally:
+            await conn.aclose()
+            await self.con.query('''
+                DROP ROLE foo;
+            ''')
+
+    async def test_server_permissions_sql_config_04(self):
+        # SET and RESET only supported via postgres protocol
+
+        await self.con.query('''
+            CREATE ROLE foo {
+                SET password := 'secret';
+                SET permissions := sys::perm::sql_session_config;
+            };
+        ''')
+
+        try:
+            conn = await self.connect(
+                user='foo',
+                password='secret',
+            )
+
+            with self.assertRaisesRegex(
+                edgedb.UnsupportedFeatureError,
+                'not supported: VARIABLE SET'
+            ):
+                await conn.query_sql("""
+                    SET LOCAL transaction_isolation TO 'serializable'
+                """)
+
+            with self.assertRaisesRegex(
+                edgedb.UnsupportedFeatureError,
+                'not supported: VARIABLE SET'
+            ):
+                await conn.query_sql("""
+                    SET SESSION transaction_isolation TO 'serializable'
+                """)
+
+        finally:
+            await conn.aclose()
+            await self.con.query('''
+                DROP ROLE foo;
+            ''')
+
+    async def test_server_permissions_sql_config_05(self):
+        # Non-superuser cannot use sql_config
+
+        import asyncpg
+
+        await self.con.query('''
+            CREATE ROLE foo {
+                SET password := 'secret';
+            };
+        ''')
+
+        try:
+            conn = await self.create_sql_connection(
+                user='foo',
+                password='secret',
+            )
+
+            with self.assertRaisesRegex(
+                asyncpg.exceptions.InternalServerError,
+                'cannot execute sql session configuration commands: '
+                'role foo does not have permission'
+            ):
+                await conn.execute("""
+                    SELECT set_config('bytea_output', 'hex', false)
+                """)
+
+        finally:
+            await conn.close()
+            await self.con.query('''
+                DROP ROLE foo;
+            ''')
+
+    async def test_server_permissions_sql_config_06(self):
+        # Non-superuser can use sql_config
+        # with sys::perm::sql_session_config
+
+        await self.con.query('''
+            CREATE ROLE foo {
+                SET password := 'secret';
+                SET permissions := sys::perm::sql_session_config;
+            };
+        ''')
+
+        try:
+            conn = await self.create_sql_connection(
+                user='foo',
+                password='secret',
+            )
+
+            await conn.execute("""
+                SELECT set_config('bytea_output', 'hex', false)
+            """)
+
+        finally:
+            await conn.close()
+            await self.con.query('''
+                DROP ROLE foo;
+            ''')
+
+    async def test_server_permissions_sql_config_07(self):
+        # Non-superuser cannot use sql_config
+
+        await self.con.query('''
+            CREATE ROLE foo {
+                SET password := 'secret';
+            };
+        ''')
+
+        try:
+            conn = await self.connect(
+                user='foo',
+                password='secret',
+            )
+
+            with self.assertRaisesRegex(
+                edgedb.DisabledCapabilityError,
+                'cannot execute sql session configuration commands: '
+                'role foo does not have permission'
+            ):
+                await conn.query_sql("""
+                    SELECT set_config('bytea_output', 'hex', false)
+                """)
+
+        finally:
+            await conn.aclose()
+            await self.con.query('''
+                DROP ROLE foo;
+            ''')
+
+    async def test_server_permissions_sql_config_08(self):
+        # Non-superuser can use sql_config
+        # with sys::perm::sql_session_config
+
+        await self.con.query('''
+            CREATE ROLE foo {
+                SET password := 'secret';
+                SET permissions := sys::perm::sql_session_config;
+            };
+        ''')
+
+        try:
+            conn = await self.connect(
+                user='foo',
+                password='secret',
+            )
+
+            await conn.query_sql("""
+                SELECT set_config('bytea_output', 'hex', false)
+            """)
+
+        finally:
+            await conn.aclose()
+            await self.con.query('''
+                DROP ROLE foo;
+            ''')
