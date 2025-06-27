@@ -52,6 +52,7 @@ from . import constraints
 from . import delta as sd
 from . import expr as s_expr
 from . import expraliases as s_expraliases
+from . import futures as s_futures
 from . import inheriting
 from . import name as sn
 from . import objects as so
@@ -459,6 +460,17 @@ class Pointer(referencing.NamedReferencedInheritingObject,
         merge_fn=merge_readonly,
     )
 
+    splat_strategy = so.SchemaField(
+        qltypes.SplatStrategy,
+        allow_ddl_set=True,
+        describe_visibility=(
+            so.DescribeVisibilityPolicy.SHOW_IF_EXPLICIT_OR_DERIVED_NOT_DEFAULT
+        ),
+        coerce=True,
+        default=qltypes.SplatStrategy.Default,
+        compcoef=0.909,
+    )
+
     secret = so.SchemaField(
         bool,
         default=False,
@@ -469,6 +481,13 @@ class Pointer(referencing.NamedReferencedInheritingObject,
         bool,
         default=False,
         compcoef=0.909,
+    )
+
+    linkful = so.SchemaField(
+        bool,
+        default=False,
+        compcoef=0.99,
+        inheritable=False,
     )
 
     # For non-derived pointers this is strongly correlated with
@@ -770,8 +789,10 @@ class Pointer(referencing.NamedReferencedInheritingObject,
             'source', 'target', 'id'
         } and (self.is_id_pointer(schema) or self.is_endpoint_pointer(schema))
 
-    def is_property(self, schema: s_schema.Schema) -> bool:
-        raise NotImplementedError
+    @classmethod
+    def is_property(cls) -> bool:
+        # Property overloads
+        return False
 
     def is_link_property(self, schema: s_schema.Schema) -> bool:
         raise NotImplementedError
@@ -1104,9 +1125,6 @@ class PseudoPointer(s_abc.Pointer):
     ) -> bool:
         raise NotImplementedError
 
-    def scalar(self) -> bool:
-        raise NotImplementedError
-
     def material_type(
         self,
         schema: s_schema.Schema,
@@ -1150,6 +1168,8 @@ class PointerCommandContext(
 class PointerCommandOrFragment(
     referencing.ReferencedObjectCommandBase[Pointer_T]
 ):
+    def is_property_command(self) -> bool:
+        return self.get_schema_metaclass().is_property()
 
     def canonicalize_attributes(
         self,
@@ -1194,6 +1214,12 @@ class PointerCommandOrFragment(
                 expr.parse(), schema, context)
         else:
             inf_target_ref = None
+
+        if (
+            isinstance(self, sd.CreateObject)
+            and not self.is_property_command()
+        ):
+            self.set_attribute_value('linkful', True)
 
         if inf_target_ref is not None:
             span = self.get_attribute_span('target')
@@ -1259,6 +1285,9 @@ class PointerCommandOrFragment(
             if isinstance(result_expr.expr, irast.Pointer):
                 result_expr, _ = irutils.collapse_type_intersection(
                     result_expr)
+
+        if self.is_property_command():
+            self.set_attribute_value('linkful', irutils.is_linkful(orig_expr))
 
         # Process a computable pointer which potentially could be an
         # aliased link that should inherit link properties.
@@ -1810,7 +1839,7 @@ class PointerCommand(
                 s_pointer = schema.get_by_id(pointer.ptrref.id, type=Pointer)
                 card = s_pointer.get_cardinality(schema)
 
-                if s_pointer.is_property(schema) and card.is_multi():
+                if s_pointer.is_property() and card.is_multi():
                     raise errors.SchemaDefinitionError(
                         f"default expression cannot refer to multi properties "
                         "of inserted object",
@@ -1818,7 +1847,7 @@ class PointerCommand(
                         hint="this is a temporary implementation restriction",
                     )
 
-                if not s_pointer.is_property(schema):
+                if not s_pointer.is_property():
                     raise errors.SchemaDefinitionError(
                         f"default expression cannot refer to links "
                         "of inserted object",
@@ -2162,6 +2191,8 @@ class AlterPointer(
             and not self.is_attribute_inherited('expr')
             and self.get_attribute_value('expr') is None
         ):
+            self.set_attribute_value('linkful', not self.is_property_command())
+
             old_expr = self.get_orig_attribute_value('expr')
             pointer = schema.get(self.classname, type=Pointer)
             if old_expr is None:
@@ -2537,7 +2568,7 @@ class SetPointerType(
                 action=self.get_friendly_description(schema=schema),
             )
 
-            if orig_target is not None and scls.is_property(schema):
+            if orig_target is not None and scls.is_property():
                 if cleanup_op := orig_target.as_type_delete_if_unused(schema):
                     parent_op = self.get_parent_op(context)
                     parent_op.add_caused(cleanup_op)
@@ -3280,3 +3311,15 @@ def get_or_create_intersection_pointer(
         )
 
     return schema, result
+
+
+@s_futures.register_handler('no_linkful_computed_splats')
+def toggle_no_linkful_computed_splats(
+    cmd: s_futures.FutureBehaviorCommand,
+    schema: s_schema.Schema,
+    context: sd.CommandContext,
+    on: bool,
+) -> tuple[s_schema.Schema, sd.Command]:
+    # Nothing to do because splats can't appear in functions
+    group = sd.CommandGroup()
+    return schema, group

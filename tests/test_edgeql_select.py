@@ -17,6 +17,7 @@
 #
 
 
+import json
 import os.path
 
 import edgedb
@@ -1752,14 +1753,15 @@ class TestEdgeQLSelect(tb.QueryTestCase):
             select Issue { * }
             filter .number = "1"
             ''',
-            tb.bag([
+            [
                 {
                     "number": "1",
                     "name": "Release EdgeDB",
                     "body": "Initial public release of EdgeDB.",
                     "time_estimate": 3000,
+                    "priority": None,
                 },
-            ]),
+            ],
         )
 
     async def test_edgeql_select_splat_02(self):
@@ -1890,7 +1892,6 @@ class TestEdgeQLSelect(tb.QueryTestCase):
                 "due_date": None,
                 "number": None,
                 "start_date": None,
-                "tags": None,
                 "time_estimate": None,
             },
             {
@@ -1900,7 +1901,6 @@ class TestEdgeQLSelect(tb.QueryTestCase):
                 "due_date": None,
                 "number": "1",
                 "start_date": str,
-                "tags": None,
                 "time_estimate": 3000,
             },
         ]
@@ -1992,6 +1992,38 @@ class TestEdgeQLSelect(tb.QueryTestCase):
                 {'x': {'a': 1, '@a': 2}}
             ]),
         )
+
+    async def test_edgeql_select_splat_07(self):
+        res = json.loads(await self.con.query_json(
+            r'''
+            select Issue {
+                **,
+            }
+            filter .number = "1"
+            '''
+        ))
+        # Make sure the explicit properties aren't included
+        self.assertNotIn('tags', res[0])
+        self.assertNotIn('related_to', res[0])
+        # num_watchers should be included, without the future!
+        self.assertIn('num_watchers', res[0])
+
+        await self.con.execute('''
+            create future no_linkful_computed_splats
+        ''')
+
+        res = json.loads(await self.con.query_json(
+            r'''
+            select Issue {
+                **,
+            }
+            filter .number = "1"
+            '''
+        ))
+        # With the future, none should exist
+        self.assertNotIn('tags', res[0])
+        self.assertNotIn('related_to', res[0])
+        self.assertNotIn('num_watchers', res[0])
 
     async def test_edgeql_select_id_01(self):
         # allow assigning id to a computed (#4781)

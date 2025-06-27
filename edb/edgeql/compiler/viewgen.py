@@ -47,6 +47,7 @@ from edb.ir import typeutils
 from edb.ir import utils as irutils
 import edb.ir.typeutils as irtypeutils
 
+from edb.schema import futures as s_futures
 from edb.schema import links as s_links
 from edb.schema import name as sn
 from edb.schema import objtypes as s_objtypes
@@ -771,9 +772,22 @@ def _expand_splat(
     if intersection is not None:
         path.append(intersection)
     for ptr in pointers.objects(ctx.env.schema):
-        if not isinstance(ptr, s_props.Property):
-            continue
         if ptr.get_secret(ctx.env.schema):
+            continue
+        splat_strat = ptr.get_splat_strategy(ctx.env.schema)
+        if (
+            splat_strat == qltypes.SplatStrategy.Explicit
+            or (
+                splat_strat == qltypes.SplatStrategy.Default
+                and (
+                    ptr.get_linkful(ctx.env.schema)
+                    if s_futures.future_enabled(
+                        ctx.env.schema, 'no_linkful_computed_splats'
+                    )
+                    else isinstance(ptr, s_links.Link)
+                )
+            )
+        ):
             continue
         sname = ptr.get_shortname(ctx.env.schema)
         # Skip any dunder properties; these are injected properties like
@@ -819,6 +833,11 @@ def _expand_splat(
     if depth > 1:
         for ptr in pointers.objects(ctx.env.schema):
             if not isinstance(ptr, s_links.Link):
+                continue
+            if ptr.get_secret(ctx.env.schema):
+                continue
+            splat_strat = ptr.get_splat_strategy(ctx.env.schema)
+            if splat_strat == qltypes.SplatStrategy.Explicit:
                 continue
             pn = ptr.get_shortname(ctx.env.schema)
             if (
@@ -981,7 +1000,7 @@ def _raise_on_missing(
             if pn.name in next(iter(rewrites.by_type.values())):
                 continue
 
-        if ptrcls.is_property(ctx.env.schema):
+        if ptrcls.is_property():
             # If the target is a sequence, there's no need
             # for an explicit value.
             ptrcls_target = ptrcls.get_target(ctx.env.schema)
@@ -1795,7 +1814,7 @@ def _normalize_view_ptr_expr(
                 ]
 
                 ercls: type[errors.EdgeDBError]
-                if ptrcls.is_property(ctx.env.schema):
+                if ptrcls.is_property():
                     ercls = errors.InvalidPropertyTargetError
                 else:
                     ercls = errors.InvalidLinkTargetError
