@@ -3951,9 +3951,9 @@ class CancelPointerCardinalityUpdate(MetaCommand):
     pass
 
 
-class PointerMetaCommand(
+class PointerMetaCommand[Pointer_T: s_pointers.Pointer](
     CompositeMetaCommand,
-    s_pointers.PointerCommand[s_pointers.Pointer_T],
+    s_pointers.PointerCommand[Pointer_T],
 ):
     def get_host(self, schema, context):
         if context:
