@@ -1219,6 +1219,19 @@ class PointerCommandOrFragment[Pointer_T: Pointer](
             self.set_attribute_value('linkful', True)
 
         if inf_target_ref is not None:
+            if inf_target_ref.has_intersection():
+                raise errors.UnsupportedFeatureError(
+                    (
+                        f'unsupported type intersection in schema '
+                        f'{inf_target_ref.get_name(schema).name}'
+                    ),
+                    hint=(
+                        f'Type intersections are currently '
+                        f'unsupported as valid link targets.'
+                    ),
+                    span=self.span,
+                )
+
             span = self.get_attribute_span('target')
             self.set_attribute_value(
                 'target',
@@ -3245,16 +3258,17 @@ def get_or_create_intersection_pointer(
     if len(components) == 1:
         return schema, components[0]
 
+    required = any(component.get_required(schema) for component in components)
     targets: Sequence[s_types.Type]
     targets = list(filter(None, [p.get_target(schema) for p in components]))
     targets = utils.simplify_intersection_types(schema, targets)
-    schema, target = utils.ensure_intersection_type(
+    schema, target, _ = utils.ensure_intersection_type(
         schema, targets, module=modname)
 
-    cardinality = qltypes.SchemaCardinality.One
+    cardinality = qltypes.SchemaCardinality.Many
     for component in components:
-        if component.get_cardinality(schema) is qltypes.SchemaCardinality.Many:
-            cardinality = qltypes.SchemaCardinality.Many
+        if component.get_cardinality(schema) is qltypes.SchemaCardinality.One:
+            cardinality = qltypes.SchemaCardinality.One
             break
 
     metacls = type(components[0])
@@ -3270,6 +3284,7 @@ def get_or_create_intersection_pointer(
         attrs={
             'intersection_of': so.ObjectSet.create(schema, components),
             'cardinality': cardinality,
+            'required': required,
         },
         transient=transient,
     )
