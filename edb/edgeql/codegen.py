@@ -567,7 +567,8 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                         qlast.Tuple,
                         qlast.NamedTuple,
                         qlast.TypeIntersection,
-                        qlast.Parameter,
+                        qlast.QueryParameter,
+                        qlast.FunctionParameter,
                     ),
                 ):
                     self.visit(e)
@@ -688,7 +689,10 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
                 )
             self.visit(node.compexpr)
 
-    def visit_Parameter(self, node: qlast.Parameter) -> None:
+    def visit_QueryParameter(self, node: qlast.QueryParameter) -> None:
+        self.write(param_to_str(node.name))
+
+    def visit_FunctionParameter(self, node: qlast.FunctionParameter) -> None:
         self.write(param_to_str(node.name))
 
     def visit_Placeholder(self, node: qlast.Placeholder) -> None:
@@ -2321,7 +2325,7 @@ class EdgeQLSourceGenerator(codegen.SourceGenerator):
             self.write(')')
         self._visit_DropObject(node, 'FUNCTION', after_name=after_name)
 
-    def visit_FuncParam(self, node: qlast.FuncParam) -> None:
+    def visit_FuncParamDecl(self, node: qlast.FuncParamDecl) -> None:
         kind = node.kind.to_edgeql()
         if kind:
             self._write_keywords(kind, '')

@@ -840,7 +840,17 @@ def __infer_const(
 
 @_infer_cardinality.register
 def __infer_param(
-    ir: irast.Parameter,
+    ir: irast.QueryParameter,
+    *,
+    scope_tree: irast.ScopeTreeNode,
+    ctx: inference_context.InfCtx,
+) -> qltypes.Cardinality:
+    return ONE if ir.required else AT_MOST_ONE
+
+
+@_infer_cardinality.register
+def __infer_function_param(
+    ir: irast.FunctionParameter,
     *,
     scope_tree: irast.ScopeTreeNode,
     ctx: inference_context.InfCtx,

@@ -6622,7 +6622,7 @@ def _make_json_caster(
 ) -> Callable[[str], str]:
     cast_expr = qlast.TypeCast(
         expr=qlast.TypeCast(
-            expr=qlast.Parameter(name="__replaceme__"),
+            expr=qlast.FunctionParameter(name="__replaceme__"),
             type=s_utils.typeref_to_ast(schema, schema.get('std::json')),
         ),
         type=s_utils.typeref_to_ast(schema, stype),
@@ -6777,7 +6777,13 @@ def _generate_sql_information_schema(
         JOIN edgedb_VER."_SchemaModule" sm ON sm.name = at.module_name
         LEFT JOIN pg_type pt ON pt.typname = at.id::text
         WHERE schema_name not in (
-            'cfg', 'sys', 'schema', 'std', 'std::net', 'std::net::http'
+            'cfg',
+            'sys',
+            'schema',
+            'std',
+            'std::net',
+            'std::net::http',
+            'std::net::perm'
         )
         '''
     )

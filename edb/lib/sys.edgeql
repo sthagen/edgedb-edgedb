@@ -452,3 +452,19 @@ CREATE PERMISSION sys::perm::data_modification;
 CREATE PERMISSION sys::perm::ddl;
 CREATE PERMISSION sys::perm::branch_config;
 CREATE PERMISSION sys::perm::sql_session_config;
+
+# Add permissions to std.
+
+# The std module is populated before sys permissions so we need to
+# add these restrictions here.
+ALTER FUNCTION std::sequence_reset(
+    seq: schema::ScalarType,
+    value: std::int64,
+) {
+    SET required_permissions := sys::perm::ddl;
+};
+ALTER FUNCTION std::sequence_reset(
+    seq: schema::ScalarType,
+) {
+    SET required_permissions := sys::perm::ddl;
+};

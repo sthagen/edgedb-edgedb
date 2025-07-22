@@ -2125,8 +2125,12 @@ def get_global_param_sets(
         None
     )
 
+    # This function is called to compile either a global expr or the global
+    # params for a function call. Both are compiled as QueryParameter.
+    assert ctx.env.options.func_params is None
+
     param_set = ensure_set(
-        irast.Parameter(
+        irast.QueryParameter(
             name=param.name,
             required=param.required and not bool(default),
             typeref=param.ir_type,
@@ -2140,7 +2144,7 @@ def get_global_param_sets(
         and glob.needs_present_arg(ctx.env.schema)
     ):
         present_set = ensure_set(
-            irast.Parameter(
+            irast.QueryParameter(
                 name=param.name + "present__",
                 required=True,
                 typeref=typegen.type_to_typeref(
@@ -2162,6 +2166,11 @@ def get_func_global_json_arg(*, ctx: context.ContextLevel) -> irast.Set:
     json_typeref = typegen.type_to_typeref(json_type, env=ctx.env)
     name = '__edb_json_globals__'
 
+    is_func_param = ctx.env.options.func_params is not None
+    parameter_type = (
+        irast.FunctionParameter if is_func_param else irast.QueryParameter
+    )
+
     # If this is because we have json params, not because we're in a
     # function, we need to register it.
     if ctx.env.options.json_parameters:
@@ -2177,7 +2186,7 @@ def get_func_global_json_arg(*, ctx: context.ContextLevel) -> irast.Set:
         )
 
     return ensure_set(
-        irast.Parameter(
+        parameter_type(
             name=name,
             required=True,
             typeref=json_typeref,
