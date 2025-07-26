@@ -3551,31 +3551,32 @@ class TestGraphQLFunctional(tb.GraphQLTestCase):
                 variables={'name': 11})
 
     def test_graphql_functional_variables_34(self):
+        q = r"""
+            query($val: Boolean!, $min_age: Int64!) {
+                User(filter: {age: {gt: $min_age}}) {
+                    name @include(if: $val),
+                    age
+                }
+            }
+        """
+
         # Test multiple requests to make sure that caching works correctly
         for _ in range(2):
+            self.assert_graphql_query_result(
+                q,
+                {'User': [{'age': 27}]},
+                variables={'val': False, 'min_age': 26}
+            )
+
             for _ in range(2):
                 self.assert_graphql_query_result(
-                    r"""
-                        query($val: Boolean!, $min_age: Int64!) {
-                            User(filter: {age: {gt: $min_age}}) {
-                                name @include(if: $val),
-                                age
-                            }
-                        }
-                    """,
+                    q,
                     {'User': [{'age': 27, 'name': 'Alice'}]},
                     variables={'val': True, 'min_age': 26}
                 )
 
             self.assert_graphql_query_result(
-                r"""
-                    query($val: Boolean!, $min_age: Int64!) {
-                        User(filter: {age: {gt: $min_age}}) {
-                            name @include(if: $val),
-                            age
-                        }
-                    }
-                """,
+                q,
                 {'User': [{'age': 27}]},
                 variables={'val': False, 'min_age': 26}
             )
@@ -3705,22 +3706,22 @@ class TestGraphQLFunctional(tb.GraphQLTestCase):
     def test_graphql_functional_variables_41(self):
         with self.assertRaisesRegex(
                 edgedb.QueryError,
-                r"Variables starting with '_edb_arg__' are prohibited"):
+                r"Variables starting with '__edb_arg_' are prohibited"):
             self.graphql_query(r"""
-                query($_edb_arg__1: Int!) {
-                    User(limit: $_edb_arg__1) {
+                query($__edb_arg_1: Int!) {
+                    User(limit: $__edb_arg_1) {
                         id,
                     }
                 }
-            """, variables={'_edb_arg__1': 1})
+            """, variables={'__edb_arg_1': 1})
 
     def test_graphql_functional_variables_42(self):
         with self.assertRaisesRegex(
                 edgedb.QueryError,
-                r"Variables starting with '_edb_arg__' are prohibited"):
+                r"Variables starting with '__edb_arg_' are prohibited"):
             self.graphql_query(r"""
-                query($_edb_arg__1: Int = 1) {
-                    User(limit: $_edb_arg__1) {
+                query($__edb_arg_1: Int = 1) {
+                    User(limit: $__edb_arg_1) {
                         id,
                     }
                 }
