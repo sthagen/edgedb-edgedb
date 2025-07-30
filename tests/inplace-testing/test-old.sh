@@ -21,12 +21,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 
-DIR=$(realpath "$1")
+DIR="$1"
+RDIR=$(realpath "$1")
 SERVER_INSTALL=$(realpath "$2")
 shift 2
 
+# Force bootstrapping of the server
+TMPDIR=$(mktemp -d)
+edb server --bootstrap-only --data-dir $TMPDIR/bootstrap || (rm -rf $TMPDIR && false)
+
 # Setup the test database
-(cd / && GEL_SERVER_SECURITY=insecure_dev_mode $SERVER_INSTALL/bin/python3  -m edb.tools --no-devmode inittestdb --tests-dir $SERVER_INSTALL/share/tests -k test_dump --data-dir "$DIR")
+(cd / && GEL_SERVER_SECURITY=insecure_dev_mode $SERVER_INSTALL/bin/python3  -m edb.tools --no-devmode inittestdb --tests-dir $SERVER_INSTALL/share/tests -k test_dump --data-dir "$RDIR")
 
 
 if [ "$SAVE_TARBALLS" = 1 ]; then
@@ -34,8 +39,8 @@ if [ "$SAVE_TARBALLS" = 1 ]; then
 fi
 
 
-PORT=12346
-GEL_SERVER_SECURITY=insecure_dev_mode $SERVER_INSTALL/bin/gel-server --testmode -D "$DIR" -P $PORT &
+PORT=$(( $RANDOM + 2000 ))
+GEL_SERVER_SECURITY=insecure_dev_mode $SERVER_INSTALL/bin/gel-server --testmode -D "$RDIR" -P $PORT &
 SPID=$!
 stop_server() {
     kill $SPID
