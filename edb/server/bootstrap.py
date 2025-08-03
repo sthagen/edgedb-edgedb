@@ -1293,6 +1293,9 @@ class StdlibBits(NamedTuple):
     #: SQL text of the procedure to create all `std` scalars for inplace
     #: upgrades
     inplace_upgrade_scalar_text: str
+    #: SQL text of the procedure to recreate all extension packages
+    #: for inplace upgrades.
+    inplace_upgrade_extension_packages_text: str
     #: Descriptors of all the needed trampolines
     trampolines: list[trampoline.Trampoline]
     #: A set of ids of all types in std.
@@ -1346,7 +1349,10 @@ def _make_stdlib(
     specials = []
 
     def _collect_special(cmd):
-        if isinstance(cmd, dbops.CreateEnum):
+        if isinstance(
+            cmd,
+            (dbops.CreateEnum, delta_cmds.CreateExtensionPackage),
+        ):
             specials.append(cmd)
         elif isinstance(cmd, dbops.CommandGroup):
             for sub in cmd.commands:
@@ -1462,6 +1468,7 @@ def _make_stdlib(
     # be able to *add* enum fields. (Which will involve some
     # pl/pgsql??)
     scalar_block = dbops.PLTopBlock()
+    extension_package_block = dbops.PLTopBlock()
     for cmd in specials:
         if isinstance(cmd, dbops.CreateEnum):
             ncmd = dbops.CreateEnum(
@@ -1469,6 +1476,8 @@ def _make_stdlib(
                 neg_conditions=[dbops.EnumExists(cmd.name)],
             )
             ncmd.generate(scalar_block)
+        elif isinstance(cmd, delta_cmds.CreateExtensionPackage):
+            cmd.generate(extension_package_block)
 
     # Got it!
     return StdlibBits(
@@ -1477,6 +1486,8 @@ def _make_stdlib(
         global_schema=schema.get_global_schema(),
         sqltext=sqltext,
         inplace_upgrade_scalar_text=scalar_block.to_string(),
+        inplace_upgrade_extension_packages_text=(
+            extension_package_block.to_string()),
         trampolines=trampolines,
         types=types,
         classlayout=reflection.class_layout,
@@ -1980,6 +1991,11 @@ async def _init_stdlib(
             ctx,
             f'trampoline_pivot_query',
             trampoline_text,
+        )
+        await _store_static_text_cache(
+            ctx,
+            f'global_schema_update_query',
+            stdlib.inplace_upgrade_extension_packages_text,
         )
     else:
         await _execute_block(conn, block)
@@ -2603,7 +2619,10 @@ async def _bootstrap_edgedb_super_roles(ctx: BootstrapContext) -> uuid.UUID:
 async def _bootstrap(
     ctx: BootstrapContext,
     no_template: bool=False,
-) -> edbcompiler.Compiler:
+) -> tuple[
+    StdlibBits,
+    edbcompiler.Compiler
+]:
     args = ctx.args
     cluster = ctx.cluster
     backend_params = cluster.get_runtime_params()
@@ -2822,7 +2841,7 @@ async def _bootstrap(
             args.default_database_user or edbdef.EDGEDB_SUPERUSER,
         )
 
-    return compiler
+    return stdlib, compiler
 
 
 async def ensure_bootstrapped(
@@ -2844,7 +2863,7 @@ async def ensure_bootstrapped(
         mode = await _get_cluster_mode(ctx)
         ctx = dataclasses.replace(ctx, mode=mode)
         if mode == ClusterMode.pristine:
-            compiler = await _bootstrap(ctx)
+            _, compiler = await _bootstrap(ctx)
             return True, compiler
         else:
             compiler = await _start(ctx)

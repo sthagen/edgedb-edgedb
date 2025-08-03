@@ -144,7 +144,7 @@ class CompileContext:
     inline_objectids: bool = True
     schema_object_ids: Optional[
         Mapping[tuple[s_name.Name, Optional[str]], uuid.UUID]] = None
-    source: Optional[edgeql.Source] = None
+    source: Optional[edgeql.Source | graphql.Source | pg_parser.Source] = None
     backend_runtime_params: pg_params.BackendRuntimeParams = dataclasses.field(
         default_factory=pg_params.get_default_runtime_params
     )
@@ -683,14 +683,17 @@ class Compiler:
 
         match request.input_language:
             case enums.InputLanguage.EDGEQL:
+                assert isinstance(request.source, edgeql.Source)
                 unit_group = compile(ctx=ctx, source=request.source)
             case enums.InputLanguage.GRAPHQL:
+                assert isinstance(request.source, graphql.Source)
                 unit_group = compile_graphql(
                     ctx=ctx,
                     source=request.source,
                     variables=request.key_params,
                 )
             case enums.InputLanguage.SQL:
+                assert isinstance(request.source, pg_parser.Source)
                 unit_group = compile_sql_as_unit_group(
                     ctx=ctx, source=request.source)
             case _:
@@ -775,6 +778,7 @@ class Compiler:
         ):
             # This is a special case when COMMIT MIGRATION fails, the compiler
             # doesn't have the right transaction state, so we just roll back.
+            assert isinstance(request.source, edgeql.Source)
             return self._try_compile_rollback(request.source)[0], state
         else:
             state.sync_tx(txid)
@@ -797,14 +801,17 @@ class Compiler:
 
         match request.input_language:
             case enums.InputLanguage.EDGEQL:
+                assert isinstance(request.source, edgeql.Source)
                 unit_group = compile(ctx=ctx, source=request.source)
             case enums.InputLanguage.GRAPHQL:
+                assert isinstance(request.source, graphql.Source)
                 unit_group = compile_graphql(
                     ctx=ctx,
                     source=request.source,
                     variables=request.key_params,
                 )
             case enums.InputLanguage.SQL:
+                assert isinstance(request.source, pg_parser.Source)
                 unit_group = compile_sql_as_unit_group(
                     ctx=ctx, source=request.source)
             case _:
@@ -2684,7 +2691,7 @@ def _compile_dispatch_ql(
 def compile_graphql(
     *,
     ctx: CompileContext,
-    source: edgeql.Source,
+    source: graphql.Source,
     variables: Optional[Mapping[str, object]],
 ) -> dbstate.QueryUnitGroup:
     current_tx = ctx.state.current_tx()
@@ -2696,16 +2703,17 @@ def compile_graphql(
         current_tx.get_database_config(),
         current_tx.get_system_config(),
         source.text(),
-        tokens=None,
-        substitutions=None,
+        tokens=source.tokens(),
+        substitutions=source.substitutions(),
+        extracted_variables=source.variables(),
         variables=variables,
         native_input=True,
     )
-    source = edgeql.Source.from_string(
+    eql_source = edgeql.Source.from_string(
         edgeql.generate_source(gql_op.edgeql_ast, pretty=True),
     )
 
-    qug = compile(ctx=ctx, source=source)
+    qug = compile(ctx=ctx, source=eql_source)
     if gql_op.cache_deps_vars:
         qug.graphql_key_variables = sorted(gql_op.cache_deps_vars)
 
