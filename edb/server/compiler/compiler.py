@@ -1781,6 +1781,8 @@ def _compile_ql_administer(
         res = ddl.administer_remove_pointless_triggers(ctx, ql)
     elif ql.expr.func == 'concurrent_index_build':
         res = ddl.administer_concurrent_index_build(ctx, ql)
+    elif ql.expr.func == 'fixup_backend_upgrade':
+        res = ddl.administer_fixup_backend_upgrade(ctx, ql)
     else:
         raise errors.QueryError(
             'Unknown ADMINISTER function',
@@ -3811,6 +3813,9 @@ def _extract_roles(
             superuser=role.get_superuser(global_schema),
             password=role.get_password(global_schema),
             branches=list(sorted(role.get_branches(global_schema))),
+            apply_access_policies_pg_default=(
+                role.get_apply_access_policies_pg_default(global_schema)
+            ),
         )
 
     # To populate all_permissions, combine the permissions of each role

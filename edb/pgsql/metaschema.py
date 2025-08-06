@@ -27,6 +27,7 @@ from typing import (
     Iterable,
     Sequence,
     cast,
+    Any
 )
 
 import functools
@@ -3016,6 +3017,11 @@ class DescribeRolesAsDDLFunction(trampoline.VersionedFunction):
         super_col = ptr_col_name(schema, role_obj, 'superuser')
         name_col = ptr_col_name(schema, role_obj, 'name')
         pass_col = ptr_col_name(schema, role_obj, 'password')
+        pg_pol_col = ptr_col_name(
+            schema,
+            role_obj,
+            'apply_access_policies_pg_default',
+        )
         qi_superuser = qlquote.quote_ident(defines.EDGEDB_SUPERUSER)
         text = f"""
             WITH RECURSIVE
@@ -3068,6 +3074,16 @@ class DescribeRolesAsDDLFunction(trampoline.VersionedFunction):
                                     concat(
                                         'SET password_hash := ',
                                         quote_literal(role.{qi(pass_col)}),
+                                        '; '
+                                    )
+                                ELSE NULL END
+                            ),
+                            (CASE
+                                WHEN role.{qi(pg_pol_col)} IS NOT NULL THEN
+                                    concat(
+                                        'SET apply_access_policies_pg_default ',
+                                        ':= ',
+                                        role.{qi(pg_pol_col)}::text,
                                         '; '
                                     )
                                 ELSE NULL END
@@ -3146,6 +3162,17 @@ class DescribeRolesAsDDLFunction(trampoline.VersionedFunction):
                                         concat(
                                             'SET password_hash := ',
                                             quote_literal(role.{qi(pass_col)}),
+                                            '; '
+                                        )
+                                    ELSE NULL END
+                                ),
+                                (CASE
+                                    WHEN role.{qi(pg_pol_col)} IS NOT NULL THEN
+                                        concat(
+                                            'SET ',
+                                            'apply_access_policies_pg_default ',
+                                            ':= ',
+                                            role.{qi(pg_pol_col)}::text,
                                             '; '
                                         )
                                     ELSE NULL END
@@ -6120,6 +6147,9 @@ def _generate_role_views(schema: s_schema.Schema) -> list[dbops.View]:
         'builtin': "((d.description)->>'builtin')::bool",
         'internal': 'False',
         'password': "(d.description)->>'password_hash'",
+        'apply_access_policies_pg_default': (
+            "((d.description)->>'apply_access_policies_pg_default')::bool"
+        ),
     }
 
     view_query = f'''
@@ -6348,6 +6378,9 @@ def _generate_single_role_views(schema: s_schema.Schema) -> list[dbops.View]:
         'builtin': 'True',
         'internal': 'False',
         'password': "json->>'password_hash'",
+        'apply_access_policies_pg_default': (
+            "(json->>'pg_apply_access_policies_default')::bool"
+        ),
     }
 
     view_query = f'''
@@ -8882,6 +8915,40 @@ def get_config_type_views(
     ])
 
     return commands
+
+
+def generate_drop_views(
+    group: Sequence[dbops.Command | trampoline.Trampoline],
+    preblock: dbops.PLBlock,
+) -> None:
+    for cv in reversed(list(group)):
+        dv: Any
+        if isinstance(cv, dbops.CreateView):
+            # We try deleting both a MATERIALIZED and not materialized
+            # version, since that allows us to switch between them
+            # more easily.
+            dv = dbops.CommandGroup()
+            dv.add_command(dbops.DropView(
+                cv.view.name,
+                conditions=[dbops.ViewExists(cv.view.name)],
+            ))
+            dv.add_command(dbops.DropView(
+                cv.view.name,
+                conditions=[dbops.ViewExists(cv.view.name, materialized=True)],
+                materialized=True,
+            ))
+        elif isinstance(cv, dbops.CreateFunction):
+            dv = dbops.DropFunction(
+                cv.function.name,
+                args=cv.function.args or (),
+                has_variadic=bool(cv.function.has_variadic),
+                if_exists=True,
+            )
+        elif isinstance(cv, trampoline.Trampoline):
+            dv = cv.drop()
+        else:
+            raise AssertionError(f'unsupported support view command {cv}')
+        dv.generate(preblock)
 
 
 def get_config_views(
