@@ -39,7 +39,6 @@ from edb.ir import utils as irutils
 from edb.ir import typeutils as irtyputils
 
 from edb.schema import constraints as s_constr
-from edb.schema import futures as s_futures
 from edb.schema import modules as s_mod
 from edb.schema import name as s_name
 from edb.schema import objects as s_obj
@@ -172,22 +171,7 @@ def init_context(
     ctx.implicit_limit = options.implicit_limit
     ctx.expr_exposed = context.Exposure.EXPOSED
 
-    # Resolve simple_scoping/warn_old_scoping configs.
-    # options specifies the value in the configuration system;
-    # if that is None, we rely on the presence of the future.
-    simple_scoping = options.simple_scoping
-    if simple_scoping is None:
-        simple_scoping = s_futures.future_enabled(
-            ctx.env.schema, 'simple_scoping'
-        )
-    warn_old_scoping = options.warn_old_scoping
-    if warn_old_scoping is None:
-        warn_old_scoping = s_futures.future_enabled(
-            ctx.env.schema, 'warn_old_scoping'
-        )
-
-    ctx.no_factoring = simple_scoping
-    ctx.warn_factoring = warn_old_scoping
+    ctx.no_factoring = True
 
     return ctx
 
@@ -997,7 +981,6 @@ def _declare_view_from_schema(
     # subcontext to compile in, but it should avoid depending on the
     # context, because of the cache.
     with ctx.detached() as subctx:
-        subctx.schema_factoring()
         subctx.current_schema_views += (viewcls,)
         subctx.expr_exposed = context.Exposure.UNEXPOSED
         view_expr: s_expr.Expression | None = viewcls.get_expr(ctx.env.schema)

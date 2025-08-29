@@ -44,7 +44,6 @@ from edb import errors
 from edb.common import ordered
 from edb.common import span
 from edb.common import term
-from edb.common.typeutils import not_none
 
 from . import pathid
 from . import ast as irast
@@ -79,9 +78,6 @@ class ScopeTreeNode:
 
     fenced: bool
     """Whether the subtree represents a SET OF argument."""
-
-    warn: bool
-    """Whether to warn when paths are factored from beneath two warns."""
 
     is_group: bool
     """Whether the node reprents a GROUP binding (and so *is* multi...)."""
@@ -123,7 +119,6 @@ class ScopeTreeNode:
         self.fenced = fenced
         self.unnest_fence = False
         self.factoring_fence = False
-        self.warn = False
         self.factoring_allowlist = set()
         self.optional = optional
         self.children = []
@@ -192,8 +187,6 @@ class ScopeTreeNode:
             parts.append('no-factor')
         if self.is_group:
             parts.append('group')
-        if self.warn:
-            parts.append('warn')
         return ' '.join(parts)
 
     @property
@@ -570,7 +563,6 @@ class ScopeTreeNode:
                     if desc_optional:
                         descendant.mark_as_optional()
 
-                moved = False
                 for factorable in factorable_nodes:
                     (
                         existing,
@@ -592,39 +584,6 @@ class ScopeTreeNode:
                     )
                     if existing.is_optional_upto(factor_point):
                         existing.mark_as_optional()
-
-                    current_warn = (
-                        current.is_warn_upto(factor_point)
-                        or (not moved and self.is_warn_upto(factor_point))
-                    )
-                    existing_warn = existing.is_warn_upto(factor_point)
-                    if current_warn and existing_warn:
-                        # Allow factoring single pointers when the src
-                        # is visible.
-                        #
-                        # TODO: If we want this to work on computeds,
-                        # we need to we need to register the problem
-                        # somewhere and check their cardinality at the
-                        # end.
-                        if (
-                            (src := path_id.src_path())
-                            and self.is_visible(src)
-                            and (
-                                dir := not_none(path_id.rptr()).dir_cardinality(
-                                    not_none(path_id.rptr_dir()))
-                            )
-                            and dir.is_single()
-                        ):
-                            pass
-                        else:
-                            ex = errors.DeprecatedScopingError(
-                                f'attempting to factor out '
-                                f'{path_id.pformat()!r} here',
-                                span=span,
-                            )
-                            ctx.log_warning(ex)
-                    if existing_warn:
-                        existing.warn = True
 
                     # Strip the namespaces of everything in the lifted nodes
                     # based on what they have been lifted through.
@@ -649,7 +608,6 @@ class ScopeTreeNode:
                     )
 
                     current = existing
-                    moved = True
 
                     # HACK: If we are being called from fuse_subtree,
                     # skip all but the first. This is because we don't
@@ -990,14 +948,6 @@ class ScopeTreeNode:
         node: Optional[ScopeTreeNode] = self
         while node and node is not ancestor:
             if node.optional:
-                return True
-            node = node.parent
-        return False
-
-    def is_warn_upto(self, ancestor: Optional[ScopeTreeNode]) -> bool:
-        node: Optional[ScopeTreeNode] = self
-        while node and node is not ancestor:
-            if node.warn:
                 return True
             node = node.parent
         return False
