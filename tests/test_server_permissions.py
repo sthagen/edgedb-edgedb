@@ -966,11 +966,16 @@ class TestServerPermissions(tb.EdgeQLTestCase, server_tb.CLITestCaseMixin):
                     CREATE EMPTY BRANCH bar
                 """)
 
+            await conn.execute("""
+                CREATE PERMISSION data_export;
+            """)
+
         finally:
             await conn.aclose()
             await self.con.query('''
                 DROP TYPE Widget;
                 DROP ROLE foo;
+                DROP PERMISSION data_export;
             ''')
 
     async def test_server_permissions_admin_01(self):
